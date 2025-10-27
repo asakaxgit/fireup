@@ -1,0 +1,35 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite
+
+# Docker
+.docker/
+
+# Backup files
+*.leveldb
+*.backup
+
+# Generated files
+schema.sql
+*.ddl
