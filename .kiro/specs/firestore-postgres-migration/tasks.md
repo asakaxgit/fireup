@@ -169,7 +169,7 @@
   - Create audit logs for data access and modification operations
   - _Requirements: 5.1, 5.2, 5.5_
 
-- [ ]* 8.4 Write integration tests for complete workflow
+- [-] 8.4 Write integration tests for complete workflow
   - Test end-to-end backup import workflows
   - Test PostgreSQL client tool compatibility
   - Test Docker container integration
