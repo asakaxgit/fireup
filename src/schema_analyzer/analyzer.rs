@@ -30,7 +30,7 @@ impl DocumentStructureAnalyzer {
     #[instrument(skip(self, documents))]
     pub async fn analyze_documents(&self, documents: &[FirestoreDocument]) -> FireupResult<SchemaAnalysis> {
         let tracker = get_monitoring_system().start_operation("schema_analysis").await;
-        tracker.add_metadata("document_count", documents.len().to_string()).await.ok();
+        tracker.add_metadata("document_count", &documents.len().to_string()).await.ok();
         
         info!("Starting document structure analysis for {} documents", documents.len());
         

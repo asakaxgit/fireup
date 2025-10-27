@@ -93,7 +93,7 @@ impl PostgreSQLImporter {
                             get_monitoring_system().log_audit_entry(
                                 AuditOperationType::SystemConfiguration,
                                 "database_connection",
-                                format!("{}:{}", config.host, config.port),
+                                &format!("{}:{}", config.host, config.port),
                                 "connection_pool_initialized",
                                 AuditResult::Success,
                                 details,
@@ -120,14 +120,14 @@ impl PostgreSQLImporter {
                                 get_monitoring_system().log_audit_entry(
                                     AuditOperationType::SystemConfiguration,
                                     "database_connection",
-                                    format!("{}:{}", config.host, config.port),
+                                    &format!("{}:{}", config.host, config.port),
                                     "connection_pool_failed",
                                     AuditResult::Failure(e.to_string()),
                                     details,
                                     None,
                                 ).await.ok();
                                 
-                                tracker.complete_failure(&error).await.ok();
+                                tracker.complete_failure(&error.to_string()).await.ok();
                                 return Err(error);
                             }
                         }
@@ -526,7 +526,7 @@ impl PostgreSQLImporter {
     #[instrument(skip(self, ddl_statements))]
     pub async fn create_schema(&self, ddl_statements: &[String]) -> Result<ImportResult, FireupError> {
         let tracker = get_monitoring_system().start_operation("schema_creation").await;
-        tracker.add_metadata("ddl_statements_count", ddl_statements.len().to_string()).await.ok();
+        tracker.add_metadata("ddl_statements_count", &ddl_statements.len().to_string()).await.ok();
         
         info!("Starting schema creation with {} DDL statements", ddl_statements.len());
         
@@ -562,7 +562,7 @@ impl PostgreSQLImporter {
                     get_monitoring_system().log_audit_entry(
                         AuditOperationType::SchemaChange,
                         "database_schema",
-                        format!("statement_{}", index + 1),
+                        &format!("statement_{}", index + 1),
                         "ddl_executed",
                         AuditResult::Success,
                         details,
@@ -622,8 +622,8 @@ impl PostgreSQLImporter {
     ) -> Result<ImportResult, FireupError> {
         let tracker = get_monitoring_system().start_operation("data_import").await;
         tracker.add_metadata("table_name", table_name).await.ok();
-        tracker.add_metadata("record_count", data.len().to_string()).await.ok();
-        tracker.add_metadata("column_count", columns.len().to_string()).await.ok();
+        tracker.add_metadata("record_count", &data.len().to_string()).await.ok();
+        tracker.add_metadata("column_count", &columns.len().to_string()).await.ok();
         
         info!("Starting data import for table '{}' with {} records", table_name, data.len());
         
