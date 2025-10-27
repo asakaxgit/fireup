@@ -2,6 +2,9 @@
 pub mod parser;
 pub mod validator;
 
+#[cfg(test)]
+mod tests;
+
 pub use parser::{
     LevelDBReader, FirestoreDocumentParser, ParseResult, BackupMetadata,
     RecordType, RecordHeader, LogBlock, LogRecord, LevelDBParser
