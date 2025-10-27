@@ -49,6 +49,15 @@ pub struct PostgreSQLImporter {
     config: ConnectionConfig,
 }
 
+impl std::fmt::Debug for PostgreSQLImporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PostgreSQLImporter")
+            .field("config", &self.config)
+            .field("pool_status", &format!("size: {}, available: {}", self.pool.status().size, self.pool.status().available))
+            .finish()
+    }
+}
+
 impl PostgreSQLImporter {
     /// Create a new PostgreSQL importer with connection pooling
     #[instrument(skip(config))]

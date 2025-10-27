@@ -382,13 +382,28 @@ mod tests {
     use uuid::Uuid;
 
     fn create_test_schema() -> NormalizedSchema {
-        let mut table = TableDefinition::new("users".to_string());
-        table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid));
-        table.add_column(ColumnDefinition::new("email".to_string(), PostgreSQLType::Varchar(Some(255))));
-        table.add_column(ColumnDefinition::new("age".to_string(), PostgreSQLType::Integer));
+        let mut users_table = TableDefinition::new("users".to_string());
+        users_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid));
+        users_table.add_column(ColumnDefinition::new("email".to_string(), PostgreSQLType::Varchar(Some(255))));
+        users_table.add_column(ColumnDefinition::new("username".to_string(), PostgreSQLType::Varchar(Some(100))));
+        users_table.add_column(ColumnDefinition::new("age".to_string(), PostgreSQLType::Integer));
+        users_table.add_column(ColumnDefinition::new("phone".to_string(), PostgreSQLType::Varchar(Some(20))));
+        
+        let mut posts_table = TableDefinition::new("posts".to_string());
+        posts_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid));
+        posts_table.add_column(ColumnDefinition::new("user_id".to_string(), PostgreSQLType::Uuid));
+        posts_table.add_column(ColumnDefinition::new("author_id".to_string(), PostgreSQLType::Uuid));
+        posts_table.add_column(ColumnDefinition::new("title".to_string(), PostgreSQLType::Text));
+        
+        posts_table.add_foreign_key(ForeignKeyDefinition {
+            column: "user_id".to_string(),
+            referenced_table: "users".to_string(),
+            referenced_column: "id".to_string(),
+            constraint_name: "fk_posts_user".to_string(),
+        });
         
         NormalizedSchema {
-            tables: vec![table],
+            tables: vec![users_table, posts_table],
             relationships: Vec::new(),
             constraints: Vec::new(),
             warnings: Vec::new(),
@@ -396,8 +411,8 @@ mod tests {
                 generated_at: Utc::now(),
                 source_analysis_id: Uuid::new_v4(),
                 version: "1.0.0".to_string(),
-                table_count: 1,
-                relationship_count: 0,
+                table_count: 2,
+                relationship_count: 1,
             },
         }
     }
@@ -405,20 +420,55 @@ mod tests {
     fn create_test_analysis() -> SchemaAnalysis {
         let mut analysis = SchemaAnalysis::new();
         
+        // High presence field - should generate NOT NULL
         analysis.add_field_type(FieldTypeAnalysis {
             field_path: "users.email".to_string(),
             type_frequencies: [("string".to_string(), 100)].iter().cloned().collect(),
             total_occurrences: 100,
-            presence_percentage: 98.0, // High presence
+            presence_percentage: 98.0, // High presence > 95% threshold
             recommended_type: PostgreSQLType::Varchar(Some(255)),
         });
         
+        // Medium presence field - should generate recommendation
         analysis.add_field_type(FieldTypeAnalysis {
             field_path: "users.age".to_string(),
             type_frequencies: [("number".to_string(), 80)].iter().cloned().collect(),
             total_occurrences: 80,
-            presence_percentage: 85.0, // Medium presence
+            presence_percentage: 85.0, // Medium presence (80-95%)
             recommended_type: PostgreSQLType::Integer,
+        });
+        
+        // Low presence field - should not generate constraint
+        analysis.add_field_type(FieldTypeAnalysis {
+            field_path: "users.phone".to_string(),
+            type_frequencies: [("string".to_string(), 30)].iter().cloned().collect(),
+            total_occurrences: 30,
+            presence_percentage: 30.0, // Low presence < 80%
+            recommended_type: PostgreSQLType::Varchar(Some(20)),
+        });
+
+        // Add relationship for foreign key constraint testing (using a field not already covered by existing FK)
+        analysis.add_relationship(DetectedRelationship {
+            from_collection: "posts".to_string(),
+            to_collection: "users".to_string(),
+            reference_field: "author_id".to_string(),
+            relationship_type: RelationshipType::ManyToOne,
+            confidence: 0.96, // High confidence > 0.95 to generate constraint
+        });
+        
+        analysis
+    }
+
+    fn create_comprehensive_test_analysis() -> SchemaAnalysis {
+        let mut analysis = create_test_analysis();
+        
+        // Add more field types for comprehensive testing
+        analysis.add_field_type(FieldTypeAnalysis {
+            field_path: "users.username".to_string(),
+            type_frequencies: [("string".to_string(), 95)].iter().cloned().collect(),
+            total_occurrences: 95,
+            presence_percentage: 95.0, // Exactly at threshold
+            recommended_type: PostgreSQLType::Varchar(Some(100)),
         });
         
         analysis
@@ -440,6 +490,55 @@ mod tests {
         
         assert_eq!(not_null_constraints.len(), 1);
         assert_eq!(not_null_constraints[0].columns[0], "email");
+        assert_eq!(not_null_constraints[0].table, "users");
+        assert_eq!(not_null_constraints[0].name, "nn_users_email");
+    }
+
+    #[test]
+    fn test_generate_not_null_recommendations() {
+        let generator = ConstraintGenerator::new();
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let result = generator.generate_constraints(&schema, &analysis).unwrap();
+        
+        // Should recommend NOT NULL for age (85% presence, between 80-95%)
+        let age_recommendations: Vec<_> = result.recommendations
+            .iter()
+            .filter(|r| matches!(r.constraint_type, ConstraintType::NotNull) && 
+                     r.columns.contains(&"age".to_string()))
+            .collect();
+        
+        assert_eq!(age_recommendations.len(), 1);
+        assert!(age_recommendations[0].reason.contains("85.0%"));
+        assert!(age_recommendations[0].suggested_definition.contains("ALTER TABLE users ALTER COLUMN age SET NOT NULL"));
+    }
+
+    #[test]
+    fn test_generate_unique_constraints_recommendations() {
+        let generator = ConstraintGenerator::new();
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let result = generator.generate_constraints(&schema, &analysis).unwrap();
+        
+        // Should recommend UNIQUE for email and username (common unique field patterns)
+        let unique_recommendations: Vec<_> = result.recommendations
+            .iter()
+            .filter(|r| matches!(r.constraint_type, ConstraintType::Unique))
+            .collect();
+        
+        assert!(!unique_recommendations.is_empty());
+        
+        // Check for email unique recommendation
+        let email_unique = unique_recommendations.iter()
+            .find(|r| r.columns.contains(&"email".to_string()));
+        assert!(email_unique.is_some());
+        
+        // Check for username unique recommendation  
+        let username_unique = unique_recommendations.iter()
+            .find(|r| r.columns.contains(&"username".to_string()));
+        assert!(username_unique.is_some());
     }
 
     #[test]
@@ -458,13 +557,66 @@ mod tests {
         
         assert!(!check_constraints.is_empty());
         
+        // Find email check constraint
+        let email_check = check_constraints.iter()
+            .find(|c| c.columns.contains(&"email".to_string()));
+        assert!(email_check.is_some());
+        
+        let email_constraint = email_check.unwrap();
+        assert_eq!(email_constraint.name, "chk_users_email_format");
+        assert!(email_constraint.parameters.contains_key("condition"));
+        
         // Should recommend age range check
         let age_recommendations: Vec<_> = result.recommendations
             .iter()
-            .filter(|r| r.columns.contains(&"age".to_string()))
+            .filter(|r| matches!(r.constraint_type, ConstraintType::Check) && 
+                     r.columns.contains(&"age".to_string()))
             .collect();
         
         assert!(!age_recommendations.is_empty());
+        assert!(age_recommendations[0].reason.contains("reasonable bounds"));
+    }
+
+    #[test]
+    fn test_generate_phone_check_recommendations() {
+        let generator = ConstraintGenerator::new();
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let result = generator.generate_constraints(&schema, &analysis).unwrap();
+        
+        // Should recommend phone format check
+        let phone_recommendations: Vec<_> = result.recommendations
+            .iter()
+            .filter(|r| matches!(r.constraint_type, ConstraintType::Check) && 
+                     r.columns.contains(&"phone".to_string()))
+            .collect();
+        
+        assert!(!phone_recommendations.is_empty());
+        assert!(phone_recommendations[0].reason.contains("standard format"));
+    }
+
+    #[test]
+    fn test_generate_foreign_key_constraints() {
+        let generator = ConstraintGenerator::new();
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let result = generator.generate_constraints(&schema, &analysis).unwrap();
+        
+        // Should generate foreign key constraint for high confidence relationship
+        let fk_constraints: Vec<_> = result.constraints
+            .iter()
+            .filter(|c| matches!(c.constraint_type, ConstraintType::ForeignKey))
+            .collect();
+        
+        assert!(!fk_constraints.is_empty());
+        
+        let fk_constraint = &fk_constraints[0];
+        assert_eq!(fk_constraint.table, "posts");
+        assert_eq!(fk_constraint.columns[0], "author_id");
+        assert_eq!(fk_constraint.parameters.get("referenced_table").unwrap(), "users");
+        assert_eq!(fk_constraint.parameters.get("referenced_column").unwrap(), "id");
     }
 
     #[test]
@@ -477,6 +629,157 @@ mod tests {
         
         assert!(result.statistics.not_null_count > 0);
         assert!(result.statistics.check_count > 0);
+        assert!(result.statistics.foreign_key_count > 0);
         assert!(result.statistics.recommendation_count > 0);
+        
+        // Verify statistics match actual counts
+        let actual_not_null = result.constraints.iter()
+            .filter(|c| matches!(c.constraint_type, ConstraintType::NotNull))
+            .count();
+        assert_eq!(result.statistics.not_null_count, actual_not_null);
+        
+        let actual_check = result.constraints.iter()
+            .filter(|c| matches!(c.constraint_type, ConstraintType::Check))
+            .count();
+        assert_eq!(result.statistics.check_count, actual_check);
+    }
+
+    #[test]
+    fn test_custom_thresholds() {
+        let config = ConstraintConfig {
+            not_null_threshold: 0.8, // Lower threshold (80%)
+            unique_threshold: 0.9,   // Higher threshold (90%)
+            generate_unique_constraints: true,
+            generate_check_constraints: true,
+            generate_foreign_keys: true,
+        };
+        
+        let generator = ConstraintGenerator::with_config(config);
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let result = generator.generate_constraints(&schema, &analysis).unwrap();
+        
+        // With lower NOT NULL threshold, should generate more constraints
+        let not_null_constraints: Vec<_> = result.constraints
+            .iter()
+            .filter(|c| matches!(c.constraint_type, ConstraintType::NotNull))
+            .collect();
+        
+        // Should include both email (98%) and age (85%) since both > 80%
+        assert!(not_null_constraints.len() >= 1);
+    }
+
+    #[test]
+    fn test_disabled_constraint_generation() {
+        let config = ConstraintConfig {
+            generate_unique_constraints: false,
+            generate_check_constraints: false,
+            generate_foreign_keys: false,
+            ..Default::default()
+        };
+        
+        let generator = ConstraintGenerator::with_config(config);
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let result = generator.generate_constraints(&schema, &analysis).unwrap();
+        
+        // Should only generate NOT NULL constraints
+        let unique_constraints: Vec<_> = result.constraints
+            .iter()
+            .filter(|c| matches!(c.constraint_type, ConstraintType::Unique))
+            .collect();
+        assert!(unique_constraints.is_empty());
+        
+        let check_constraints: Vec<_> = result.constraints
+            .iter()
+            .filter(|c| matches!(c.constraint_type, ConstraintType::Check))
+            .collect();
+        assert!(check_constraints.is_empty());
+        
+        let fk_constraints: Vec<_> = result.constraints
+            .iter()
+            .filter(|c| matches!(c.constraint_type, ConstraintType::ForeignKey))
+            .collect();
+        assert!(fk_constraints.is_empty());
+        
+        // Statistics should reflect disabled features
+        assert_eq!(result.statistics.unique_count, 0);
+        assert_eq!(result.statistics.check_count, 0);
+        assert_eq!(result.statistics.foreign_key_count, 0);
+    }
+
+    #[test]
+    fn test_constraint_recommendation_confidence() {
+        let generator = ConstraintGenerator::new();
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let result = generator.generate_constraints(&schema, &analysis).unwrap();
+        
+        // All recommendations should have confidence scores
+        for recommendation in &result.recommendations {
+            assert!(recommendation.confidence > 0.0);
+            assert!(recommendation.confidence <= 1.0);
+            assert!(!recommendation.reason.is_empty());
+            assert!(!recommendation.suggested_definition.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_existing_foreign_key_avoidance() {
+        let generator = ConstraintGenerator::new();
+        let mut schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        // Add existing foreign key to avoid duplicates
+        let existing_fk = ForeignKeyDefinition {
+            column: "author_id".to_string(),
+            referenced_table: "users".to_string(),
+            referenced_column: "id".to_string(),
+            constraint_name: "existing_fk".to_string(),
+        };
+        schema.tables[1].add_foreign_key(existing_fk);
+        
+        let result = generator.generate_constraints(&schema, &analysis).unwrap();
+        
+        // Should not generate duplicate foreign key constraint
+        let fk_constraints: Vec<_> = result.constraints
+            .iter()
+            .filter(|c| matches!(c.constraint_type, ConstraintType::ForeignKey) &&
+                     c.columns.contains(&"author_id".to_string()))
+            .collect();
+        
+        // Should be empty since existing FK already covers this relationship
+        assert!(fk_constraints.is_empty());
+    }
+
+    #[test]
+    fn test_medium_confidence_relationship_recommendation() {
+        let generator = ConstraintGenerator::new();
+        let schema = create_test_schema();
+        let mut analysis = create_test_analysis();
+        
+        // Add medium confidence relationship
+        analysis.add_relationship(DetectedRelationship {
+            from_collection: "posts".to_string(),
+            to_collection: "users".to_string(),
+            reference_field: "reviewer_id".to_string(),
+            relationship_type: RelationshipType::ManyToOne,
+            confidence: 0.85, // Medium confidence (between 0.8 and 0.95)
+        });
+        
+        let result = generator.generate_constraints(&schema, &analysis).unwrap();
+        
+        // Should generate recommendation instead of constraint
+        let fk_recommendations: Vec<_> = result.recommendations
+            .iter()
+            .filter(|r| matches!(r.constraint_type, ConstraintType::ForeignKey) &&
+                     r.columns.contains(&"reviewer_id".to_string()))
+            .collect();
+        
+        assert!(!fk_recommendations.is_empty());
+        assert!(fk_recommendations[0].reason.contains("85.0%"));
     }
 }

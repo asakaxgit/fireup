@@ -72,7 +72,7 @@ pub struct SQLStatement {
 }
 
 /// Type of SQL statement
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StatementType {
     /// CREATE TABLE statement
     CreateTable,
@@ -207,7 +207,7 @@ impl SQLGenerator {
     }
 
     /// Generate CREATE TABLE statement for a table definition
-    fn generate_create_table_statement(&self, table: &TableDefinition) -> Result<SQLStatement, FireupError> {
+    pub fn generate_create_table_statement(&self, table: &TableDefinition) -> Result<SQLStatement, FireupError> {
         let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", table.name);
         
         let mut column_definitions = Vec::new();
@@ -331,7 +331,7 @@ impl SQLGenerator {
     }
 
     /// Generate parameterized INSERT statement
-    fn generate_parameterized_insert(
+    pub fn generate_parameterized_insert(
         &mut self,
         table: &TableDefinition,
         column_names: &[String],
@@ -394,7 +394,7 @@ impl SQLGenerator {
     }
 
     /// Generate literal INSERT statement (no parameters)
-    fn generate_literal_insert(
+    pub fn generate_literal_insert(
         &self,
         table: &TableDefinition,
         column_names: &[String],
@@ -453,7 +453,7 @@ impl SQLGenerator {
     }
 
     /// Generate CREATE INDEX statements for a table
-    fn generate_index_statements(&self, table: &TableDefinition) -> Result<Vec<SQLStatement>, FireupError> {
+    pub fn generate_index_statements(&self, table: &TableDefinition) -> Result<Vec<SQLStatement>, FireupError> {
         let mut statements = Vec::new();
         
         for index in &table.indexes {
@@ -482,7 +482,7 @@ impl SQLGenerator {
     }
 
     /// Generate ALTER TABLE statements for foreign key constraints
-    fn generate_constraint_statements(&self, schema: &NormalizedSchema) -> Result<Vec<SQLStatement>, FireupError> {
+    pub fn generate_constraint_statements(&self, schema: &NormalizedSchema) -> Result<Vec<SQLStatement>, FireupError> {
         let mut statements = Vec::new();
         
         for table in &schema.tables {
@@ -510,7 +510,7 @@ impl SQLGenerator {
     }
 
     /// Format a JSON value for SQL insertion
-    fn format_sql_value(&self, value: &Value) -> String {
+    pub fn format_sql_value(&self, value: &Value) -> String {
         match value {
             Value::Null => "NULL".to_string(),
             Value::Bool(b) => b.to_string(),

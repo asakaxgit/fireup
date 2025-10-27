@@ -69,7 +69,7 @@
   - Analyze field completeness across all documents
   - _Requirements: 2.5_
 
-- [-] 4.5 Write unit tests for schema analysis
+- [x] 4.5 Write unit tests for schema analysis
   - Test analysis with different document structures
   - Test normalization rules application
   - Test type conflict detection and resolution
@@ -94,7 +94,7 @@
   - Include warnings and recommendations in output
   - _Requirements: 2.7, 2.8_
 
-- [ ] 5.4 Write unit tests for DDL generation
+- [x] 5.4 Write unit tests for DDL generation
   - Test CREATE TABLE statement generation
   - Test constraint and index generation
   - Test DDL file output formatting
@@ -119,7 +119,7 @@
   - Handle batch processing for large datasets
   - _Requirements: 1.4, 3.4_
 
-- [ ] 6.4 Write unit tests for data transformation
+- [x] 6.4 Write unit tests for data transformation
   - Test type mapping with various Firestore data types
   - Test document transformation to relational format
   - Test SQL generation with different data structures
@@ -144,7 +144,7 @@
   - Validate constraints and foreign key relationships during import
   - _Requirements: 2.6, 4.3_
 
-- [ ] 7.4 Write unit tests for data import
+- [x] 7.4 Write unit tests for data import
   - Test PostgreSQL connection and schema creation
   - Test batch processing with large datasets
   - Test transaction rollback on constraint violations

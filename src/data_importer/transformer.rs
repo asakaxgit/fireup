@@ -362,7 +362,7 @@ impl DocumentTransformer {
     }
 
     /// Transform foreign key value to appropriate format
-    fn transform_foreign_key_value(
+    pub fn transform_foreign_key_value(
         &mut self,
         value: &Value,
         referenced_table: &str,

@@ -4,11 +4,11 @@ pub mod transformer;
 pub mod type_mapper;
 pub mod sql_generator;
 
+#[cfg(test)]
+mod tests;
+
 // Re-export main types and traits
-pub use importer::{
-    PostgreSQLImporter, ConnectionConfig, BatchConfig, BatchProcessor,
-    ImportResult, ImportProgress, TableImportSpec, FullImportResult
-};
+pub use importer::{PostgreSQLImporter, ConnectionConfig, FullImportResult};
 pub use transformer::*;
 pub use type_mapper::*;
 pub use sql_generator::*;

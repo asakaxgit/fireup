@@ -629,34 +629,74 @@ impl DDLOutputManager {
 mod tests {
     use super::*;
     use crate::types::*;
+    use crate::schema_analyzer::{PerformanceImpact, StorageOverhead};
     use chrono::Utc;
     use uuid::Uuid;
     use tempfile::TempDir;
     use std::path::Path;
+    use std::fs;
 
     fn create_test_schema() -> NormalizedSchema {
-        let mut table = TableDefinition::new("users".to_string());
-        table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid));
-        table.add_column(ColumnDefinition::new("email".to_string(), PostgreSQLType::Varchar(Some(255))));
+        let mut users_table = TableDefinition::new("users".to_string());
+        users_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
+        users_table.add_column(ColumnDefinition::new("email".to_string(), PostgreSQLType::Varchar(Some(255))).not_null());
+        users_table.add_column(ColumnDefinition::new("name".to_string(), PostgreSQLType::Text));
+        users_table.add_column(ColumnDefinition::new("created_at".to_string(), PostgreSQLType::Timestamp).not_null());
+        users_table.set_primary_key(vec!["id".to_string()]);
+        
+        users_table.add_index(IndexDefinition {
+            name: "idx_users_email".to_string(),
+            columns: vec!["email".to_string()],
+            unique: true,
+            index_type: Some("BTREE".to_string()),
+        });
+
+        let mut posts_table = TableDefinition::new("posts".to_string());
+        posts_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
+        posts_table.add_column(ColumnDefinition::new("user_id".to_string(), PostgreSQLType::Uuid).not_null());
+        posts_table.add_column(ColumnDefinition::new("title".to_string(), PostgreSQLType::Text).not_null());
+        posts_table.add_column(ColumnDefinition::new("content".to_string(), PostgreSQLType::Text));
+        posts_table.set_primary_key(vec!["id".to_string()]);
+        
+        posts_table.add_foreign_key(ForeignKeyDefinition {
+            column: "user_id".to_string(),
+            referenced_table: "users".to_string(),
+            referenced_column: "id".to_string(),
+            constraint_name: "fk_posts_user".to_string(),
+        });
         
         NormalizedSchema {
-            tables: vec![table],
+            tables: vec![users_table, posts_table],
             relationships: Vec::new(),
-            constraints: Vec::new(),
+            constraints: vec![
+                Constraint {
+                    name: "uq_users_email".to_string(),
+                    table: "users".to_string(),
+                    constraint_type: ConstraintType::Unique,
+                    columns: vec!["email".to_string()],
+                    parameters: std::collections::HashMap::new(),
+                }
+            ],
             warnings: vec![
                 SchemaWarning {
                     level: WarningLevel::Warning,
-                    message: "Test warning".to_string(),
-                    context: "users.email".to_string(),
-                    suggestion: Some("Consider adding unique constraint".to_string()),
+                    message: "Consider adding index on frequently queried column".to_string(),
+                    context: "posts.created_at".to_string(),
+                    suggestion: Some("CREATE INDEX idx_posts_created_at ON posts (created_at)".to_string()),
+                },
+                SchemaWarning {
+                    level: WarningLevel::Info,
+                    message: "Table has good normalization".to_string(),
+                    context: "users".to_string(),
+                    suggestion: None,
                 }
             ],
             metadata: SchemaMetadata {
                 generated_at: Utc::now(),
                 source_analysis_id: Uuid::new_v4(),
                 version: "1.0.0".to_string(),
-                table_count: 1,
-                relationship_count: 0,
+                table_count: 2,
+                relationship_count: 1,
             },
         }
     }
@@ -666,13 +706,126 @@ mod tests {
         
         analysis.add_collection(CollectionAnalysis {
             name: "users".to_string(),
-            document_count: 100,
-            field_names: vec!["id".to_string(), "email".to_string()],
-            avg_document_size: 256.0,
+            document_count: 1000,
+            field_names: vec!["id".to_string(), "email".to_string(), "name".to_string(), "created_at".to_string()],
+            avg_document_size: 512.0,
+            subcollections: vec!["posts".to_string()],
+        });
+        
+        analysis.add_collection(CollectionAnalysis {
+            name: "posts".to_string(),
+            document_count: 5000,
+            field_names: vec!["id".to_string(), "user_id".to_string(), "title".to_string(), "content".to_string()],
+            avg_document_size: 1024.0,
             subcollections: Vec::new(),
         });
         
+        // Add field type analysis
+        analysis.add_field_type(FieldTypeAnalysis {
+            field_path: "users.email".to_string(),
+            type_frequencies: [("string".to_string(), 1000)].iter().cloned().collect(),
+            total_occurrences: 1000,
+            presence_percentage: 100.0,
+            recommended_type: PostgreSQLType::Varchar(Some(255)),
+        });
+        
+        // Add type conflict
+        analysis.add_field_type(FieldTypeAnalysis {
+            field_path: "users.age".to_string(),
+            type_frequencies: [("integer".to_string(), 800), ("string".to_string(), 200)].iter().cloned().collect(),
+            total_occurrences: 1000,
+            presence_percentage: 90.0,
+            recommended_type: PostgreSQLType::Integer,
+        });
+        
+        // Add relationship
+        analysis.add_relationship(DetectedRelationship {
+            from_collection: "posts".to_string(),
+            to_collection: "users".to_string(),
+            reference_field: "user_id".to_string(),
+            relationship_type: RelationshipType::ManyToOne,
+            confidence: 0.95,
+        });
+        
+        // Add normalization opportunity
+        analysis.add_normalization_opportunity(NormalizationOpportunity {
+            collection: "users".to_string(),
+            field_path: "tags".to_string(),
+            normalization_type: NormalizationType::FirstNormalForm,
+            description: "Array field can be normalized to separate table".to_string(),
+            impact: NormalizationImpact::Medium,
+        });
+        
         analysis
+    }
+
+    fn create_test_constraint_results() -> ConstraintAnalysisResult {
+        use crate::schema_analyzer::constraint_generator::{ConstraintAnalysisResult, ConstraintRecommendation, ConstraintStatistics};
+        
+        ConstraintAnalysisResult {
+            constraints: vec![
+                Constraint {
+                    name: "nn_users_email".to_string(),
+                    table: "users".to_string(),
+                    constraint_type: ConstraintType::NotNull,
+                    columns: vec!["email".to_string()],
+                    parameters: std::collections::HashMap::new(),
+                }
+            ],
+            recommendations: vec![
+                ConstraintRecommendation {
+                    constraint_type: ConstraintType::Check,
+                    table: "users".to_string(),
+                    columns: vec!["age".to_string()],
+                    reason: "Age field should have reasonable bounds".to_string(),
+                    confidence: 0.9,
+                    suggested_definition: "ALTER TABLE users ADD CONSTRAINT chk_users_age_range CHECK (age >= 0 AND age <= 150);".to_string(),
+                }
+            ],
+            statistics: ConstraintStatistics {
+                not_null_count: 1,
+                unique_count: 0,
+                check_count: 0,
+                foreign_key_count: 0,
+                recommendation_count: 1,
+            },
+        }
+    }
+
+    fn create_test_index_results() -> IndexAnalysisResult {
+        use crate::schema_analyzer::index_generator::{IndexAnalysisResult, IndexRecommendation, IndexStatistics};
+        
+        IndexAnalysisResult {
+            indexes: vec![
+                IndexDefinition {
+                    name: "idx_posts_user_id".to_string(),
+                    columns: vec!["user_id".to_string()],
+                    unique: false,
+                    index_type: Some("BTREE".to_string()),
+                }
+            ],
+            recommendations: vec![
+                IndexRecommendation {
+                    index: IndexDefinition {
+                        name: "idx_posts_created_at".to_string(),
+                        columns: vec!["created_at".to_string()],
+                        unique: false,
+                        index_type: Some("BTREE".to_string()),
+                    },
+                    reason: "Timestamp field for sorting and filtering".to_string(),
+                    confidence: 0.8,
+                    performance_impact: PerformanceImpact::High,
+                    storage_overhead: StorageOverhead::Low,
+                }
+            ],
+            statistics: IndexStatistics {
+                single_column_count: 1,
+                composite_count: 0,
+                unique_count: 0,
+                partial_count: 0,
+                recommendation_count: 1,
+            },
+        }
     }
 
     #[test]
@@ -680,7 +833,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = OutputConfig {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
-            ..Default::default()
+            include_detailed_comments: true,
+            separate_files: true,
+            include_transformation_report: true,
+            include_warnings: true,
+            output_format: OutputFormat::Combined,
         };
         
         let manager = DDLOutputManager::with_config(config);
@@ -689,20 +846,58 @@ mod tests {
         
         let report = manager.generate_transformation_report(&schema, &analysis).unwrap();
         
-        assert_eq!(report.original_collections.len(), 1);
-        assert_eq!(report.normalized_tables.len(), 1);
-        assert_eq!(report.statistics.collections_processed, 1);
-        assert_eq!(report.statistics.tables_generated, 1);
+        // Check original collections
+        assert_eq!(report.original_collections.len(), 2);
+        let users_collection = report.original_collections.iter()
+            .find(|c| c.name == "users")
+            .unwrap();
+        assert_eq!(users_collection.document_count, 1000);
+        assert_eq!(users_collection.field_count, 4);
+        assert_eq!(users_collection.avg_size_bytes, 512.0);
+        assert_eq!(users_collection.subcollections, vec!["posts"]);
+        
+        // Check normalized tables
+        assert_eq!(report.normalized_tables.len(), 2);
+        let users_table = report.normalized_tables.iter()
+            .find(|t| t.name == "users")
+            .unwrap();
+        assert_eq!(users_table.column_count, 4);
+        assert_eq!(users_table.primary_key, vec!["id"]);
+        assert_eq!(users_table.index_count, 1);
+        
+        // Check transformations
+        assert!(!report.transformations.is_empty());
+        
+        // Check type conflicts
+        assert!(!report.type_conflicts.is_empty());
+        let age_conflict = report.type_conflicts.iter()
+            .find(|c| c.field_path == "users.age")
+            .unwrap();
+        assert!(age_conflict.conflicting_types.contains(&"integer".to_string()));
+        assert!(age_conflict.conflicting_types.contains(&"string".to_string()));
+        
+        // Check normalization applied
+        assert!(!report.normalization_applied.is_empty());
+        let tags_normalization = &report.normalization_applied[0];
+        assert_eq!(tags_normalization.collection, "users");
+        assert_eq!(tags_normalization.field, "tags");
+        
+        // Check statistics
+        assert_eq!(report.statistics.collections_processed, 2);
+        assert_eq!(report.statistics.tables_generated, 2);
+        assert_eq!(report.statistics.relationships_created, 1);
     }
 
     #[test]
-    fn test_generate_output_package() {
+    fn test_generate_output_package_combined_format() {
         let temp_dir = TempDir::new().unwrap();
         let config = OutputConfig {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
+            include_detailed_comments: true,
             separate_files: true,
             include_transformation_report: true,
-            ..Default::default()
+            include_warnings: true,
+            output_format: OutputFormat::Combined,
         };
         
         let manager = DDLOutputManager::with_config(config);
@@ -712,21 +907,109 @@ mod tests {
         let package = manager.generate_output_package(&schema, &analysis).unwrap();
         
         assert!(!package.file_paths.is_empty());
-        assert_eq!(package.ddl.table_statements.len(), 1);
+        assert_eq!(package.ddl.table_statements.len(), 2);
+        assert_eq!(package.ddl.foreign_key_statements.len(), 1);
         
-        // Check that files were created
+        // Check that both SQL and Markdown files were created
+        let sql_files: Vec<_> = package.file_paths.iter()
+            .filter(|p| p.ends_with(".sql"))
+            .collect();
+        assert!(!sql_files.is_empty());
+        
+        let md_files: Vec<_> = package.file_paths.iter()
+            .filter(|p| p.ends_with(".md"))
+            .collect();
+        assert!(!md_files.is_empty());
+        
+        // Check that files were actually created
         for file_path in &package.file_paths {
-            assert!(Path::new(file_path).exists());
+            assert!(Path::new(file_path).exists(), "File should exist: {}", file_path);
         }
     }
 
     #[test]
-    fn test_markdown_generation() {
+    fn test_sql_file_generation() {
         let temp_dir = TempDir::new().unwrap();
         let config = OutputConfig {
             output_directory: temp_dir.path().to_string_lossy().to_string(),
+            include_detailed_comments: true,
+            separate_files: true,
+            include_transformation_report: true,
+            include_warnings: true,
+            output_format: OutputFormat::SQL,
+        };
+        
+        let manager = DDLOutputManager::with_config(config);
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let package = manager.generate_output_package(&schema, &analysis).unwrap();
+        
+        // Should generate separate SQL files
+        let expected_files = vec![
+            "01_tables.sql",
+            "02_foreign_keys.sql", 
+            "03_constraints.sql",
+            "04_indexes.sql"
+        ];
+        
+        for expected_file in expected_files {
+            let file_exists = package.file_paths.iter()
+                .any(|p| p.ends_with(expected_file));
+            assert!(file_exists, "Expected file {} should exist", expected_file);
+        }
+        
+        // Check table file content
+        let tables_file = package.file_paths.iter()
+            .find(|p| p.ends_with("01_tables.sql"))
+            .unwrap();
+        
+        let content = fs::read_to_string(tables_file).unwrap();
+        assert!(content.contains("CREATE TABLE"));
+        assert!(content.contains("users"));
+        assert!(content.contains("posts"));
+    }
+
+    #[test]
+    fn test_single_sql_file_generation() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = OutputConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            include_detailed_comments: true,
+            separate_files: false,
+            include_transformation_report: true,
+            include_warnings: true,
+            output_format: OutputFormat::SQL,
+        };
+        
+        let manager = DDLOutputManager::with_config(config);
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let package = manager.generate_output_package(&schema, &analysis).unwrap();
+        
+        // Should generate single combined SQL file
+        let schema_file = package.file_paths.iter()
+            .find(|p| p.ends_with("schema.sql"))
+            .unwrap();
+        
+        let content = fs::read_to_string(schema_file).unwrap();
+        assert!(content.contains("CREATE TABLE"));
+        assert!(content.contains("ALTER TABLE"));
+        assert!(content.contains("users"));
+        assert!(content.contains("posts"));
+    }
+
+    #[test]
+    fn test_markdown_documentation_generation() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = OutputConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            include_detailed_comments: true,
+            separate_files: true,
+            include_transformation_report: true,
+            include_warnings: true,
             output_format: OutputFormat::Markdown,
-            ..Default::default()
         };
         
         let manager = DDLOutputManager::with_config(config);
@@ -739,7 +1022,238 @@ mod tests {
         let readme_exists = package.file_paths.iter().any(|p| p.ends_with("README.md"));
         assert!(readme_exists);
         
-        let warnings_exists = package.file_paths.iter().any(|p| p.ends_with("warnings_and_recommendations.md"));
+        let transformation_report_exists = package.file_paths.iter()
+            .any(|p| p.ends_with("transformation_report.md"));
+        assert!(transformation_report_exists);
+        
+        let warnings_exists = package.file_paths.iter()
+            .any(|p| p.ends_with("warnings_and_recommendations.md"));
         assert!(warnings_exists);
+        
+        // Check README content
+        let readme_path = package.file_paths.iter()
+            .find(|p| p.ends_with("README.md"))
+            .unwrap();
+        
+        let readme_content = fs::read_to_string(readme_path).unwrap();
+        assert!(readme_content.contains("# PostgreSQL Schema Documentation"));
+        assert!(readme_content.contains("## Overview"));
+        assert!(readme_content.contains("Tables: 2"));
+        assert!(readme_content.contains("Foreign Keys: 1"));
+        assert!(readme_content.contains("## Usage Instructions"));
+    }
+
+    #[test]
+    fn test_transformation_report_markdown() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = OutputConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            include_detailed_comments: true,
+            separate_files: true,
+            include_transformation_report: true,
+            include_warnings: true,
+            output_format: OutputFormat::Markdown,
+        };
+        
+        let manager = DDLOutputManager::with_config(config);
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let package = manager.generate_output_package(&schema, &analysis).unwrap();
+        
+        let report_path = package.file_paths.iter()
+            .find(|p| p.ends_with("transformation_report.md"))
+            .unwrap();
+        
+        let content = fs::read_to_string(report_path).unwrap();
+        assert!(content.contains("# Transformation Report"));
+        assert!(content.contains("## Original Firestore Collections"));
+        assert!(content.contains("### users"));
+        assert!(content.contains("### posts"));
+        assert!(content.contains("Documents: 1000"));
+        assert!(content.contains("Documents: 5000"));
+        assert!(content.contains("## Transformations Applied"));
+        assert!(content.contains("## Type Conflicts Resolved"));
+        assert!(content.contains("users.age"));
+    }
+
+    #[test]
+    fn test_warnings_and_recommendations_markdown() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = OutputConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            include_detailed_comments: true,
+            separate_files: true,
+            include_transformation_report: true,
+            include_warnings: true,
+            output_format: OutputFormat::Markdown,
+        };
+        
+        let manager = DDLOutputManager::with_config(config);
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let package = manager.generate_output_package(&schema, &analysis).unwrap();
+        
+        let warnings_path = package.file_paths.iter()
+            .find(|p| p.ends_with("warnings_and_recommendations.md"))
+            .unwrap();
+        
+        let content = fs::read_to_string(warnings_path).unwrap();
+        assert!(content.contains("# Warnings and Recommendations"));
+        assert!(content.contains("## Schema Warnings"));
+        assert!(content.contains("⚠️ WARNING"));
+        assert!(content.contains("ℹ️ INFO"));
+        assert!(content.contains("posts.created_at"));
+        assert!(content.contains("Consider adding index"));
+        assert!(content.contains("## Constraint Recommendations"));
+        assert!(content.contains("## Index Recommendations"));
+    }
+
+    #[test]
+    fn test_output_config_options() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = OutputConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            include_detailed_comments: false,
+            separate_files: false,
+            include_transformation_report: false,
+            include_warnings: false,
+            output_format: OutputFormat::SQL,
+        };
+        
+        let manager = DDLOutputManager::with_config(config);
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let package = manager.generate_output_package(&schema, &analysis).unwrap();
+        
+        // Should only generate single SQL file
+        assert_eq!(package.file_paths.len(), 1);
+        assert!(package.file_paths[0].ends_with("schema.sql"));
+        
+        // Should not generate transformation report or warnings files
+        let has_md_files = package.file_paths.iter().any(|p| p.ends_with(".md"));
+        assert!(!has_md_files);
+    }
+
+    #[test]
+    fn test_generate_documentation_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = OutputConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            include_detailed_comments: true,
+            separate_files: true,
+            include_transformation_report: true,
+            include_warnings: true,
+            output_format: OutputFormat::Combined,
+        };
+        
+        let manager = DDLOutputManager::with_config(config);
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let ddl = GeneratedDDL {
+            table_statements: vec!["CREATE TABLE users...".to_string()],
+            foreign_key_statements: vec!["ALTER TABLE posts...".to_string()],
+            index_statements: vec!["CREATE INDEX...".to_string()],
+            constraint_statements: vec!["ALTER TABLE...".to_string()],
+            drop_statements: Vec::new(),
+            comments: Vec::new(),
+            warnings: schema.warnings.clone(),
+        };
+        
+        let constraints = create_test_constraint_results();
+        let indexes = create_test_index_results();
+        let report = manager.generate_transformation_report(&schema, &analysis).unwrap();
+        
+        let documentation = manager.generate_documentation(&ddl, &constraints, &indexes, &report).unwrap();
+        
+        assert!(documentation.contains("# PostgreSQL Schema Documentation"));
+        assert!(documentation.contains("## Overview"));
+        assert!(documentation.contains("Tables: 1"));
+        assert!(documentation.contains("Foreign Keys: 1"));
+        assert!(documentation.contains("## Transformation Statistics"));
+        assert!(documentation.contains("Collections Processed: 2"));
+        assert!(documentation.contains("## Tables"));
+        assert!(documentation.contains("### users"));
+        assert!(documentation.contains("### posts"));
+        assert!(documentation.contains("## Usage Instructions"));
+        assert!(documentation.contains("01_tables.sql"));
+    }
+
+    #[test]
+    fn test_file_creation_and_cleanup() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = OutputConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            include_detailed_comments: true,
+            separate_files: true,
+            include_transformation_report: true,
+            include_warnings: true,
+            output_format: OutputFormat::Combined,
+        };
+        
+        let manager = DDLOutputManager::with_config(config);
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let package = manager.generate_output_package(&schema, &analysis).unwrap();
+        
+        // All files should exist
+        for file_path in &package.file_paths {
+            assert!(Path::new(file_path).exists());
+            
+            // Files should have content
+            let metadata = fs::metadata(file_path).unwrap();
+            assert!(metadata.len() > 0, "File {} should not be empty", file_path);
+        }
+        
+        // When temp_dir is dropped, files should be cleaned up automatically
+    }
+
+    #[test]
+    fn test_error_handling_invalid_directory() {
+        let config = OutputConfig {
+            output_directory: "/invalid/nonexistent/directory".to_string(),
+            include_detailed_comments: true,
+            separate_files: true,
+            include_transformation_report: true,
+            include_warnings: true,
+            output_format: OutputFormat::Combined,
+        };
+        
+        let manager = DDLOutputManager::with_config(config);
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        // Should handle directory creation error gracefully
+        let result = manager.generate_output_package(&schema, &analysis);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ddl_summary_integration() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = OutputConfig {
+            output_directory: temp_dir.path().to_string_lossy().to_string(),
+            include_detailed_comments: true,
+            separate_files: true,
+            include_transformation_report: true,
+            include_warnings: true,
+            output_format: OutputFormat::Combined,
+        };
+        
+        let manager = DDLOutputManager::with_config(config);
+        let schema = create_test_schema();
+        let analysis = create_test_analysis();
+        
+        let package = manager.generate_output_package(&schema, &analysis).unwrap();
+        let summary = package.ddl.summary();
+        
+        assert_eq!(summary.table_count, 2);
+        assert_eq!(summary.foreign_key_count, 1);
+        assert_eq!(summary.constraint_count, 1);
+        assert_eq!(summary.warning_count, 2);
     }
 }

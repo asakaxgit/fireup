@@ -3,7 +3,6 @@ use crate::types::{
     IndexDefinition, Constraint, ConstraintType, SchemaWarning
 };
 use crate::error::{FireupResult, FireupError};
-use std::collections::HashMap;
 
 /// DDL generator for creating PostgreSQL schema statements
 pub struct DDLGenerator {
@@ -390,6 +389,7 @@ mod tests {
     use crate::types::*;
     use chrono::Utc;
     use uuid::Uuid;
+    use std::collections::HashMap;
 
     fn create_test_table() -> TableDefinition {
         let mut table = TableDefinition::new("users".to_string());
@@ -434,8 +434,92 @@ mod tests {
         }
     }
 
+    fn create_complex_test_schema() -> NormalizedSchema {
+        let mut users_table = TableDefinition::new("users".to_string());
+        users_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
+        users_table.add_column(ColumnDefinition::new("email".to_string(), PostgreSQLType::Varchar(Some(255))).not_null());
+        users_table.add_column(ColumnDefinition::new("age".to_string(), PostgreSQLType::Integer));
+        users_table.add_column(ColumnDefinition::new("score".to_string(), PostgreSQLType::Numeric(Some(10), Some(2))).with_default(serde_json::json!(0.0)));
+        users_table.add_column(ColumnDefinition::new("active".to_string(), PostgreSQLType::Boolean).with_default(serde_json::json!(true)));
+        users_table.set_primary_key(vec!["id".to_string()]);
+
+        let mut posts_table = TableDefinition::new("posts".to_string());
+        posts_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
+        posts_table.add_column(ColumnDefinition::new("title".to_string(), PostgreSQLType::Text).not_null());
+        posts_table.add_column(ColumnDefinition::new("content".to_string(), PostgreSQLType::Text));
+        posts_table.add_column(ColumnDefinition::new("user_id".to_string(), PostgreSQLType::Uuid).not_null());
+        posts_table.add_column(ColumnDefinition::new("metadata".to_string(), PostgreSQLType::Jsonb));
+        posts_table.add_column(ColumnDefinition::new("tags".to_string(), PostgreSQLType::Array(Box::new(PostgreSQLType::Text))));
+        posts_table.set_primary_key(vec!["id".to_string()]);
+        
+        posts_table.add_foreign_key(ForeignKeyDefinition {
+            column: "user_id".to_string(),
+            referenced_table: "users".to_string(),
+            referenced_column: "id".to_string(),
+            constraint_name: "fk_posts_user".to_string(),
+        });
+
+        posts_table.add_index(IndexDefinition {
+            name: "idx_posts_user_id".to_string(),
+            columns: vec!["user_id".to_string()],
+            unique: false,
+            index_type: Some("BTREE".to_string()),
+        });
+
+        posts_table.add_index(IndexDefinition {
+            name: "idx_posts_title".to_string(),
+            columns: vec!["title".to_string()],
+            unique: false,
+            index_type: Some("BTREE".to_string()),
+        });
+
+        // Add constraints
+        let mut constraints = Vec::new();
+        
+        // Unique constraint
+        constraints.push(Constraint {
+            name: "uq_users_email".to_string(),
+            table: "users".to_string(),
+            constraint_type: ConstraintType::Unique,
+            columns: vec!["email".to_string()],
+            parameters: HashMap::new(),
+        });
+
+        // Check constraint
+        let mut check_params = HashMap::new();
+        check_params.insert("condition".to_string(), "age >= 0 AND age <= 150".to_string());
+        constraints.push(Constraint {
+            name: "chk_users_age_range".to_string(),
+            table: "users".to_string(),
+            constraint_type: ConstraintType::Check,
+            columns: vec!["age".to_string()],
+            parameters: check_params,
+        });
+
+        NormalizedSchema {
+            tables: vec![users_table, posts_table],
+            relationships: Vec::new(),
+            constraints,
+            warnings: vec![
+                SchemaWarning {
+                    level: WarningLevel::Warning,
+                    message: "Consider adding index on frequently queried column".to_string(),
+                    context: "posts.created_at".to_string(),
+                    suggestion: Some("CREATE INDEX idx_posts_created_at ON posts (created_at)".to_string()),
+                }
+            ],
+            metadata: SchemaMetadata {
+                generated_at: Utc::now(),
+                source_analysis_id: Uuid::new_v4(),
+                version: "1.0.0".to_string(),
+                table_count: 2,
+                relationship_count: 1,
+            },
+        }
+    }
+
     #[test]
-    fn test_generate_table_ddl() {
+    fn test_generate_table_ddl_basic() {
         let generator = DDLGenerator::new();
         let table = create_test_table();
         
@@ -444,7 +528,161 @@ mod tests {
         assert!(ddl.contains("CREATE TABLE IF NOT EXISTS users"));
         assert!(ddl.contains("id UUID NOT NULL"));
         assert!(ddl.contains("email VARCHAR(255) NOT NULL"));
+        assert!(ddl.contains("name TEXT"));
+        assert!(ddl.contains("created_at TIMESTAMP WITH TIME ZONE NOT NULL"));
         assert!(ddl.contains("CONSTRAINT pk_users PRIMARY KEY (id)"));
+    }
+
+    #[test]
+    fn test_generate_table_ddl_with_defaults_and_constraints() {
+        let generator = DDLGenerator::new();
+        let mut table = TableDefinition::new("test_table".to_string());
+        
+        table.add_column(
+            ColumnDefinition::new("id".to_string(), PostgreSQLType::Integer)
+                .not_null()
+                .add_constraint("UNIQUE".to_string())
+        );
+        table.add_column(
+            ColumnDefinition::new("status".to_string(), PostgreSQLType::Varchar(Some(50)))
+                .with_default(serde_json::json!("active"))
+        );
+        table.add_column(
+            ColumnDefinition::new("count".to_string(), PostgreSQLType::Integer)
+                .with_default(serde_json::json!(0))
+        );
+        table.add_column(
+            ColumnDefinition::new("enabled".to_string(), PostgreSQLType::Boolean)
+                .with_default(serde_json::json!(true))
+        );
+        
+        let ddl = generator.generate_table_ddl(&table).unwrap();
+        
+        assert!(ddl.contains("id INTEGER NOT NULL UNIQUE"));
+        assert!(ddl.contains("status VARCHAR(50) DEFAULT 'active'"));
+        assert!(ddl.contains("count INTEGER DEFAULT 0"));
+        assert!(ddl.contains("enabled BOOLEAN DEFAULT TRUE"));
+    }
+
+    #[test]
+    fn test_generate_table_ddl_complex_types() {
+        let generator = DDLGenerator::new();
+        let mut table = TableDefinition::new("complex_table".to_string());
+        
+        table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
+        table.add_column(ColumnDefinition::new("price".to_string(), PostgreSQLType::Numeric(Some(10), Some(2))));
+        table.add_column(ColumnDefinition::new("data".to_string(), PostgreSQLType::Jsonb));
+        table.add_column(ColumnDefinition::new("tags".to_string(), PostgreSQLType::Array(Box::new(PostgreSQLType::Text))));
+        table.add_column(ColumnDefinition::new("scores".to_string(), PostgreSQLType::Array(Box::new(PostgreSQLType::Integer))));
+        
+        let ddl = generator.generate_table_ddl(&table).unwrap();
+        
+        assert!(ddl.contains("id UUID NOT NULL"));
+        assert!(ddl.contains("price NUMERIC(10, 2)"));
+        assert!(ddl.contains("data JSONB"));
+        assert!(ddl.contains("tags TEXT[]"));
+        assert!(ddl.contains("scores INTEGER[]"));
+    }
+
+    #[test]
+    fn test_generate_foreign_key_ddl() {
+        let generator = DDLGenerator::new();
+        let fk = ForeignKeyDefinition {
+            column: "user_id".to_string(),
+            referenced_table: "users".to_string(),
+            referenced_column: "id".to_string(),
+            constraint_name: "fk_posts_user".to_string(),
+        };
+        
+        let ddl = generator.generate_foreign_key_ddl("posts", &fk).unwrap();
+        
+        assert!(ddl.contains("ALTER TABLE posts"));
+        assert!(ddl.contains("ADD CONSTRAINT fk_posts_user"));
+        assert!(ddl.contains("FOREIGN KEY (user_id)"));
+        assert!(ddl.contains("REFERENCES users (id)"));
+    }
+
+    #[test]
+    fn test_generate_index_ddl() {
+        let generator = DDLGenerator::new();
+        
+        // Test unique index
+        let unique_index = IndexDefinition {
+            name: "idx_users_email".to_string(),
+            columns: vec!["email".to_string()],
+            unique: true,
+            index_type: Some("BTREE".to_string()),
+        };
+        
+        let ddl = generator.generate_index_ddl("users", &unique_index).unwrap();
+        assert!(ddl.contains("CREATE UNIQUE INDEX idx_users_email"));
+        assert!(ddl.contains("ON users USING BTREE"));
+        assert!(ddl.contains("(email)"));
+
+        // Test composite index
+        let composite_index = IndexDefinition {
+            name: "idx_posts_user_created".to_string(),
+            columns: vec!["user_id".to_string(), "created_at".to_string()],
+            unique: false,
+            index_type: Some("BTREE".to_string()),
+        };
+        
+        let ddl = generator.generate_index_ddl("posts", &composite_index).unwrap();
+        assert!(ddl.contains("CREATE INDEX idx_posts_user_created"));
+        assert!(ddl.contains("(user_id, created_at)"));
+    }
+
+    #[test]
+    fn test_generate_constraint_ddl() {
+        let generator = DDLGenerator::new();
+        
+        // Test unique constraint
+        let unique_constraint = Constraint {
+            name: "uq_users_email".to_string(),
+            table: "users".to_string(),
+            constraint_type: ConstraintType::Unique,
+            columns: vec!["email".to_string()],
+            parameters: HashMap::new(),
+        };
+        
+        let ddl = generator.generate_constraint_ddl(&unique_constraint).unwrap();
+        assert!(ddl.contains("ALTER TABLE users"));
+        assert!(ddl.contains("ADD CONSTRAINT uq_users_email"));
+        assert!(ddl.contains("UNIQUE (email)"));
+
+        // Test check constraint
+        let mut check_params = HashMap::new();
+        check_params.insert("condition".to_string(), "age >= 0 AND age <= 150".to_string());
+        let check_constraint = Constraint {
+            name: "chk_users_age".to_string(),
+            table: "users".to_string(),
+            constraint_type: ConstraintType::Check,
+            columns: vec!["age".to_string()],
+            parameters: check_params,
+        };
+        
+        let ddl = generator.generate_constraint_ddl(&check_constraint).unwrap();
+        assert!(ddl.contains("ALTER TABLE users"));
+        assert!(ddl.contains("ADD CONSTRAINT chk_users_age"));
+        assert!(ddl.contains("CHECK (age >= 0 AND age <= 150)"));
+
+        // Test foreign key constraint
+        let mut fk_params = HashMap::new();
+        fk_params.insert("referenced_table".to_string(), "users".to_string());
+        fk_params.insert("referenced_column".to_string(), "id".to_string());
+        let fk_constraint = Constraint {
+            name: "fk_posts_user".to_string(),
+            table: "posts".to_string(),
+            constraint_type: ConstraintType::ForeignKey,
+            columns: vec!["user_id".to_string()],
+            parameters: fk_params,
+        };
+        
+        let ddl = generator.generate_constraint_ddl(&fk_constraint).unwrap();
+        assert!(ddl.contains("ALTER TABLE posts"));
+        assert!(ddl.contains("ADD CONSTRAINT fk_posts_user"));
+        assert!(ddl.contains("FOREIGN KEY (user_id)"));
+        assert!(ddl.contains("REFERENCES users (id)"));
     }
 
     #[test]
@@ -462,6 +700,35 @@ mod tests {
         assert!(complete_ddl.contains("CREATE TABLE"));
         assert!(complete_ddl.contains("ALTER TABLE"));
         assert!(complete_ddl.contains("CREATE UNIQUE INDEX"));
+    }
+
+    #[test]
+    fn test_generate_complex_schema_ddl() {
+        let generator = DDLGenerator::new();
+        let schema = create_complex_test_schema();
+        
+        let ddl = generator.generate_ddl(&schema).unwrap();
+        
+        // Should generate DDL for both tables
+        assert_eq!(ddl.table_statements.len(), 2);
+        
+        // Should generate foreign key statements
+        assert_eq!(ddl.foreign_key_statements.len(), 1);
+        assert!(ddl.foreign_key_statements[0].contains("fk_posts_user"));
+        
+        // Should generate index statements
+        assert_eq!(ddl.index_statements.len(), 2);
+        
+        // Should generate constraint statements
+        assert_eq!(ddl.constraint_statements.len(), 2);
+        
+        // Check complete DDL formatting
+        let complete_ddl = ddl.to_string();
+        assert!(complete_ddl.contains("CREATE TABLE"));
+        assert!(complete_ddl.contains("users"));
+        assert!(complete_ddl.contains("posts"));
+        assert!(complete_ddl.contains("JSONB"));
+        assert!(complete_ddl.contains("TEXT[]"));
     }
 
     #[test]
@@ -487,5 +754,165 @@ mod tests {
         // Should include drop statements
         assert!(!ddl.drop_statements.is_empty());
         assert!(ddl.drop_statements[0].contains("DROP TABLE"));
+        assert!(ddl.drop_statements[0].contains("CASCADE"));
+    }
+
+    #[test]
+    fn test_ddl_with_comments() {
+        let config = DDLConfig {
+            include_comments: true,
+            ..Default::default()
+        };
+        
+        let generator = DDLGenerator::with_config(config);
+        let schema = create_test_schema();
+        
+        let ddl = generator.generate_ddl(&schema).unwrap();
+        
+        // Should include header comment
+        assert!(!ddl.comments.is_empty());
+        assert!(ddl.comments[0].contains("PostgreSQL DDL generated"));
+        assert!(ddl.comments[0].contains("Generated at:"));
+        
+        // Table statements should include comments
+        assert!(ddl.table_statements[0].contains("-- Table: users"));
+    }
+
+    #[test]
+    fn test_ddl_summary() {
+        let generator = DDLGenerator::new();
+        let schema = create_complex_test_schema();
+        
+        let ddl = generator.generate_ddl(&schema).unwrap();
+        let summary = ddl.summary();
+        
+        assert_eq!(summary.table_count, 2);
+        assert_eq!(summary.foreign_key_count, 1);
+        assert_eq!(summary.index_count, 2);
+        assert_eq!(summary.constraint_count, 2);
+        assert_eq!(summary.warning_count, 1);
+    }
+
+    #[test]
+    fn test_ddl_all_statements_order() {
+        let generator = DDLGenerator::new();
+        let schema = create_complex_test_schema();
+        
+        let ddl = generator.generate_ddl(&schema).unwrap();
+        let all_statements = ddl.all_statements();
+        
+        // Should have statements in correct order
+        assert!(!all_statements.is_empty());
+        
+        // Find positions of different statement types
+        let table_pos = all_statements.iter().position(|s| s.contains("CREATE TABLE"));
+        let fk_pos = all_statements.iter().position(|s| s.contains("FOREIGN KEY"));
+        let constraint_pos = all_statements.iter().position(|s| s.contains("ADD CONSTRAINT") && s.contains("UNIQUE"));
+        let index_pos = all_statements.iter().position(|s| s.contains("CREATE INDEX"));
+        
+        // Tables should come before foreign keys
+        if let (Some(table), Some(fk)) = (table_pos, fk_pos) {
+            assert!(table < fk, "Tables should be created before foreign keys");
+        }
+        
+        // Foreign keys should come before indexes
+        if let (Some(fk), Some(idx)) = (fk_pos, index_pos) {
+            assert!(fk < idx, "Foreign keys should be created before indexes");
+        }
+    }
+
+    #[test]
+    fn test_format_default_values() {
+        let generator = DDLGenerator::new();
+        
+        // Test string default
+        let string_default = generator.format_default_value(&serde_json::json!("test")).unwrap();
+        assert_eq!(string_default, "'test'");
+        
+        // Test string with quotes
+        let quoted_string = generator.format_default_value(&serde_json::json!("test's value")).unwrap();
+        assert_eq!(quoted_string, "'test''s value'");
+        
+        // Test number default
+        let number_default = generator.format_default_value(&serde_json::json!(42)).unwrap();
+        assert_eq!(number_default, "42");
+        
+        // Test boolean defaults
+        let bool_true = generator.format_default_value(&serde_json::json!(true)).unwrap();
+        assert_eq!(bool_true, "TRUE");
+        
+        let bool_false = generator.format_default_value(&serde_json::json!(false)).unwrap();
+        assert_eq!(bool_false, "FALSE");
+        
+        // Test null default
+        let null_default = generator.format_default_value(&serde_json::json!(null)).unwrap();
+        assert_eq!(null_default, "NULL");
+    }
+
+    #[test]
+    fn test_schema_name_formatting() {
+        let config = DDLConfig {
+            schema_name: Some("custom_schema".to_string()),
+            ..Default::default()
+        };
+        
+        let generator = DDLGenerator::with_config(config);
+        
+        // Test table name formatting
+        let formatted = generator.format_table_name("test_table");
+        assert_eq!(formatted, "custom_schema.test_table");
+        
+        // Test without schema name
+        let generator_no_schema = DDLGenerator::new();
+        let formatted_no_schema = generator_no_schema.format_table_name("test_table");
+        assert_eq!(formatted_no_schema, "test_table");
+    }
+
+    #[test]
+    fn test_drop_statements_generation() {
+        let config = DDLConfig {
+            include_drop_statements: true,
+            ..Default::default()
+        };
+        
+        let generator = DDLGenerator::with_config(config);
+        let schema = create_complex_test_schema();
+        
+        let ddl = generator.generate_ddl(&schema).unwrap();
+        
+        assert_eq!(ddl.drop_statements.len(), 2);
+        
+        // Should drop in reverse order (posts before users due to foreign key)
+        assert!(ddl.drop_statements[0].contains("DROP TABLE IF EXISTS posts CASCADE"));
+        assert!(ddl.drop_statements[1].contains("DROP TABLE IF EXISTS users CASCADE"));
+    }
+
+    #[test]
+    fn test_error_handling_invalid_constraint() {
+        let generator = DDLGenerator::new();
+        
+        // Test check constraint without condition parameter
+        let invalid_constraint = Constraint {
+            name: "invalid_check".to_string(),
+            table: "test".to_string(),
+            constraint_type: ConstraintType::Check,
+            columns: vec!["col".to_string()],
+            parameters: HashMap::new(), // Missing condition parameter
+        };
+        
+        let result = generator.generate_constraint_ddl(&invalid_constraint);
+        assert!(result.is_err());
+        
+        // Test foreign key constraint without required parameters
+        let invalid_fk = Constraint {
+            name: "invalid_fk".to_string(),
+            table: "test".to_string(),
+            constraint_type: ConstraintType::ForeignKey,
+            columns: vec!["col".to_string()],
+            parameters: HashMap::new(), // Missing referenced_table and referenced_column
+        };
+        
+        let result = generator.generate_constraint_ddl(&invalid_fk);
+        assert!(result.is_err());
     }
 }
