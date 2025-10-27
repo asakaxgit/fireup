@@ -21,13 +21,14 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # File parsing (will implement custom LevelDB parser)
 bytes = "1.5"
+crc32fast = "1.3"
 
 # CLI
 clap = { version = "4.0", features = ["derive"] }
 
 # Logging and tracing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Error handling
 anyhow = "1.0"
@@ -40,6 +41,9 @@ dashmap = "5.5"
 
 # SQL parsing
 sqlparser = "0.39"
+
+# Monitoring and metrics
+once_cell = "1.19"
 
 [dev-dependencies]
 tempfile = "3.8"

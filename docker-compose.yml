@@ -5,23 +5,36 @@ services:
     image: postgres:15
     container_name: fireup_postgres
     environment:
-      POSTGRES_DB: fireup_dev
-      POSTGRES_USER: fireup
-      POSTGRES_PASSWORD: fireup_dev_password
+      POSTGRES_DB: ${POSTGRES_DB:-fireup_dev}
+      POSTGRES_USER: ${POSTGRES_USER:-fireup}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fireup_dev_password}
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=C --lc-ctype=C"
+      # Enable logging for development
+      POSTGRES_LOG_STATEMENT: all
+      POSTGRES_LOG_MIN_DURATION_STATEMENT: 0
     ports:
-      - "5433:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      # Mount additional SQL scripts if they exist
+      - ./sql:/docker-entrypoint-initdb.d/sql:ro
     networks:
       - fireup_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fireup -d fireup_dev"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fireup} -d ${POSTGRES_DB:-fireup_dev}"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
     restart: unless-stopped
+    # Add resource limits for development
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
 
 volumes:
   postgres_data:
