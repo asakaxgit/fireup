@@ -253,7 +253,7 @@ impl DDLOutputManager {
             .map(|table| TableSummary {
                 name: table.name.clone(),
                 column_count: table.columns.len(),
-                primary_key: table.primary_key.clone(),
+                primary_key: table.primary_key.as_ref().map(|pk| pk.columns.clone()).unwrap_or_default(),
                 foreign_key_count: table.foreign_keys.len(),
                 index_count: table.indexes.len(),
                 source_collections: vec![table.name.clone()], // Simplified mapping

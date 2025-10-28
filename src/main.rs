@@ -12,6 +12,7 @@ mod data_importer;
 
 use error::FireupError;
 use leveldb_parser::{LevelDBParser, BackupValidatorImpl, ValidationResult};
+use leveldb_parser::validator::BackupValidator;
 use schema_analyzer::{DocumentStructureAnalyzer, NormalizationEngine, DDLGenerator};
 use data_importer::{PostgreSQLImporter, ConnectionConfig, DocumentTransformer, FullImportResult};
 use std::fs;
@@ -327,13 +328,14 @@ async fn execute_import_pipeline(
     // Step 1: Parse LevelDB backup file
     info!("Step 1: Parsing LevelDB backup file");
     let parser = leveldb_parser::parser::FirestoreDocumentParser::new(backup_file.to_str().unwrap().to_string());
-    let documents = parser.parse_backup(backup_file.to_str().unwrap()).await?;
+    let parse_result = parser.parse_backup(backup_file.to_str().unwrap()).await?;
+    let documents = &parse_result.documents;
     info!("Parsed {} documents from backup file", documents.len());
     
     // Step 2: Analyze schema structure
     info!("Step 2: Analyzing document schema structure");
     let analyzer = DocumentStructureAnalyzer::new();
-    let analysis = analyzer.analyze_documents(&documents).await?;
+    let analysis = analyzer.analyze_documents(documents).await?;
     info!("Analyzed {} collections with {} total fields", 
           analysis.collections.len(), 
           analysis.collections.iter().map(|c| c.field_names.len()).sum::<usize>());
@@ -385,17 +387,18 @@ async fn execute_import_pipeline(
     // Step 7: Transform and import data
     info!("Step 7: Transforming and importing data");
     let transformer = DocumentTransformer::new();
-    let _transformation_result = transformer.transform_documents(&documents, &normalized_schema)?;
+    let _transformation_result = transformer.transform_documents(documents, &normalized_schema)?;
     
     info!("Data transformation completed");
     
     // Step 8: Execute full import with all components
     // For now, create a simple result since the full import method expects different parameters
     let full_result = FullImportResult {
-        table_results: vec![],
-        total_records_imported: documents.len() as u64,
-        total_errors: 0,
-        execution_time: std::time::Duration::from_secs(0),
+        schema_creation: Some(schema_result),
+        table_imports: vec![],
+        validation_results: vec![],
+        total_records_imported: documents.len(),
+        total_records_failed: 0,
         warnings: vec![],
     };
     
@@ -418,13 +421,14 @@ async fn execute_analyze_pipeline(
     // Step 1: Parse LevelDB backup file
     info!("Step 1: Parsing LevelDB backup file");
     let parser = leveldb_parser::parser::FirestoreDocumentParser::new(backup_file.to_str().unwrap().to_string());
-    let documents = parser.parse_backup(backup_file.to_str().unwrap()).await?;
+    let parse_result = parser.parse_backup(backup_file.to_str().unwrap()).await?;
+    let documents = &parse_result.documents;
     info!("Parsed {} documents from backup file", documents.len());
     
     // Step 2: Analyze schema structure
     info!("Step 2: Analyzing document schema structure");
     let analyzer = DocumentStructureAnalyzer::new();
-    let analysis = analyzer.analyze_documents(&documents).await?;
+    let analysis = analyzer.analyze_documents(documents).await?;
     
     // Step 3: Generate schema (normalized or basic)
     let schema = if normalize {
@@ -508,7 +512,8 @@ async fn execute_validate_pipeline(
         let parser = leveldb_parser::parser::FirestoreDocumentParser::new(backup_file.to_str().unwrap().to_string());
         
         match parser.parse_backup(backup_file.to_str().unwrap()).await {
-            Ok(documents) => {
+            Ok(parse_result) => {
+                let documents = &parse_result.documents;
                 info!("Successfully parsed {} documents", documents.len());
                 
                 // Perform additional quality checks
@@ -573,6 +578,7 @@ fn create_basic_schema_from_analysis(analysis: &types::SchemaAnalysis) -> Result
             column_type: PostgreSQLType::Uuid,
             nullable: false,
             default_value: None,
+            constraints: vec![],
         });
         
         // Add columns for each field
@@ -588,6 +594,7 @@ fn create_basic_schema_from_analysis(analysis: &types::SchemaAnalysis) -> Result
                 column_type: field_type,
                 nullable: true, // Most fields are nullable in Firestore
                 default_value: None,
+                constraints: vec![],
             });
         }
         
@@ -611,8 +618,8 @@ fn create_basic_schema_from_analysis(analysis: &types::SchemaAnalysis) -> Result
         metadata: SchemaMetadata {
             version: "1.0".to_string(),
             generated_at: chrono::Utc::now(),
-            source_analysis_id: "basic_conversion".to_string(),
-            table_count: tables.len(),
+            source_analysis_id: uuid::Uuid::new_v4(),
+            table_count: tables.len() as u32,
             relationship_count: 0,
         },
     })
@@ -626,12 +633,12 @@ fn parse_postgres_url(url: &str, max_connections: usize, timeout: u64) -> Result
     if !url.starts_with("postgresql://") {
         return Err(FireupError::Configuration {
             message: "Invalid PostgreSQL URL format. Expected: postgresql://user:password@host:port/database".to_string(),
-            config_key: "postgres_url".to_string(),
+            config_key: Some("postgres_url".to_string()),
             context: error::ErrorContext {
                 operation: "parse_postgres_url".to_string(),
-                file_path: None,
-                line_number: None,
-                additional_info: std::collections::HashMap::new(),
+                metadata: std::collections::HashMap::new(),
+                timestamp: chrono::Utc::now(),
+                call_path: vec!["main::parse_postgres_url".to_string()],
             },
             suggestions: vec!["Use format: postgresql://user:password@host:port/database".to_string()],
         });

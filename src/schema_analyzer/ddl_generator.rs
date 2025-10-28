@@ -141,12 +141,12 @@ impl DDLGenerator {
         ddl.push_str(&format!("    {}", column_definitions.join(",\n    ")));
 
         // Add primary key constraint if specified
-        if !table.primary_key.is_empty() {
+        if let Some(ref pk) = table.primary_key {
             ddl.push_str(",\n    ");
             ddl.push_str(&format!(
-                "CONSTRAINT pk_{} PRIMARY KEY ({})",
-                table.name.to_lowercase(),
-                table.primary_key.join(", ")
+                "CONSTRAINT {} PRIMARY KEY ({})",
+                pk.name,
+                pk.columns.join(", ")
             ));
         }
 

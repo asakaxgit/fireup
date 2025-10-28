@@ -85,7 +85,10 @@ impl NormalizationEngine {
             
             // Add primary key
             main_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
-            main_table.set_primary_key(vec!["id".to_string()]);
+            main_table.set_primary_key(PrimaryKeyDefinition {
+                name: format!("{}_pkey", collection.name),
+                columns: vec!["id".to_string()],
+            });
             
             // Process field types for this collection
             let collection_fields: Vec<_> = analysis.field_types.iter()

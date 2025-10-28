@@ -38,12 +38,21 @@ pub struct TableDefinition {
     pub name: String,
     /// Column definitions
     pub columns: Vec<ColumnDefinition>,
-    /// Primary key column names
-    pub primary_key: Vec<String>,
+    /// Primary key definition
+    pub primary_key: Option<PrimaryKeyDefinition>,
     /// Foreign key definitions
     pub foreign_keys: Vec<ForeignKeyDefinition>,
     /// Index definitions
     pub indexes: Vec<IndexDefinition>,
+}
+
+/// Primary key definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrimaryKeyDefinition {
+    /// Primary key constraint name
+    pub name: String,
+    /// Column names that make up the primary key
+    pub columns: Vec<String>,
 }
 
 /// PostgreSQL column definition
@@ -377,7 +386,7 @@ impl TableDefinition {
         Self {
             name,
             columns: Vec::new(),
-            primary_key: Vec::new(),
+            primary_key: None,
             foreign_keys: Vec::new(),
             indexes: Vec::new(),
         }
@@ -388,9 +397,9 @@ impl TableDefinition {
         self.columns.push(column);
     }
     
-    /// Set the primary key columns
-    pub fn set_primary_key(&mut self, columns: Vec<String>) {
-        self.primary_key = columns;
+    /// Set the primary key
+    pub fn set_primary_key(&mut self, primary_key: PrimaryKeyDefinition) {
+        self.primary_key = Some(primary_key);
     }
     
     /// Add a foreign key relationship
