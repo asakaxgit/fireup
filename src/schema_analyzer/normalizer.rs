@@ -3,7 +3,7 @@ use crate::types::{
     SchemaAnalysis, NormalizedSchema, TableDefinition, ColumnDefinition, 
     PostgreSQLType, ForeignKeyDefinition, IndexDefinition, Relationship,
     Constraint, ConstraintType, SchemaWarning, WarningLevel, SchemaMetadata,
-    RelationshipType, NormalizationType, NormalizationOpportunity
+    RelationshipType, NormalizationType, NormalizationOpportunity, PrimaryKeyDefinition
 };
 use std::collections::{HashMap, HashSet};
 use serde_json::Value;
@@ -117,7 +117,10 @@ impl NormalizationEngine {
                     array_table.add_column(ColumnDefinition::new("value".to_string(), field_type.recommended_type.clone()));
                     array_table.add_column(ColumnDefinition::new("array_index".to_string(), PostgreSQLType::Integer));
                     
-                    array_table.set_primary_key(vec!["id".to_string()]);
+                    array_table.set_primary_key(PrimaryKeyDefinition {
+                        name: format!("{}_pkey", array_table_name),
+                        columns: vec!["id".to_string()],
+                    });
                     
                     // Add foreign key relationship
                     array_table.add_foreign_key(ForeignKeyDefinition {
@@ -238,7 +241,10 @@ impl NormalizationEngine {
             PostgreSQLType::Uuid
         ).not_null());
         
-        lookup_table.set_primary_key(vec!["id".to_string()]);
+        lookup_table.set_primary_key(PrimaryKeyDefinition {
+            name: format!("{}_pkey", lookup_table_name),
+            columns: vec!["id".to_string()],
+        });
         
         // Add foreign keys
         lookup_table.add_foreign_key(ForeignKeyDefinition {
@@ -295,11 +301,11 @@ impl NormalizationEngine {
             }
             
             // Add unique index for primary key if not already present
-            if !table.primary_key.is_empty() {
+            if let Some(ref pk) = table.primary_key {
                 let pk_index_name = format!("pk_{}", table.name);
                 table.add_index(IndexDefinition {
                     name: pk_index_name,
-                    columns: table.primary_key.clone(),
+                    columns: pk.columns.clone(),
                     unique: true,
                     index_type: Some("btree".to_string()),
                 });

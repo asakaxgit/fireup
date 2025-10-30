@@ -1,5 +1,5 @@
 use crate::error::FireupError;
-use crate::types::{TableDefinition, PostgreSQLType, NormalizedSchema};
+use crate::types::{TableDefinition, PostgreSQLType, NormalizedSchema, PrimaryKeyDefinition};
 use crate::data_importer::transformer::{TableRow, TransformationResult};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -228,11 +228,11 @@ impl SQLGenerator {
         }
         
         // Add primary key constraint
-        if !table.primary_key.is_empty() {
+        if let Some(ref pk) = table.primary_key {
             let pk_constraint = format!(
-                "  CONSTRAINT {}_pkey PRIMARY KEY ({})",
-                table.name,
-                table.primary_key.join(", ")
+                "  CONSTRAINT {} PRIMARY KEY ({})",
+                pk.name,
+                pk.columns.join(", ")
             );
             column_definitions.push(pk_constraint);
         }
@@ -347,10 +347,10 @@ impl SQLGenerator {
                     sql.push_str(" ON CONFLICT DO NOTHING");
                 }
                 ConflictStrategy::Update => {
-                    if !table.primary_key.is_empty() {
-                        sql.push_str(&format!(" ON CONFLICT ({}) DO UPDATE SET ", table.primary_key.join(", ")));
+                    if let Some(ref pk) = table.primary_key {
+                        sql.push_str(&format!(" ON CONFLICT ({}) DO UPDATE SET ", pk.columns.join(", ")));
                         let updates: Vec<String> = column_names.iter()
-                            .filter(|col| !table.primary_key.contains(col))
+                            .filter(|col| !pk.columns.contains(col))
                             .map(|col| format!("{} = EXCLUDED.{}", col, col))
                             .collect();
                         sql.push_str(&updates.join(", "));
@@ -410,10 +410,10 @@ impl SQLGenerator {
                     sql.push_str(" ON CONFLICT DO NOTHING");
                 }
                 ConflictStrategy::Update => {
-                    if !table.primary_key.is_empty() {
-                        sql.push_str(&format!(" ON CONFLICT ({}) DO UPDATE SET ", table.primary_key.join(", ")));
+                    if let Some(ref pk) = table.primary_key {
+                        sql.push_str(&format!(" ON CONFLICT ({}) DO UPDATE SET ", pk.columns.join(", ")));
                         let updates: Vec<String> = column_names.iter()
-                            .filter(|col| !table.primary_key.contains(col))
+                            .filter(|col| !pk.columns.contains(col))
                             .map(|col| format!("{} = EXCLUDED.{}", col, col))
                             .collect();
                         sql.push_str(&updates.join(", "));
@@ -650,7 +650,10 @@ mod tests {
         table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
         table.add_column(ColumnDefinition::new("name".to_string(), PostgreSQLType::Varchar(Some(255))));
         table.add_column(ColumnDefinition::new("age".to_string(), PostgreSQLType::Integer));
-        table.set_primary_key(vec!["id".to_string()]);
+        table.set_primary_key(PrimaryKeyDefinition {
+            name: "test_table_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
         table
     }
 

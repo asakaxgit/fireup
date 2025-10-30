@@ -188,7 +188,10 @@ mod transformer_tests {
         users_table.add_column(ColumnDefinition::new("name".to_string(), PostgreSQLType::Varchar(Some(255))));
         users_table.add_column(ColumnDefinition::new("email".to_string(), PostgreSQLType::Varchar(Some(255))));
         users_table.add_column(ColumnDefinition::new("age".to_string(), PostgreSQLType::Integer));
-        users_table.set_primary_key(vec!["id".to_string()]);
+        users_table.set_primary_key(PrimaryKeyDefinition {
+            name: "users_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
         schema.tables.push(users_table);
 
         // Create normalized table for user tags
@@ -196,7 +199,10 @@ mod transformer_tests {
         tags_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
         tags_table.add_column(ColumnDefinition::new("user_id".to_string(), PostgreSQLType::Uuid).not_null());
         tags_table.add_column(ColumnDefinition::new("value".to_string(), PostgreSQLType::Varchar(Some(100))));
-        tags_table.set_primary_key(vec!["id".to_string()]);
+        tags_table.set_primary_key(PrimaryKeyDefinition {
+            name: "users_tags_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
         tags_table.add_foreign_key(ForeignKeyDefinition {
             constraint_name: "fk_users_tags_user_id".to_string(),
             column: "user_id".to_string(),
@@ -355,7 +361,10 @@ mod transformer_tests {
         profile_table.add_column(ColumnDefinition::new("user_id".to_string(), PostgreSQLType::Uuid).not_null());
         profile_table.add_column(ColumnDefinition::new("first_name".to_string(), PostgreSQLType::Varchar(Some(100))));
         profile_table.add_column(ColumnDefinition::new("last_name".to_string(), PostgreSQLType::Varchar(Some(100))));
-        profile_table.set_primary_key(vec!["id".to_string()]);
+        profile_table.set_primary_key(PrimaryKeyDefinition {
+            name: "users_profile_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
         profile_table.add_foreign_key(ForeignKeyDefinition {
             constraint_name: "fk_users_profile_user_id".to_string(),
             column: "user_id".to_string(),
@@ -398,7 +407,10 @@ mod sql_generator_tests {
         table.add_column(ColumnDefinition::new("age".to_string(), PostgreSQLType::Integer));
         table.add_column(ColumnDefinition::new("active".to_string(), PostgreSQLType::Boolean));
         table.add_column(ColumnDefinition::new("metadata".to_string(), PostgreSQLType::Jsonb));
-        table.set_primary_key(vec!["id".to_string()]);
+        table.set_primary_key(PrimaryKeyDefinition {
+            name: "test_table_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
         table
     }
 

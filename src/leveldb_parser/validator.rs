@@ -7,7 +7,7 @@ use tokio::fs;
 use tracing::{debug, info};
 
 /// Result of backup validation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ValidationResult {
     pub is_valid: bool,
     pub errors: Vec<String>,
@@ -18,7 +18,7 @@ pub struct ValidationResult {
 }
 
 /// Information about the backup file
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct FileInfo {
     pub file_path: String,
     pub file_size: u64,
@@ -27,7 +27,7 @@ pub struct FileInfo {
 }
 
 /// Information about the backup structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StructureInfo {
     pub total_blocks: usize,
     pub total_records: usize,
@@ -38,7 +38,7 @@ pub struct StructureInfo {
 }
 
 /// Information about backup integrity
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct IntegrityInfo {
     pub checksum_failures: usize,
     pub incomplete_records: usize,

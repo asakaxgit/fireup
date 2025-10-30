@@ -1,5 +1,5 @@
 use crate::error::FireupError;
-use crate::types::{FirestoreDocument, NormalizedSchema, TableDefinition, ColumnDefinition, PostgreSQLType};
+use crate::types::{FirestoreDocument, NormalizedSchema, TableDefinition, ColumnDefinition, PostgreSQLType, PrimaryKeyDefinition};
 use crate::data_importer::type_mapper::{DataTypeMapper, TypeMappingResult};
 use serde_json::{Value, Map};
 use std::collections::{HashMap, HashSet};
@@ -215,14 +215,18 @@ impl DocumentTransformer {
         };
 
         // Add primary key to columns
-        if let Some(pk_column) = table.primary_key.first() {
-            columns.insert(pk_column.clone(), primary_key.clone());
+        if let Some(ref pk) = table.primary_key {
+            if let Some(pk_column) = pk.columns.first() {
+                columns.insert(pk_column.clone(), primary_key.clone());
+            }
         }
 
         // Transform each field according to the table schema
         for column in &table.columns {
-            if table.primary_key.contains(&column.name) {
-                continue; // Already handled primary key
+            if let Some(ref pk) = table.primary_key {
+                if pk.columns.contains(&column.name) {
+                    continue; // Already handled primary key
+                }
             }
 
             let field_value = self.extract_field_value(&document.data, &column.name, &column.column_type)?;
@@ -460,8 +464,10 @@ impl DocumentTransformer {
             let item_id = format!("{}_{}", parent_id, index);
             let item_uuid = self.get_or_generate_uuid(&item_id);
             
-            if let Some(pk_column) = table.primary_key.first() {
-                columns.insert(pk_column.clone(), Value::String(item_uuid.to_string()));
+            if let Some(ref pk) = table.primary_key {
+                if let Some(pk_column) = pk.columns.first() {
+                    columns.insert(pk_column.clone(), Value::String(item_uuid.to_string()));
+                }
             }
 
             // Add parent foreign key
@@ -475,8 +481,10 @@ impl DocumentTransformer {
                 Value::Object(obj) => {
                     // Object array item - map each field to table columns
                     for column in &table.columns {
-                        if table.primary_key.contains(&column.name) || 
-                           table.foreign_keys.iter().any(|fk| fk.column == column.name) {
+                        let is_primary_key = table.primary_key.as_ref()
+                            .map(|pk| pk.columns.contains(&column.name))
+                            .unwrap_or(false);
+                        if is_primary_key || table.foreign_keys.iter().any(|fk| fk.column == column.name) {
                             continue; // Already handled
                         }
 
@@ -525,8 +533,10 @@ impl DocumentTransformer {
         // Generate primary key for this object
         let object_uuid = self.get_or_generate_uuid(&format!("{}_obj", parent_id));
         
-        if let Some(pk_column) = table.primary_key.first() {
-            columns.insert(pk_column.clone(), Value::String(object_uuid.to_string()));
+        if let Some(ref pk) = table.primary_key {
+            if let Some(pk_column) = pk.columns.first() {
+                columns.insert(pk_column.clone(), Value::String(object_uuid.to_string()));
+            }
         }
 
         // Add parent foreign key
@@ -537,8 +547,10 @@ impl DocumentTransformer {
 
         // Map object fields to table columns
         for column in &table.columns {
-            if table.primary_key.contains(&column.name) || 
-               table.foreign_keys.iter().any(|fk| fk.column == column.name) {
+            let is_primary_key = table.primary_key.as_ref()
+                .map(|pk| pk.columns.contains(&column.name))
+                .unwrap_or(false);
+            if is_primary_key || table.foreign_keys.iter().any(|fk| fk.column == column.name) {
                 continue; // Already handled
             }
 
@@ -695,7 +707,10 @@ mod tests {
         users_table.add_column(ColumnDefinition::new("name".to_string(), PostgreSQLType::Varchar(Some(255))));
         users_table.add_column(ColumnDefinition::new("email".to_string(), PostgreSQLType::Varchar(Some(255))));
         users_table.add_column(ColumnDefinition::new("age".to_string(), PostgreSQLType::Integer));
-        users_table.set_primary_key(vec!["id".to_string()]);
+        users_table.set_primary_key(PrimaryKeyDefinition {
+            name: "users_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
 
         schema.tables.push(users_table);
         schema.metadata.table_count = 1;

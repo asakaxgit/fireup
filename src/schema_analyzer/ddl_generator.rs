@@ -1,6 +1,6 @@
 use crate::types::{
     NormalizedSchema, TableDefinition, ColumnDefinition, ForeignKeyDefinition, 
-    IndexDefinition, Constraint, ConstraintType, SchemaWarning
+    IndexDefinition, Constraint, ConstraintType, SchemaWarning, PrimaryKeyDefinition
 };
 use crate::error::{FireupResult, FireupError};
 
@@ -399,7 +399,10 @@ mod tests {
         table.add_column(ColumnDefinition::new("name".to_string(), PostgreSQLType::Text));
         table.add_column(ColumnDefinition::new("created_at".to_string(), PostgreSQLType::Timestamp).not_null());
         
-        table.set_primary_key(vec!["id".to_string()]);
+        table.set_primary_key(PrimaryKeyDefinition {
+            name: "table_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
         
         table.add_foreign_key(ForeignKeyDefinition {
             column: "profile_id".to_string(),
@@ -441,7 +444,10 @@ mod tests {
         users_table.add_column(ColumnDefinition::new("age".to_string(), PostgreSQLType::Integer));
         users_table.add_column(ColumnDefinition::new("score".to_string(), PostgreSQLType::Numeric(Some(10), Some(2))).with_default(serde_json::json!(0.0)));
         users_table.add_column(ColumnDefinition::new("active".to_string(), PostgreSQLType::Boolean).with_default(serde_json::json!(true)));
-        users_table.set_primary_key(vec!["id".to_string()]);
+        users_table.set_primary_key(PrimaryKeyDefinition {
+            name: "users_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
 
         let mut posts_table = TableDefinition::new("posts".to_string());
         posts_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
@@ -450,7 +456,10 @@ mod tests {
         posts_table.add_column(ColumnDefinition::new("user_id".to_string(), PostgreSQLType::Uuid).not_null());
         posts_table.add_column(ColumnDefinition::new("metadata".to_string(), PostgreSQLType::Jsonb));
         posts_table.add_column(ColumnDefinition::new("tags".to_string(), PostgreSQLType::Array(Box::new(PostgreSQLType::Text))));
-        posts_table.set_primary_key(vec!["id".to_string()]);
+        posts_table.set_primary_key(PrimaryKeyDefinition {
+            name: "posts_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
         
         posts_table.add_foreign_key(ForeignKeyDefinition {
             column: "user_id".to_string(),

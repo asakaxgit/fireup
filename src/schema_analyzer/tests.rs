@@ -307,8 +307,9 @@ mod normalizer_tests {
             .expect("Users table should be created");
         
         // Should have primary key
-        assert!(!users_table.primary_key.is_empty());
-        assert_eq!(users_table.primary_key[0], "id");
+        assert!(users_table.primary_key.is_some());
+        let pk = users_table.primary_key.as_ref().unwrap();
+        assert_eq!(pk.columns[0], "id");
         
         // Should have basic columns
         let id_column = users_table.columns.iter()
@@ -384,9 +385,9 @@ mod normalizer_tests {
         
         // Should generate indexes for primary keys and foreign keys
         for table in &schema.tables {
-            if !table.primary_key.is_empty() {
+            if let Some(ref pk) = table.primary_key {
                 let pk_index = table.indexes.iter()
-                    .find(|idx| idx.unique && idx.columns == table.primary_key);
+                    .find(|idx| idx.unique && idx.columns == pk.columns);
                 assert!(pk_index.is_some(), "Primary key index should be created for table {}", table.name);
             }
             

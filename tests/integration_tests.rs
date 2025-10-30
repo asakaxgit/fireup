@@ -701,14 +701,20 @@ impl MockSchemaAnalyzer {
         users_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
         users_table.add_column(ColumnDefinition::new("name".to_string(), PostgreSQLType::Text));
         users_table.add_column(ColumnDefinition::new("email".to_string(), PostgreSQLType::Varchar(Some(255))));
-        users_table.set_primary_key(vec!["id".to_string()]);
+        users_table.set_primary_key(PrimaryKeyDefinition {
+            name: "users_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
         
         let mut posts_table = TableDefinition::new("posts".to_string());
         posts_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
         posts_table.add_column(ColumnDefinition::new("title".to_string(), PostgreSQLType::Text));
         posts_table.add_column(ColumnDefinition::new("content".to_string(), PostgreSQLType::Text));
         posts_table.add_column(ColumnDefinition::new("author_id".to_string(), PostgreSQLType::Uuid));
-        posts_table.set_primary_key(vec!["id".to_string()]);
+        posts_table.set_primary_key(PrimaryKeyDefinition {
+            name: "posts_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
         
         schema.tables.push(users_table);
         schema.tables.push(posts_table);

@@ -1,5 +1,6 @@
 use crate::types::{
-    NormalizedSchema, SchemaAnalysis, WarningLevel
+    NormalizedSchema, SchemaAnalysis, WarningLevel, TableDefinition, ColumnDefinition, 
+    PostgreSQLType, IndexDefinition, ForeignKeyDefinition, PrimaryKeyDefinition
 };
 use crate::schema_analyzer::{
     DDLGenerator, GeneratedDDL, ConstraintGenerator, IndexGenerator,
@@ -642,7 +643,10 @@ mod tests {
         users_table.add_column(ColumnDefinition::new("email".to_string(), PostgreSQLType::Varchar(Some(255))).not_null());
         users_table.add_column(ColumnDefinition::new("name".to_string(), PostgreSQLType::Text));
         users_table.add_column(ColumnDefinition::new("created_at".to_string(), PostgreSQLType::Timestamp).not_null());
-        users_table.set_primary_key(vec!["id".to_string()]);
+        users_table.set_primary_key(PrimaryKeyDefinition {
+            name: "users_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
         
         users_table.add_index(IndexDefinition {
             name: "idx_users_email".to_string(),
@@ -656,7 +660,10 @@ mod tests {
         posts_table.add_column(ColumnDefinition::new("user_id".to_string(), PostgreSQLType::Uuid).not_null());
         posts_table.add_column(ColumnDefinition::new("title".to_string(), PostgreSQLType::Text).not_null());
         posts_table.add_column(ColumnDefinition::new("content".to_string(), PostgreSQLType::Text));
-        posts_table.set_primary_key(vec!["id".to_string()]);
+        posts_table.set_primary_key(PrimaryKeyDefinition {
+            name: "posts_pkey".to_string(),
+            columns: vec!["id".to_string()],
+        });
         
         posts_table.add_foreign_key(ForeignKeyDefinition {
             column: "user_id".to_string(),

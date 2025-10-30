@@ -9,6 +9,7 @@ mod types;
 mod leveldb_parser;
 mod schema_analyzer;
 mod data_importer;
+mod monitoring;
 
 use error::FireupError;
 use leveldb_parser::{LevelDBParser, BackupValidatorImpl, ValidationResult};
@@ -187,6 +188,9 @@ async fn main() -> Result<()> {
     // Initialize logging based on CLI options
     initialize_logging(&cli)?;
     
+    // Initialize monitoring system
+    monitoring::initialize_monitoring(monitoring::MonitoringConfig::default());
+    
     info!("Starting Fireup migration tool v{}", env!("CARGO_PKG_VERSION"));
     
     match cli.command {
@@ -315,11 +319,11 @@ async fn main() -> Result<()> {
 async fn execute_import_pipeline(
     backup_file: &PathBuf,
     postgres_url: &str,
-    batch_size: usize,
+    _batch_size: usize,
     max_connections: usize,
     skip_normalization: bool,
     drop_existing: bool,
-    continue_on_error: bool,
+    _continue_on_error: bool,
     generate_ddl: Option<&PathBuf>,
     timeout: u64,
 ) -> Result<FullImportResult, FireupError> {
@@ -386,7 +390,7 @@ async fn execute_import_pipeline(
     
     // Step 7: Transform and import data
     info!("Step 7: Transforming and importing data");
-    let transformer = DocumentTransformer::new();
+    let mut transformer = DocumentTransformer::new();
     let _transformation_result = transformer.transform_documents(documents, &normalized_schema)?;
     
     info!("Data transformation completed");
@@ -442,7 +446,7 @@ async fn execute_analyze_pipeline(
     
     // Step 4: Generate DDL
     info!("Step 4: Generating DDL statements");
-    let mut ddl_generator = DDLGenerator::new();
+    let ddl_generator = DDLGenerator::new();
     
     if generate_indexes {
         // Configure DDL generator to include indexes
@@ -501,9 +505,9 @@ async fn execute_validate_pipeline(
     
     if detailed {
         info!("File validation details:");
-        info!("  File size: {} bytes", result.file_info.size_bytes);
-        info!("  Structure valid: {}", result.structure_info.is_valid);
-        info!("  Integrity valid: {}", result.integrity_info.is_valid);
+        info!("  File size: {} bytes", result.file_info.file_size);
+        info!("  Structure valid: {} valid records out of {}", result.structure_info.valid_records, result.structure_info.total_records);
+        info!("  Integrity score: {:.2}", result.integrity_info.overall_integrity_score);
     }
     
     // Step 2: Parse and validate data quality (if requested)
@@ -610,6 +614,7 @@ fn create_basic_schema_from_analysis(analysis: &types::SchemaAnalysis) -> Result
         });
     }
     
+    let table_count = tables.len() as u32;
     Ok(NormalizedSchema {
         tables,
         relationships: vec![],
@@ -619,7 +624,7 @@ fn create_basic_schema_from_analysis(analysis: &types::SchemaAnalysis) -> Result
             version: "1.0".to_string(),
             generated_at: chrono::Utc::now(),
             source_analysis_id: uuid::Uuid::new_v4(),
-            table_count: tables.len() as u32,
+            table_count,
             relationship_count: 0,
         },
     })

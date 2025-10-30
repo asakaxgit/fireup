@@ -475,24 +475,19 @@ impl MonitoringSystem {
     }
 }
 
-// Global monitoring system instance
-static mut MONITORING_SYSTEM: Option<Arc<MonitoringSystem>> = None;
-static INIT: std::sync::Once = std::sync::Once::new();
+use std::sync::OnceLock;
+
+// Global monitoring system instance using OnceLock for thread safety
+static MONITORING_SYSTEM: OnceLock<Arc<MonitoringSystem>> = OnceLock::new();
 
 /// Initialize the global monitoring system
 pub fn initialize_monitoring(config: MonitoringConfig) {
-    INIT.call_once(|| {
-        unsafe {
-            MONITORING_SYSTEM = Some(Arc::new(MonitoringSystem::new(config)));
-        }
-    });
+    let _ = MONITORING_SYSTEM.set(Arc::new(MonitoringSystem::new(config)));
 }
 
 /// Get the global monitoring system instance
 pub fn get_monitoring_system() -> Arc<MonitoringSystem> {
-    unsafe {
-        MONITORING_SYSTEM.as_ref()
-            .expect("Monitoring system not initialized. Call initialize_monitoring() first.")
-            .clone()
-    }
+    MONITORING_SYSTEM.get()
+        .expect("Monitoring system not initialized. Call initialize_monitoring() first.")
+        .clone()
 }
