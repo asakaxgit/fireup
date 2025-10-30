@@ -1,12 +1,11 @@
 use crate::types::{
-    NormalizedSchema, SchemaAnalysis, WarningLevel, TableDefinition, ColumnDefinition, 
-    PostgreSQLType, IndexDefinition, ForeignKeyDefinition, PrimaryKeyDefinition
+    NormalizedSchema, SchemaAnalysis, WarningLevel
 };
 use crate::schema_analyzer::{
     DDLGenerator, GeneratedDDL, ConstraintGenerator, IndexGenerator,
     ConstraintAnalysisResult, IndexAnalysisResult
 };
-use crate::error::{FireupResult, FireupError};
+use crate::error::FireupResult;
 use std::fs;
 use chrono::Utc;
 

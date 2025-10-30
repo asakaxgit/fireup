@@ -10,5 +10,3 @@ mod tests;
 // Re-export main types and traits
 pub use importer::{PostgreSQLImporter, ConnectionConfig, FullImportResult};
 pub use transformer::*;
-pub use type_mapper::*;
-pub use sql_generator::*;

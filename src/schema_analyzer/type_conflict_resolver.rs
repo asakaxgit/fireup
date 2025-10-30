@@ -1,9 +1,9 @@
-use crate::error::{FireupError, FireupResult};
+use crate::error::FireupResult;
 use crate::types::{
-    TypeConflict, FieldTypeAnalysis, PostgreSQLType, SchemaAnalysis
+    TypeConflict, FieldTypeAnalysis, SchemaAnalysis
 };
 use std::collections::HashMap;
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 
 /// Type conflict resolver for handling data type inconsistencies
 pub struct TypeConflictResolver {

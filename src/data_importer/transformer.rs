@@ -1,10 +1,10 @@
 use crate::error::FireupError;
-use crate::types::{FirestoreDocument, NormalizedSchema, TableDefinition, ColumnDefinition, PostgreSQLType, PrimaryKeyDefinition};
-use crate::data_importer::type_mapper::{DataTypeMapper, TypeMappingResult};
+use crate::types::{FirestoreDocument, NormalizedSchema, TableDefinition, ColumnDefinition, PostgreSQLType};
+use crate::data_importer::type_mapper::DataTypeMapper;
 use serde_json::{Value, Map};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 
 /// Result of document transformation process
 #[derive(Debug, Clone)]

@@ -1,13 +1,10 @@
-use crate::error::{FireupError, FireupResult};
+use crate::error::FireupResult;
 use crate::types::{
     SchemaAnalysis, NormalizedSchema, TableDefinition, ColumnDefinition, 
-    PostgreSQLType, ForeignKeyDefinition, IndexDefinition, Relationship,
-    Constraint, ConstraintType, SchemaWarning, WarningLevel, SchemaMetadata,
+    PostgreSQLType, ForeignKeyDefinition, IndexDefinition, Relationship, SchemaWarning, WarningLevel, SchemaMetadata,
     RelationshipType, NormalizationType, NormalizationOpportunity, PrimaryKeyDefinition
 };
-use std::collections::{HashMap, HashSet};
-use serde_json::Value;
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 use chrono::Utc;
 use uuid::Uuid;
 

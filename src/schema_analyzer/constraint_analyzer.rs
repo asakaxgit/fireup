@@ -1,6 +1,6 @@
-use crate::error::{FireupError, FireupResult};
+use crate::error::FireupResult;
 use crate::types::{
-    FirestoreDocument, SchemaAnalysis, FieldTypeAnalysis, Constraint, ConstraintType
+    FirestoreDocument, SchemaAnalysis, Constraint, ConstraintType
 };
 use std::collections::{HashMap, HashSet};
 use serde_json::Value;

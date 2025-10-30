@@ -5,11 +5,7 @@ pub mod validator;
 #[cfg(test)]
 mod tests;
 
-pub use parser::{
-    LevelDBReader, FirestoreDocumentParser, ParseResult, BackupMetadata,
-    RecordType, RecordHeader, LogBlock, LogRecord, LevelDBParser
-};
+pub use parser::LevelDBParser;
 pub use validator::{
-    BackupValidatorImpl, ValidationResult, FileInfo, StructureInfo, IntegrityInfo,
-    ProgressInfo, ProgressCallback, LoggingProgressCallback, BackupValidator
+    BackupValidatorImpl, ValidationResult
 };

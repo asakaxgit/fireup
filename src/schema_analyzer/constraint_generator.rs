@@ -1,8 +1,8 @@
 use crate::types::{
-    NormalizedSchema, TableDefinition, ColumnDefinition, Constraint, ConstraintType,
-    SchemaAnalysis, FieldTypeAnalysis, DetectedRelationship, RelationshipType
+    NormalizedSchema, Constraint, ConstraintType,
+    SchemaAnalysis, FieldTypeAnalysis
 };
-use crate::error::{FireupResult, FireupError};
+use crate::error::FireupResult;
 use std::collections::{HashMap, HashSet};
 
 /// Generator for database constraints based on schema analysis
@@ -216,7 +216,7 @@ impl ConstraintGenerator {
         schema: &NormalizedSchema,
         analysis: &SchemaAnalysis,
     ) -> FireupResult<(Vec<Constraint>, Vec<ConstraintRecommendation>)> {
-        let mut constraints = Vec::new();
+        let constraints = Vec::new();
         let mut recommendations = Vec::new();
 
         // This would require additional uniqueness analysis in the schema analyzer

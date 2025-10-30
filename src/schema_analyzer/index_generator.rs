@@ -2,7 +2,7 @@ use crate::types::{
     NormalizedSchema, TableDefinition, ColumnDefinition, IndexDefinition, PostgreSQLType,
     SchemaAnalysis, FieldTypeAnalysis, ConstraintType
 };
-use crate::error::{FireupResult, FireupError};
+use crate::error::FireupResult;
 use std::collections::{HashMap, HashSet};
 
 /// Generator for database indexes based on schema analysis and usage patterns
@@ -318,7 +318,7 @@ impl IndexGenerator {
         schema: &NormalizedSchema,
         analysis: &SchemaAnalysis,
     ) -> FireupResult<(Vec<IndexDefinition>, Vec<IndexRecommendation>)> {
-        let mut indexes = Vec::new();
+        let indexes = Vec::new();
         let mut recommendations = Vec::new();
 
         for table in &schema.tables {
@@ -348,7 +348,7 @@ impl IndexGenerator {
         schema: &NormalizedSchema,
         analysis: &SchemaAnalysis,
     ) -> FireupResult<(Vec<IndexDefinition>, Vec<IndexRecommendation>)> {
-        let mut indexes = Vec::new();
+        let indexes = Vec::new();
         let mut recommendations = Vec::new();
 
         // Partial indexes are complex and require query pattern analysis
@@ -357,7 +357,7 @@ impl IndexGenerator {
             for column in &table.columns {
                 // Recommend partial indexes for boolean flags
                 if matches!(column.column_type, PostgreSQLType::Boolean) {
-                    let mut partial_index = IndexDefinition {
+                    let partial_index = IndexDefinition {
                         name: format!("idx_{}_{}_true", table.name, column.name),
                         columns: vec![column.name.clone()],
                         unique: false,

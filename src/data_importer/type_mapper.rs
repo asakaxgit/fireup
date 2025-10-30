@@ -1,9 +1,9 @@
 use crate::error::FireupError;
-use crate::types::{PostgreSQLType, FirestoreDocument};
+use crate::types::PostgreSQLType;
 use serde_json::Value;
 use std::collections::HashMap;
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 
 /// Maps Firestore data types to appropriate PostgreSQL types
 pub struct DataTypeMapper {

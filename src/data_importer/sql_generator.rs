@@ -1,5 +1,5 @@
 use crate::error::FireupError;
-use crate::types::{TableDefinition, PostgreSQLType, NormalizedSchema, PrimaryKeyDefinition};
+use crate::types::{TableDefinition, NormalizedSchema};
 use crate::data_importer::transformer::{TableRow, TransformationResult};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};

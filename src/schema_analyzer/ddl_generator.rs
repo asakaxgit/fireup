@@ -1,6 +1,6 @@
 use crate::types::{
     NormalizedSchema, TableDefinition, ColumnDefinition, ForeignKeyDefinition, 
-    IndexDefinition, Constraint, ConstraintType, SchemaWarning, PrimaryKeyDefinition
+    IndexDefinition, Constraint, ConstraintType, SchemaWarning
 };
 use crate::error::{FireupResult, FireupError};
 
