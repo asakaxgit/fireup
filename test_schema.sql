@@ -1,5 +1,0 @@
--- PostgreSQL DDL generated from Firestore schema analysis
--- Generated at: 2025-10-31 03:22:42 UTC
--- Tables: 0
--- Relationships: 0
--- Schema version: 1.0.0

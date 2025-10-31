@@ -99,7 +99,7 @@ impl BackupValidatorImpl {
     }
     
     /// Validate the backup file comprehensively
-    pub async fn validate_comprehensive(&self, file_path: &str) -> Result<ValidationResult, FireupError> {
+    pub async fn validate_comprehensive(&self, _file_path: &str) -> Result<ValidationResult, FireupError> {
         let file_path = &self.reader.file_path;
         let _context = ErrorContext {
             operation: "validate_comprehensive".to_string(),

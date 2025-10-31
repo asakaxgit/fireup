@@ -57,6 +57,13 @@ pub struct LogBlock {
     pub records: Vec<LogRecord>,
 }
 
+/// Supported backup formats
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackupFormat {
+    LevelDb,
+    JsonLines,
+}
+
 /// Individual log record within a block
 #[derive(Debug, Clone)]
 pub struct LogRecord {
@@ -249,7 +256,7 @@ impl LevelDBReader {
                     offset = next_offset;
                 }
                 Err(e) => {
-                    warn!("Failed to parse record at offset {} in block {}: {}", offset, block_position, e);
+                    debug!("Failed to parse record at offset {} in block {}: {}", offset, block_position, e);
                     // Skip to next potential record boundary
                     offset += 1;
                 }
@@ -440,32 +447,86 @@ impl FirestoreDocumentParser {
         
         info!("Starting Firestore document parsing");
         
-        // Read all blocks from the LevelDB file
-        let blocks = self.reader.read_file().await?;
         let file_size = self.reader.file_size().await?;
-        
-        // Reconstruct complete records from potentially fragmented log records
-        let complete_records = self.reconstruct_records(&blocks)?;
+        let format = self.detect_backup_format().await.unwrap_or(BackupFormat::LevelDb);
         
         // Parse each complete record as a Firestore document
         let mut documents = Vec::new();
         let mut collections = std::collections::HashSet::new();
         let mut errors = Vec::new();
-        
-        for (index, record_data) in complete_records.iter().enumerate() {
-            match self.parse_firestore_record(record_data, index).await {
-                Ok(Some(document)) => {
-                    collections.insert(document.collection.clone());
-                    documents.push(document);
+        let mut blocks_processed: usize = 0;
+        let mut records_processed: usize = 0;
+
+        match format {
+            BackupFormat::JsonLines => {
+                info!(
+                    "Detected JSON Lines backup; parsing as JSON lines: {}",
+                    self.reader.file_path
+                );
+                let file_bytes = tokio::fs::read(&self.reader.file_path).await.map_err(|e| {
+                    FireupError::leveldb_parse(
+                        format!("Failed to read file for JSON parsing: {}", e),
+                        context.clone(),
+                    )
+                })?;
+                let mut non_empty_lines = 0usize;
+                for (index, line) in file_bytes.split(|b| *b == b'\n').enumerate() {
+                    let Ok(line_str) = std::str::from_utf8(line) else { continue };
+                    let trimmed = line_str.trim();
+                    if trimmed.is_empty() { continue; }
+                    non_empty_lines += 1;
+                    match serde_json::from_str::<serde_json::Value>(trimmed) {
+                        Ok(json_value) => {
+                            match self.parse_json_document(&json_value, index).await {
+                                Ok(Some(document)) => {
+                                    collections.insert(document.collection.clone());
+                                    documents.push(document);
+                                }
+                                Ok(None) => {
+                                    debug!("Skipped non-document JSON line at index {}", index);
+                                }
+                                Err(e) => {
+                                    warn!("Failed to parse JSON line {}: {}", index, e);
+                                    errors.push(e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Ignore lines that aren't valid JSON
+                            debug!("Invalid JSON line {}: {}", index, e);
+                            continue;
+                        }
+                    }
                 }
-                Ok(None) => {
-                    // Skip non-document records (metadata, etc.)
-                    debug!("Skipped non-document record at index {}", index);
+                if documents.is_empty() {
+                    warn!("JSON Lines parsing did not produce any documents ({} non-empty lines)", non_empty_lines);
                 }
-                Err(e) => {
-                    warn!("Failed to parse record at index {}: {}", index, e);
-                    errors.push(e);
+                blocks_processed = 0;
+                records_processed = documents.len();
+            }
+            BackupFormat::LevelDb => {
+                // Read all blocks from the LevelDB file
+                let blocks = self.reader.read_file().await?;
+                // Reconstruct complete records from potentially fragmented log records
+                let complete_records = self.reconstruct_records(&blocks)?;
+                for (index, record_data) in complete_records.iter().enumerate() {
+                    match self.parse_firestore_record(record_data, index).await {
+                        Ok(Some(document)) => {
+                            collections.insert(document.collection.clone());
+                            documents.push(document);
+                        }
+                        Ok(None) => {
+                            // Skip non-document records (metadata, etc.)
+                            debug!("Skipped non-document record at index {}", index);
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse record at index {}: {}", index, e);
+                            errors.push(e);
+                        }
+                    }
                 }
+                blocks_processed = blocks.len();
+                records_processed = complete_records.len();
             }
         }
         
@@ -475,8 +536,8 @@ impl FirestoreDocumentParser {
             file_size,
             document_count: documents.len(),
             collection_count: collections.len(),
-            blocks_processed: blocks.len(),
-            records_processed: complete_records.len(),
+            blocks_processed,
+            records_processed,
         };
         
         info!(
@@ -519,6 +580,35 @@ impl FirestoreDocumentParser {
             metadata,
             errors,
         })
+    }
+
+    /// Detect whether the backup file is a LevelDB log or JSON Lines
+    async fn detect_backup_format(&self) -> Result<BackupFormat, FireupError> {
+        // Read a small prefix of the file
+        let mut file = File::open(&self.reader.file_path).await
+            .map_err(|e| FireupError::leveldb_parse(format!("Failed to open file for format detection: {}", e), ErrorContext {
+                operation: "detect_backup_format".to_string(),
+                metadata: HashMap::from([("file_path".to_string(), self.reader.file_path.clone())]),
+                timestamp: chrono::Utc::now(),
+                call_path: vec!["leveldb_parser::parser::FirestoreDocumentParser".to_string()],
+            }))?;
+
+        let mut buf = vec![0u8; 8192];
+        let n = file.read(&mut buf).await.unwrap_or(0);
+        buf.truncate(n);
+
+        // If the prefix decodes as UTF-8 and contains braces or newlines, likely JSON lines
+        if let Ok(prefix) = std::str::from_utf8(&buf) {
+            let has_brace = prefix.contains('{') || prefix.contains('[');
+            let has_newline = prefix.contains('\n');
+            let printable_ratio = prefix.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\r' || *c == '\t').count() as f64
+                / (prefix.chars().count().max(1) as f64);
+            if has_brace && has_newline && printable_ratio > 0.95 {
+                return Ok(BackupFormat::JsonLines);
+            }
+        }
+
+        Ok(BackupFormat::LevelDb)
     }
     
     /// Reconstruct complete records from potentially fragmented log records
