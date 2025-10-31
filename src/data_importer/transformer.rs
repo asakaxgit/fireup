@@ -4,7 +4,7 @@ use crate::data_importer::type_mapper::DataTypeMapper;
 use serde_json::{Value, Map};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 
 /// Result of document transformation process
 #[derive(Debug, Clone)]

@@ -1,6 +1,8 @@
 use super::*;
 use crate::types::*;
 use crate::data_importer::importer::{ImportResult, TableImportSpec, BatchConfig, ImportProgress, ConnectionConfig, PostgreSQLImporter, FullImportResult};
+use crate::data_importer::type_mapper::DataTypeMapper;
+use crate::data_importer::sql_generator::{SQLGenerator, SQLGenerationConfig, ConflictStrategy, StatementType};
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;

@@ -1,6 +1,8 @@
 // Unit tests for LevelDB parser functionality
 use super::*;
 use crate::error::{FireupError, ErrorContext};
+use crate::leveldb_parser::parser::{LevelDBReader, FirestoreDocumentParser, RecordType};
+use crate::leveldb_parser::validator::LoggingProgressCallback;
 use tempfile::TempDir;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;

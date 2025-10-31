@@ -35,6 +35,16 @@ impl DeploymentTestConfig {
 
 /// Docker container management for deployment tests
 struct DockerManager;
+fn docker_available() -> bool {
+    if std::env::var("FIREUP_SKIP_DOCKER").is_ok() {
+        return false;
+    }
+    std::process::Command::new("docker")
+        .arg("ps")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
 impl DockerManager {
     /// Start PostgreSQL container using docker-compose
@@ -143,6 +153,10 @@ impl DockerManager {
 
 #[tokio::test]
 async fn test_docker_container_startup_and_connectivity() -> Result<()> {
+    if !docker_available() {
+        println!("Skipping Docker-dependent test: test_docker_container_startup_and_connectivity");
+        return Ok(());
+    }
     let config = DeploymentTestConfig::from_env();
 
     // Test 1: Start container if not running
@@ -188,6 +202,10 @@ async fn test_docker_container_startup_and_connectivity() -> Result<()> {
 
 #[tokio::test]
 async fn test_postgresql_client_connections() -> Result<()> {
+    if !docker_available() {
+        println!("Skipping Docker-dependent test: test_postgresql_client_connections");
+        return Ok(());
+    }
     let config = DeploymentTestConfig::from_env();
 
     // Ensure container is running and ready
@@ -303,6 +321,10 @@ async fn test_postgresql_client_connections() -> Result<()> {
 
 #[tokio::test]
 async fn test_environment_variable_configuration() -> Result<()> {
+    if !docker_available() {
+        println!("Skipping Docker-dependent test: test_environment_variable_configuration");
+        return Ok(());
+    }
     // Test 1: Verify default environment variables are working
     let default_config = DeploymentTestConfig::from_env();
     
@@ -421,6 +443,10 @@ async fn test_environment_variable_configuration() -> Result<()> {
 
 #[tokio::test]
 async fn test_container_persistence_and_recovery() -> Result<()> {
+    if !docker_available() {
+        println!("Skipping Docker-dependent test: test_container_persistence_and_recovery");
+        return Ok(());
+    }
     let config = DeploymentTestConfig::from_env();
 
     // Ensure container is running
@@ -519,6 +545,10 @@ async fn test_container_persistence_and_recovery() -> Result<()> {
 
 #[tokio::test]
 async fn test_container_health_and_monitoring() -> Result<()> {
+    if !docker_available() {
+        println!("Skipping Docker-dependent test: test_container_health_and_monitoring");
+        return Ok(());
+    }
     let config = DeploymentTestConfig::from_env();
 
     // Ensure container is running

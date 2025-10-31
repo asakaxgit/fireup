@@ -33,3 +33,27 @@ Thumbs.db
 # Generated files
 schema.sql
 *.ddl
+
+# TypeScript/Node.js
+node_modules/
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+*.tsbuildinfo
+dist/
+build/
+coverage/
+.nyc_output/
+.cache/
+.parcel-cache/
+.next/
+out/
+.nuxt/
+.vuepress/dist/
+.serverless/
+.fusebox/
+.dynamodb/
+.tern-port

@@ -1,6 +1,7 @@
 use super::*;
 use crate::types::*;
 use crate::monitoring::{initialize_monitoring, MonitoringConfig};
+use crate::schema_analyzer::type_conflict_resolver::TypeConflictResolver;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
