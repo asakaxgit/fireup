@@ -1,6 +1,6 @@
 use super::test_utils::*;
 use fireup::leveldb_parser::validator::{BackupValidator, BackupValidatorImpl};
-use fireup::leveldb_parser::parser::{FirestoreDocumentParser, LevelDBParser, RecordType};
+use fireup::leveldb_parser::parser::{LevelDBParser, RecordType};
 use fireup::error::FireupError;
 use bytes::Bytes;
 use tokio;

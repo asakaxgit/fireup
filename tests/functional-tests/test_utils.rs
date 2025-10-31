@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 use serde_json::json;
 use fireup::types::{FirestoreDocument, DocumentMetadata};
-use fireup::leveldb_parser::parser::{FirestoreDocumentParser, LevelDBParser};
+use fireup::leveldb_parser::parser::FirestoreDocumentParser;
 
 /// Test data directory path
 pub fn test_data_dir() -> PathBuf {

@@ -442,7 +442,7 @@ impl DataTypeMapper {
     }
 
     /// Find a compatible PostgreSQL type for multiple type mappings
-    fn find_compatible_type(&self, mappings: Vec<TypeMappingResult>, field_path: &str) -> Result<TypeMappingResult, FireupError> {
+    fn find_compatible_type(&self, mappings: Vec<TypeMappingResult>, _field_path: &str) -> Result<TypeMappingResult, FireupError> {
         if mappings.is_empty() {
             return Err(FireupError::TypeMapping("No type mappings provided".to_string()));
         }

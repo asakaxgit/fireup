@@ -1,13 +1,12 @@
 use super::test_utils::*;
 use fireup::leveldb_parser::parser::{FirestoreDocumentParser, LevelDBParser};
 use fireup::error::FireupError;
-use std::collections::HashMap;
 use tokio;
 
 #[tokio::test]
 async fn test_parser_creation() {
     ensure_monitoring_initialized();
-    let parser = create_test_parser();
+    let _parser = create_test_parser();
     // Parser should be created successfully - we can't access private fields
     // but we can test that it was created without panicking
     assert!(true);
@@ -56,7 +55,7 @@ async fn test_json_document_parsing() {
     let sample_json = sample_json_document();
     
     // Test the JSON parsing logic directly
-    let json_obj = sample_json.as_object().unwrap();
+    let _json_obj = sample_json.as_object().unwrap();
     // Cannot test private method directly, so we'll test through public interface
     let test_file_path = get_test_data_path();
     let result = parser.parse_backup(&test_file_path).await;
@@ -75,7 +74,7 @@ async fn test_json_document_parsing() {
 async fn test_complex_nested_document_parsing() {
     ensure_monitoring_initialized();
     let parser = create_test_parser();
-    let complex_json = sample_complex_document();
+    let _complex_json = sample_complex_document();
     
     // Cannot test private method directly, so we'll test through public interface
     let test_file_path = get_test_data_path();
@@ -136,7 +135,7 @@ async fn test_firestore_value_unwrapping() {
     }
     
     // Test array unwrapping
-    let array_input = serde_json::json!({
+    let _array_input = serde_json::json!({
         "arrayValue": {
             "values": [
                 {"stringValue": "item1"},
@@ -154,7 +153,7 @@ async fn test_firestore_value_unwrapping() {
     assert_eq!(array[1].as_str().unwrap(), "item2");
     
     // Test map unwrapping
-    let map_input = serde_json::json!({
+    let _map_input = serde_json::json!({
         "mapValue": {
             "fields": {
                 "name": {"stringValue": "John"},
@@ -174,7 +173,7 @@ async fn test_firestore_value_unwrapping() {
 #[tokio::test]
 async fn test_metadata_field_detection() {
     ensure_monitoring_initialized();
-    let parser = create_test_parser();
+    let _parser = create_test_parser();
     
     // Test metadata field detection
     let metadata_fields = vec![
@@ -227,7 +226,7 @@ async fn test_empty_document_handling() {
     let parser = create_test_parser();
     
     // Test with empty JSON object
-    let empty_json = serde_json::json!({});
+    let _empty_json = serde_json::json!({});
     // Cannot test private method directly - testing through public interface
     let test_file_path = get_test_data_path();
     let result = parser.parse_backup(&test_file_path).await;
@@ -248,7 +247,7 @@ async fn test_malformed_json_handling() {
     let parser = create_test_parser();
     
     // Test with malformed document structure
-    let malformed_json = serde_json::json!({
+    let _malformed_json = serde_json::json!({
         "fields": {
             "invalidField": {
                 "unknownType": "value"

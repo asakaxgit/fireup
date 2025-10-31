@@ -2,8 +2,7 @@ use super::test_utils::*;
 use fireup::leveldb_parser::parser::{FirestoreDocumentParser, LevelDBParser, LevelDBReader};
 use fireup::leveldb_parser::validator::{BackupValidator, BackupValidatorImpl};
 use fireup::schema_analyzer::{DocumentStructureAnalyzer, NormalizationEngine};
-use fireup::types::{FirestoreDocument, PostgreSQLType, FieldTypeAnalysis};
-use std::collections::HashMap;
+use fireup::types::{PostgreSQLType, FieldTypeAnalysis};
 use tokio;
 
 #[tokio::test]

@@ -272,7 +272,7 @@ impl DocumentTransformer {
         &self,
         data: &HashMap<String, Value>,
         field_path: &str,
-        expected_type: &PostgreSQLType,
+        _expected_type: &PostgreSQLType,
     ) -> Result<Option<Value>, FireupError> {
         let path_parts: Vec<&str> = field_path.split('.').collect();
         
@@ -369,7 +369,7 @@ impl DocumentTransformer {
     pub fn transform_foreign_key_value(
         &mut self,
         value: &Value,
-        referenced_table: &str,
+        _referenced_table: &str,
     ) -> Result<Value, FireupError> {
         match value {
             Value::String(s) => {
@@ -685,6 +685,7 @@ mod tests {
     use super::*;
     use crate::types::*;
     use serde_json::json;
+    use chrono::Utc;
 
     fn create_test_schema() -> NormalizedSchema {
         let mut schema = NormalizedSchema {
@@ -786,7 +787,7 @@ mod tests {
 
     #[test]
     fn test_type_conversion_warnings() {
-        let mut transformer = DocumentTransformer::new();
+        let transformer = DocumentTransformer::new();
         let mut warnings = Vec::new();
 
         let column = ColumnDefinition::new("age".to_string(), PostgreSQLType::Integer);

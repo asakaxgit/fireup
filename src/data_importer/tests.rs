@@ -5,7 +5,6 @@ use crate::data_importer::type_mapper::DataTypeMapper;
 use crate::data_importer::sql_generator::{SQLGenerator, SQLGenerationConfig, ConflictStrategy, StatementType};
 use serde_json::json;
 use std::collections::HashMap;
-use std::time::Duration;
 use uuid::Uuid;
 
 /// Test type mapping with various Firestore data types
@@ -867,7 +866,7 @@ mod postgresql_importer_tests {
 /// Test batch processing with large datasets
 #[cfg(test)]
 mod batch_processor_tests {
-    use crate::data_importer::importer::{BatchConfig, ImportProgress};
+    use crate::data_importer::importer::{ConnectionConfig, PostgreSQLImporter, FullImportResult, BatchConfig, ImportProgress};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;

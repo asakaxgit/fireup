@@ -358,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_firestore_document_parser_new() {
-        let parser = FirestoreDocumentParser::new("test.leveldb");
+        let _parser = FirestoreDocumentParser::new("test.leveldb");
         // Note: reader field is private, so we can't test it directly
         // but we can test that the parser was created successfully
         assert!(true); // Parser creation succeeded if we reach this point
@@ -482,8 +482,8 @@ mod tests {
         
         // Should handle invalid JSON gracefully
         assert_eq!(parse_result.documents.len(), 0);
-        // May have parsing errors but shouldn't crash
-        assert!(parse_result.errors.len() >= 0);
+        // Ensure the parser returns without crashing
+        assert!(true);
     }
 
     #[tokio::test]
@@ -607,8 +607,8 @@ mod tests {
         assert!(validation_result.file_info.is_readable);
         assert_eq!(validation_result.file_info.file_size, 32768);
         
-        // May have warnings about corrupted records
-        assert!(validation_result.warnings.len() >= 0);
+        // Ensure the validator returns without crashing
+        assert!(true);
         
         // Integrity score should be lower due to corruption
         assert!(validation_result.integrity_info.overall_integrity_score <= 1.0);

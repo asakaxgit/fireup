@@ -100,7 +100,8 @@ impl BackupValidatorImpl {
     
     /// Validate the backup file comprehensively
     pub async fn validate_comprehensive(&self, file_path: &str) -> Result<ValidationResult, FireupError> {
-        let context = ErrorContext {
+        let file_path = &self.reader.file_path;
+        let _context = ErrorContext {
             operation: "validate_comprehensive".to_string(),
             metadata: HashMap::from([
                 ("file_path".to_string(), file_path.to_string()),
@@ -517,6 +518,7 @@ impl BackupValidatorImpl {
 }
 
 /// Trait for backup validation operations
+#[allow(async_fn_in_trait)]
 pub trait BackupValidator {
     async fn validate_backup(&self, file_path: &str) -> Result<ValidationResult, FireupError>;
 }

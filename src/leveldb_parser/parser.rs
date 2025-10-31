@@ -5,7 +5,8 @@ use crate::monitoring::{get_monitoring_system, AuditOperationType, AuditResult};
 use bytes::{Buf, Bytes};
 use std::collections::HashMap;
 use std::io::SeekFrom;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::fs as stdfs;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, info, warn, instrument};
@@ -72,10 +73,65 @@ pub struct LevelDBReader {
 impl LevelDBReader {
     /// Create a new LevelDB reader
     pub fn new(file_path: impl Into<String>) -> Self {
+        let input = file_path.into();
+        let resolved = Self::resolve_backup_path(&input).unwrap_or(input);
         Self {
-            file_path: file_path.into(),
+            file_path: resolved,
             block_size: 32768, // 32KB blocks as per LevelDB specification
         }
+    }
+    
+    /// Resolve a backup path that may be a directory to the actual backup file
+    fn resolve_backup_path(input: &str) -> Option<String> {
+        let p = Path::new(input);
+        if p.is_file() {
+            return Some(input.to_string());
+        }
+        if p.is_dir() {
+            // Prefer a file named "output-0" within common firestore export structure
+            if let Some(found) = Self::find_file_named(p, "output-0") {
+                return Some(found.to_string_lossy().to_string());
+            }
+            // Fallback: first regular file found (depth-first)
+            if let Some(any_file) = Self::find_any_file(p) {
+                return Some(any_file.to_string_lossy().to_string());
+            }
+        }
+        None
+    }
+    
+    fn find_file_named(dir: &Path, target_name: &str) -> Option<PathBuf> {
+        for entry in stdfs::read_dir(dir).ok()? {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name == target_name {
+                        return Some(path);
+                    }
+                }
+            } else if path.is_dir() {
+                if let Some(found) = Self::find_file_named(&path, target_name) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    
+    fn find_any_file(dir: &Path) -> Option<PathBuf> {
+        for entry in stdfs::read_dir(dir).ok()? {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.is_file() {
+                return Some(path);
+            } else if path.is_dir() {
+                if let Some(found) = Self::find_any_file(&path) {
+                    return Some(found);
+                }
+            }
+        }
+        None
     }
     
     /// Read and validate the entire LevelDB file
@@ -166,7 +222,7 @@ impl LevelDBReader {
     
     /// Parse all records within a block
     fn parse_block_records(&self, block_data: &Bytes, block_position: u64) -> Result<Vec<LogRecord>, FireupError> {
-        let context = ErrorContext {
+        let _context = ErrorContext {
             operation: "parse_block_records".to_string(),
             metadata: HashMap::from([
                 ("file_path".to_string(), self.file_path.clone()),
@@ -350,6 +406,7 @@ pub struct BackupMetadata {
 }
 
 /// Trait for LevelDB parsing operations
+#[allow(async_fn_in_trait)]
 pub trait LevelDBParser {
     async fn parse_backup(&self, file_path: &str) -> Result<ParseResult, FireupError>;
 }
@@ -622,7 +679,7 @@ impl FirestoreDocumentParser {
     }
     
     /// Parse a protobuf-encoded Firestore document
-    async fn parse_protobuf_document(&self, record_data: &Bytes, record_index: usize) -> Result<Option<FirestoreDocument>, FireupError> {
+    async fn parse_protobuf_document(&self, _record_data: &Bytes, record_index: usize) -> Result<Option<FirestoreDocument>, FireupError> {
         // For now, we'll implement a basic protobuf parser
         // In a production system, you'd use the actual Firestore protobuf definitions
         
@@ -819,7 +876,7 @@ impl FirestoreDocumentParser {
     }
     
     /// Extract subcollections from JSON object
-    async fn extract_subcollections(&self, obj: &serde_json::Map<String, serde_json::Value>) -> Result<Vec<FirestoreDocument>, FireupError> {
+    async fn extract_subcollections(&self, _obj: &serde_json::Map<String, serde_json::Value>) -> Result<Vec<FirestoreDocument>, FireupError> {
         // For now, return empty subcollections
         // In a full implementation, this would recursively parse nested collections
         Ok(Vec::new())
