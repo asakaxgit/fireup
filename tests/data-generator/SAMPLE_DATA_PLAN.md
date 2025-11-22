@@ -4,7 +4,7 @@ This document outlines the structured approach for creating organized sample dat
 
 ## Overview
 
-The sample data is organized in progressive levels of complexity, starting with the most basic primitives and gradually introducing more sophisticated data structures. Each level builds upon the previous one, ensuring comprehensive test coverage.
+The sample data is organized in progressive levels of complexity, starting with the most basic primitives and gradually introducing more sophisticated data structures. Samples start with tiny dump data based on primitives and one row, then continuously increase in complexity such as two primitives and two rows, progressing to more complex data finally. Each level builds upon the previous one, ensuring comprehensive test coverage.
 
 ## Data Structure Hierarchy
 
