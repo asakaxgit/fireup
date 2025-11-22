@@ -238,9 +238,9 @@ module_name/
 
 ### Configuration
 - Load configuration from environment variables
-- Provide sensible defaults
-- Use `.env` files for local development
-- Document all configuration options
+- Provide sensible defaults (see `.env.example` for default values)
+- Use `.env` files for local development (copy from `.env.example`)
+- Document all configuration options in `.env.example`
 
 ## Security Guidelines
 
@@ -331,8 +331,10 @@ When contributing code:
 
 ## Performance Considerations
 
-- Use batch operations for database imports (configurable via `FIREUP_MAX_BATCH_SIZE`)
-- Connection pooling is configured via `FIREUP_CONNECTION_POOL_SIZE`
+- Use batch operations for database imports (configurable via `FIREUP_MAX_BATCH_SIZE`, default: 1000)
+- Connection pooling is configured via `FIREUP_CONNECTION_POOL_SIZE` (default: 10)
+- Import timeout can be set via `FIREUP_IMPORT_TIMEOUT_SECONDS` (default: 3600)
+- All configuration variables are documented in `.env.example`
 - Use `rayon` for parallel processing where appropriate
 - Profile CPU-intensive operations with `cargo flamegraph`
 - Monitor memory usage during large imports
