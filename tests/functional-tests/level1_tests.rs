@@ -5,7 +5,7 @@ use tokio;
 
 /// Helper function to check if a JSON value represents a number
 fn has_number_value(v: &serde_json::Value) -> bool {
-    v.is_number() || v.is_i64() || v.is_u64() || v.is_f64()
+    v.is_number()
 }
 
 /// Level 1 test: Parse a document with two string fields
