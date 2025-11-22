@@ -107,19 +107,7 @@ async fn test_level1_two_numbers_parsing() {
                     
                     // Extract number values
                     let number_values: Vec<String> = doc.data.values()
-                        .filter_map(|v| {
-                            if v.is_i64() {
-                                Some(v.as_i64().unwrap().to_string())
-                            } else if v.is_u64() {
-                                Some(v.as_u64().unwrap().to_string())
-                            } else if v.is_f64() {
-                                Some(v.as_f64().unwrap().to_string())
-                            } else if v.is_number() {
-                                Some(v.as_number().unwrap().to_string())
-                            } else {
-                                None
-                            }
-                        })
+                        .filter_map(extract_number_value)
                         .collect();
                     
                     if number_values.len() >= 2 {
@@ -188,19 +176,7 @@ async fn test_level1_string_and_number_parsing() {
                         .find_map(|v| v.as_str().map(|s| s.to_string()));
                     
                     let number_value = doc.data.values()
-                        .find_map(|v| {
-                            if v.is_i64() {
-                                Some(v.as_i64().unwrap().to_string())
-                            } else if v.is_u64() {
-                                Some(v.as_u64().unwrap().to_string())
-                            } else if v.is_f64() {
-                                Some(v.as_f64().unwrap().to_string())
-                            } else if v.is_number() {
-                                Some(v.as_number().unwrap().to_string())
-                            } else {
-                                None
-                            }
-                        });
+                        .find_map(extract_number_value);
                     
                     match (string_value, number_value) {
                         (Some(s), Some(n)) => {
