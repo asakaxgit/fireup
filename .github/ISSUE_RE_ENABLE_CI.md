@@ -22,7 +22,8 @@ The following automatic triggers were commented out:
 
 2. **Restore CI Triggers**
    - Edit `.github/workflows/integration_tests.yml`
-   - Uncomment the automatic trigger configuration:
+   - Remove the temporary disable comments (lines 3-4 starting with `# TEMPORARILY DISABLED` and `# TODO`)
+   - Uncomment the automatic trigger configuration (lines 5-9):
      ```yaml
      on:
        push:
@@ -30,14 +31,24 @@ The following automatic triggers were commented out:
        pull_request:
          branches: [ main, develop ]
      ```
-   - Remove or update the temporary disable comment
-   - Remove the manual-only `workflow_dispatch` trigger (or keep it for manual runs)
+   - Optional: Keep the `workflow_dispatch` trigger to allow manual runs alongside automatic triggers, or merge both configurations:
+     ```yaml
+     on:
+       push:
+         branches: [ main, develop ]
+       pull_request:
+         branches: [ main, develop ]
+       workflow_dispatch:  # Allows manual runs when needed
+     ```
 
 3. **Verify CI Works**
-   - Make a test commit to a branch
-   - Open a test PR
-   - Confirm that the CI workflow runs automatically
+   - Create a test feature branch from `develop`
+   - Make a small test commit to the feature branch
+   - Push the branch and verify CI runs automatically on push
+   - Open a test PR targeting `develop` or `main`
+   - Confirm that the CI workflow runs automatically on the PR
    - Verify that all tests pass
+   - Close/merge the test PR once verified
 
 ## Success Criteria
 - [ ] Code preparation is complete
