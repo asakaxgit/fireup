@@ -62,7 +62,7 @@ The codebase is organized into five main modules:
 ### Initial Setup
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/asakaxgit/fireup.git
 cd fireup
 
 # Copy environment configuration
@@ -331,10 +331,11 @@ When contributing code:
 
 ## Performance Considerations
 
-- Use batch operations for database imports (configurable via `FIREUP_MAX_BATCH_SIZE`, default: 1000)
-- Connection pooling is configured via `FIREUP_CONNECTION_POOL_SIZE` (default: 10)
-- Import timeout can be set via `FIREUP_IMPORT_TIMEOUT_SECONDS` (default: 3600)
-- All configuration variables are documented in `.env.example`
+- Use batch operations for database imports
+  - Configurable via `FIREUP_MAX_BATCH_SIZE` (default: 1000, see `.env.example`)
+- Connection pooling is configured via `FIREUP_CONNECTION_POOL_SIZE` (default: 10, see `.env.example`)
+- Import timeout can be set via `FIREUP_IMPORT_TIMEOUT_SECONDS` (default: 3600, see `.env.example`)
+- All configuration variables are documented in `.env.example` with defaults
 - Use `rayon` for parallel processing where appropriate
 - Profile CPU-intensive operations with `cargo flamegraph`
 - Monitor memory usage during large imports
