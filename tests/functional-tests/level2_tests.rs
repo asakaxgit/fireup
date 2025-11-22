@@ -58,12 +58,7 @@ async fn test_level2_two_rows_parsing() {
                 );
                 
                 // Verify the name field is a string
-                let name_value = doc.data.get("name");
-                assert!(
-                    name_value.is_some(),
-                    "Document {} should have a 'name' field",
-                    doc.id
-                );
+                let name_value = doc.data.get("name").unwrap();
                 
                 println!("✅ Document {} has expected structure: name = {:?}", doc.id, name_value);
             }
