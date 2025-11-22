@@ -3,6 +3,14 @@ use fireup::leveldb_parser::parser::{FirestoreDocumentParser, LevelDBParser};
 use fireup::types::FirestoreDocument;
 use tokio;
 
+/// Helper function to get the type name of a serde_json::Value
+fn get_value_type_name(v: &serde_json::Value) -> &'static str {
+    if v.is_string() { "string" }
+    else if v.is_number() { "number" }
+    else if v.is_boolean() { "boolean" }
+    else { "unknown" }
+}
+
 /// Level 2 test: Parse two documents with the same single field structure
 #[tokio::test]
 async fn test_level2_two_rows_parsing() {
@@ -123,22 +131,10 @@ async fn test_level2_type_consistency() {
             
             // Verify all documents have the same field types
             let first_doc = &simple_items[0];
-            let first_name_type = first_doc.data.get("name")
-                .map(|v| {
-                    if v.is_string() { "string" }
-                    else if v.is_number() { "number" }
-                    else if v.is_boolean() { "boolean" }
-                    else { "unknown" }
-                });
+            let first_name_type = first_doc.data.get("name").map(get_value_type_name);
             
             for doc in &simple_items {
-                let name_type = doc.data.get("name")
-                    .map(|v| {
-                        if v.is_string() { "string" }
-                        else if v.is_number() { "number" }
-                        else if v.is_boolean() { "boolean" }
-                        else { "unknown" }
-                    });
+                let name_type = doc.data.get("name").map(get_value_type_name);
                 
                 assert_eq!(
                     first_name_type, name_type,
