@@ -12,7 +12,7 @@ if (getApps().length === 0) {
   });
 }
 
-console.log(`Connecting to Firestore emulator at: ${FIRESTORE_HOST}`)
+console.log(`Connecting to Firestore emulator at: ${FIRESTORE_HOST}`);
 
 const db = getFirestore();
 db.settings({
