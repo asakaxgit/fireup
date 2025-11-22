@@ -186,3 +186,18 @@ pub fn assert_document_data(doc: &FirestoreDocument, expected_fields: &[&str]) {
         );
     }
 }
+
+/// Extract number value from a JSON value and convert to string
+pub fn extract_number_value(v: &serde_json::Value) -> Option<String> {
+    if v.is_i64() {
+        Some(v.as_i64().unwrap().to_string())
+    } else if v.is_u64() {
+        Some(v.as_u64().unwrap().to_string())
+    } else if v.is_f64() {
+        Some(v.as_f64().unwrap().to_string())
+    } else if v.is_number() {
+        Some(v.as_number().unwrap().to_string())
+    } else {
+        None
+    }
+}
