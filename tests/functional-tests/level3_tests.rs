@@ -1,5 +1,5 @@
 use super::test_utils::*;
-use fireup::leveldb_parser::parser::{FirestoreDocumentParser, LevelDBParser};
+use fireup::leveldb_parser::parser::FirestoreDocumentParser;
 use fireup::types::FirestoreDocument;
 use fireup::schema_analyzer::{DocumentStructureAnalyzer, NormalizationEngine};
 use tokio;
@@ -43,14 +43,14 @@ async fn test_level3_parsing() {
                 println!("Document {}: {:?}", doc.id, doc.data);
                 
                 // Check for name field (string)
-                let has_name = doc.data.values().any(|v| {
-                    v.is_string() && !v.as_str().unwrap_or("").is_empty()
-                });
+                let has_name = doc.data.get("name")
+                    .map(|v| v.is_string() && !v.as_str().unwrap_or("").is_empty())
+                    .unwrap_or(false);
                 
                 // Check for age field (number)
-                let has_age = doc.data.values().any(|v| {
-                    v.is_number() || v.is_i64() || v.is_u64() || v.is_f64()
-                });
+                let has_age = doc.data.get("age")
+                    .map(|v| v.is_number() || v.is_i64() || v.is_u64() || v.is_f64())
+                    .unwrap_or(false);
                 
                 assert!(has_name, "Document {} should have a name field", doc.id);
                 assert!(has_age, "Document {} should have an age field", doc.id);
