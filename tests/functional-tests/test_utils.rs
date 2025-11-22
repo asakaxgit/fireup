@@ -195,8 +195,6 @@ pub fn extract_number_value(v: &serde_json::Value) -> Option<String> {
         Some(v.as_u64().unwrap().to_string())
     } else if v.is_f64() {
         Some(v.as_f64().unwrap().to_string())
-    } else if v.is_number() {
-        Some(v.as_number().unwrap().to_string())
     } else {
         None
     }
