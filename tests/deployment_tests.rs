@@ -520,6 +520,9 @@ async fn test_container_persistence_and_recovery() -> Result<()> {
 
     client.execute("CREATE SCHEMA IF NOT EXISTS persistence_test", &[]).await?;
     
+    // Drop table if it exists to ensure clean state from previous test runs
+    client.execute("DROP TABLE IF EXISTS persistence_test.recovery_data", &[]).await?;
+    
     client.execute("
         CREATE TABLE persistence_test.recovery_data (
             id SERIAL PRIMARY KEY,
