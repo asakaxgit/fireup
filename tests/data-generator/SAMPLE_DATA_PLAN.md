@@ -1,6 +1,6 @@
 # Organized Sample Data Plan
 
-This document outlines the structured approach for creating organized sample data for testing the Firestore to PostgreSQL migration tool. The data progresses from simple primitives to complex nested structures, enabling incremental testing and validation.
+This document outlines the structured approach for creating organized sample data for testing the Firestore to PostgreSQL migration tool. The data progresses from two primitives and two rows and then to more complex data finally, enabling incremental testing and validation.
 
 ## Overview
 
