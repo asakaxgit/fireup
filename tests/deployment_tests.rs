@@ -132,7 +132,57 @@ impl DockerManager {
             .args(&["logs", "fireup_postgres", "--tail", "50"])
             .output()?;
 
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "Failed to retrieve container logs. Exit code: {}. Error: {}",
+                output.status.code().unwrap_or(-1),
+                stderr
+            ));
+        }
+
+        let logs = String::from_utf8_lossy(&output.stdout).to_string();
+        
+        // If logs are empty, check if container exists and is running
+        if logs.trim().is_empty() {
+            // Verify container exists
+            let container_check = Command::new("docker")
+                .args(&["ps", "-a", "--filter", "name=fireup_postgres", "--format", "{{.Names}}"])
+                .output()?;
+            
+            let container_name = String::from_utf8_lossy(&container_check.stdout).trim().to_string();
+            
+            if container_name.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Container 'fireup_postgres' not found. Cannot retrieve logs."
+                ));
+            }
+            
+            // Try to get logs without --tail to see if there are any logs at all
+            let all_logs_output = Command::new("docker")
+                .args(&["logs", "fireup_postgres"])
+                .output()?;
+            
+            if !all_logs_output.status.success() {
+                let stderr = String::from_utf8_lossy(&all_logs_output.stderr);
+                return Err(anyhow::anyhow!(
+                    "Failed to retrieve container logs (fallback attempt). Exit code: {}. Error: {}",
+                    all_logs_output.status.code().unwrap_or(-1),
+                    stderr
+                ));
+            }
+            
+            let all_logs = String::from_utf8_lossy(&all_logs_output.stdout).to_string();
+            if all_logs.trim().is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Container logs are empty. Container may have just started or logging is not configured."
+                ));
+            }
+            // Return all logs if tail returned empty
+            return Ok(all_logs);
+        }
+
+        Ok(logs)
     }
 
     /// Restart PostgreSQL container
