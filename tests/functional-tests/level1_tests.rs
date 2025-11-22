@@ -1,5 +1,5 @@
 use super::test_utils::*;
-use fireup::leveldb_parser::parser::{FirestoreDocumentParser, LevelDBParser};
+use fireup::leveldb_parser::parser::FirestoreDocumentParser;
 use fireup::types::FirestoreDocument;
 use tokio;
 
