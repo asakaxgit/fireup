@@ -3,6 +3,11 @@ use fireup::leveldb_parser::parser::{FirestoreDocumentParser, LevelDBParser};
 use fireup::types::FirestoreDocument;
 use tokio;
 
+/// Helper function to check if a JSON value represents a number
+fn has_number_value(v: &serde_json::Value) -> bool {
+    v.is_number() || v.is_i64() || v.is_u64() || v.is_f64()
+}
+
 /// Level 1 test: Parse a document with two string fields
 #[tokio::test]
 async fn test_level1_two_strings_parsing() {
@@ -94,9 +99,7 @@ async fn test_level1_two_numbers_parsing() {
             let two_numbers_doc = result.documents.iter()
                 .find(|doc| {
                     let number_count = doc.data.values()
-                        .filter(|v| {
-                            v.is_number() || v.is_i64() || v.is_u64() || v.is_f64()
-                        })
+                        .filter(|v| has_number_value(v))
                         .count();
                     number_count >= 2
                 });
@@ -161,9 +164,7 @@ async fn test_level1_string_and_number_parsing() {
                     let has_string = doc.data.values().any(|v| {
                         v.is_string() && !v.as_str().unwrap_or("").is_empty()
                     });
-                    let has_number = doc.data.values().any(|v| {
-                        v.is_number() || v.is_i64() || v.is_u64() || v.is_f64()
-                    });
+                    let has_number = doc.data.values().any(|v| has_number_value(v));
                     has_string && has_number
                 });
             
