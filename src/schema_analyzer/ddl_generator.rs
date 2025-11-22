@@ -400,7 +400,7 @@ mod tests {
         table.add_column(ColumnDefinition::new("created_at".to_string(), PostgreSQLType::Timestamp).not_null());
         
         table.set_primary_key(PrimaryKeyDefinition {
-            name: "table_pkey".to_string(),
+            name: "pk_users".to_string(),
             columns: vec!["id".to_string()],
         });
         

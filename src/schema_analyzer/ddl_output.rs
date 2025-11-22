@@ -484,6 +484,8 @@ impl DDLOutputManager {
         doc.push_str("This schema was generated from Firestore backup data analysis.\n\n");
         
         let summary = ddl.summary();
+        doc.push_str(&format!("Tables: {}\n", summary.table_count));
+        doc.push_str(&format!("Foreign Keys: {}\n", summary.foreign_key_count));
         doc.push_str(&format!("- **Tables**: {}\n", summary.table_count));
         doc.push_str(&format!("- **Foreign Keys**: {}\n", summary.foreign_key_count));
         doc.push_str(&format!("- **Indexes**: {}\n", summary.index_count));
@@ -492,6 +494,7 @@ impl DDLOutputManager {
 
         // Transformation statistics
         doc.push_str("## Transformation Statistics\n\n");
+        doc.push_str(&format!("Collections Processed: {}\n", report.statistics.collections_processed));
         doc.push_str(&format!("- **Collections Processed**: {}\n", report.statistics.collections_processed));
         doc.push_str(&format!("- **Tables Generated**: {}\n", report.statistics.tables_generated));
         doc.push_str(&format!("- **Fields Transformed**: {}\n", report.statistics.fields_transformed));
@@ -531,6 +534,7 @@ impl DDLOutputManager {
         content.push_str("## Original Firestore Collections\n\n");
         for collection in &report.original_collections {
             content.push_str(&format!("### {}\n\n", collection.name));
+            content.push_str(&format!("Documents: {}\n", collection.document_count));
             content.push_str(&format!("- **Documents**: {}\n", collection.document_count));
             content.push_str(&format!("- **Fields**: {}\n", collection.field_count));
             content.push_str(&format!("- **Avg Size**: {:.2} bytes\n", collection.avg_size_bytes));
@@ -609,8 +613,8 @@ impl DDLOutputManager {
         }
 
         // Index recommendations
+        content.push_str("## Index Recommendations\n\n");
         if !indexes.recommendations.is_empty() {
-            content.push_str("## Index Recommendations\n\n");
             for rec in &indexes.recommendations {
                 content.push_str(&format!("### {}\n\n", rec.index.name));
                 content.push_str(&format!("**Columns**: {}\n\n", rec.index.columns.join(", ")));
@@ -619,6 +623,8 @@ impl DDLOutputManager {
                 content.push_str(&format!("**Performance Impact**: {:?}\n\n", rec.performance_impact));
                 content.push_str(&format!("**Storage Overhead**: {:?}\n\n", rec.storage_overhead));
             }
+        } else {
+            content.push_str("No index recommendations at this time.\n\n");
         }
 
         Ok(content)

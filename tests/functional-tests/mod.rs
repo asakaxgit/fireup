@@ -2,6 +2,7 @@
 pub mod parser_tests;
 pub mod integration_tests;
 pub mod validation_tests;
+pub mod tiny_tests;
 
 // Test utilities and helpers
 pub mod test_utils;
