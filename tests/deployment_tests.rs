@@ -232,10 +232,14 @@ async fn test_postgresql_client_connections() -> Result<()> {
     assert!(version.contains("PostgreSQL"), "Should return PostgreSQL version string");
 
     // Test 3: Test database operations
-    client.execute("CREATE SCHEMA IF NOT EXISTS test_deployment", &[]).await?;
+    // Drop schema if it exists to ensure clean state (removes any leftover data from previous test runs)
+    client.execute("DROP SCHEMA IF EXISTS test_deployment CASCADE", &[]).await?;
+    
+    // Create fresh schema and table
+    client.execute("CREATE SCHEMA test_deployment", &[]).await?;
     
     client.execute("
-        CREATE TABLE IF NOT EXISTS test_deployment.connection_test (
+        CREATE TABLE test_deployment.connection_test (
             id SERIAL PRIMARY KEY,
             test_data TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT NOW()
