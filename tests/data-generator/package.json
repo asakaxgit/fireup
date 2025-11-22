@@ -15,6 +15,8 @@
     "generate-tiny-without-emulator": "tsc && FIRESTORE_EMULATOR_HOST=localhost:18080 node dist/tiny.js",
     "generate-level1": "tsc && chmod +x dist/level1_two_primitives.js && npx firebase emulators:exec --export-on-exit=../.firestore-data dist/level1_two_primitives.js",
     "generate-level1-without-emulator": "tsc && FIRESTORE_EMULATOR_HOST=localhost:18080 node dist/level1_two_primitives.js",
+    "generate-level3": "tsc && chmod +x dist/level3_two_primitives_two_rows.js && npx firebase emulators:exec --export-on-exit=../.firestore-data dist/level3_two_primitives_two_rows.js",
+    "generate-level3-without-emulator": "tsc && FIRESTORE_EMULATOR_HOST=localhost:18080 node dist/level3_two_primitives_two_rows.js",
     "dev": "npx firebase emulators:start --import=../.firestore-data --export-on-exit",
     "open-ui": "open http://localhost:14000/firestore/default/data"
   },
