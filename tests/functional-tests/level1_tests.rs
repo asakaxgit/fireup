@@ -288,7 +288,7 @@ fn test_level1_file_read() {
     // Just verify we can read the file
     let data = std::fs::read(&export_path).expect("Should be able to read export file");
     
-    assert!(data.len() > 0, "Export file should not be empty");
+    assert!(!data.is_empty(), "Export file should not be empty");
     println!("✅ Successfully read {} bytes from export file", data.len());
     println!("🎯 Level 1 file read test PASSED");
 }
