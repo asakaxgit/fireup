@@ -461,7 +461,7 @@ tests/data-generator/
 │   ├── level6_arrays_of_objects.ts  # 📋 Level 6
 │   ├── level7_relationships.ts   # 📋 Level 7
 │   ├── level8_subcollections.ts  # 📋 Level 8
-│   ├── level9_complex.ts        # 📋 Level 9
+│   ├── level9_complex.ts        #  📋 Level 9
 │   └── main.ts                   # Current complex example (to be refactored)
 └── ../functional-tests/
     ├── tiny_tests.rs             # ✅ Level 0 tests
