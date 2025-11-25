@@ -2,14 +2,15 @@
 
 /**
  * Generic data generator runner.
- * Usage: node run-generator.js <generator-name>
- * Example: node run-generator.js level1 | level2 | level3 | main | tiny
+ * Usage: node dist/run-generator.js <generator-name>
+ * 
+ * Available generators: level1, level2, level3, main, tiny
  */
 
 const args = process.argv.slice(2);
 
 if (args.length === 0) {
-  console.error('Usage: node run-generator.js <generator-name>');
+  console.error('Usage: node dist/run-generator.js <generator-name>');
   console.error('Available generators: level1, level2, level3, main, tiny');
   process.exit(1);
 }
