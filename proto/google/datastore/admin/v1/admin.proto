@@ -1,0 +1,20 @@
+syntax = "proto3";
+package google.datastore.admin.v1;
+
+message EntityFilter {
+  repeated string kinds = 1;
+  repeated string namespace_ids = 2;
+}
+
+// Minimal export metadata wrapper capturing entity filter
+message ExportMetadata {
+  EntityFilter entity_filter = 1;
+}
+
+
+
+
+
+
+
+

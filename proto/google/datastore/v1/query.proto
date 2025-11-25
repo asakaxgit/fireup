@@ -1,0 +1,16 @@
+syntax = "proto3";
+package google.datastore.v1;
+
+import "google/datastore/v1/entity.proto";
+
+message EntityResult {
+  Entity entity = 1;
+}
+
+
+
+
+
+
+
+
