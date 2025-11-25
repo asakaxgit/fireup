@@ -3,6 +3,7 @@ pub mod parser_tests;
 pub mod integration_tests;
 pub mod validation_tests;
 pub mod tiny_tests;
+pub mod level2_tests;
 pub mod level1_tests;
 pub mod level3_tests;
 
