@@ -10,7 +10,7 @@ The data generator uses a generic command interface. You can run any generator b
 
 ```bash
 # With emulator (starts emulator, runs generator, exports data)
-npm run generate:run -- 'node dist/run-generator.js <generator-name>'
+npm run generate -- 'node dist/run-generator.js <generator-name>'
 
 # Without emulator (emulator must already be running)
 npm run generate:no-emulator -- <generator-name>
@@ -26,7 +26,7 @@ Available generators:
 Examples:
 ```bash
 # Generate level2 data with emulator
-npm run generate:run -- 'node dist/run-generator.js level2'
+npm run generate -- 'node dist/run-generator.js level2'
 
 # Generate level3 data (emulator must be running)
 npm run generate:no-emulator -- level3
@@ -43,7 +43,7 @@ npm run generate:no-emulator -- level2
 
 ### Option 2: Generate data only (no UI)
 ```bash
-npm run generate:run -- 'node dist/run-generator.js main'
+npm run generate -- 'node dist/run-generator.js main'
 ```
 
 ## Viewing Data
@@ -52,6 +52,25 @@ npm run generate:run -- 'node dist/run-generator.js main'
 - You should see:
   - `users` collection with 2 documents (alovelace, aturing)
   - `cities` collection with 5 documents (SF, LA, DC, TOK, BJ)
+
+## Adding New Generators
+
+To add a new generator:
+
+1. Create a new TypeScript file in `src/` (e.g., `src/level4_example.ts`)
+2. Add the generator to the map in `src/run-generator.ts`:
+   ```typescript
+   const generatorMap: Record<string, string> = {
+     'level1': './level1_two_primitives.js',
+     'level2': './level2_two_rows.js',
+     'level3': './level3_two_primitives_two_rows.js',
+     'level4': './level4_example.js',  // Add your new generator here
+     'main': './main.js',
+     'tiny': './tiny.js',
+   };
+   ```
+3. Run `npm run build` to compile
+4. Run your generator with `npm run generate:no-emulator -- level4`
 
 ## Troubleshooting
 - Make sure the emulator is running before using `generate:no-emulator`
