@@ -122,30 +122,47 @@ implementation.
 
 **Test Coverage:** Unit tests passing
 
-#### 5. Data Importer ⛔ **NOT WIRED UP**
-**Status:** Library methods exist; the CLI never calls them  
-**Location:** `src/data_importer/importer.rs`
+#### 5. Data Importer ✅ **WRITES ROWS**
+**Status:** The CLI runs the full import and the row counts are verified against
+a live PostgreSQL  
+**Location:** `src/data_importer/importer.rs`, `src/data_importer/connection.rs`
 
-**Blocking defects (evidence: SAK-139):**
-- `src/main.rs` calls only `create_schema`. `import_transformed_data` and
-  `execute_full_import` are never invoked, and the pipeline then returns
-  `total_records_imported: documents.len()` with `table_imports: vec![]` — so a
-  successful-looking `import` writes **zero rows** while reporting the full
-  document count as imported
-- `parse_postgres_url` discards the `--postgres-url` value entirely and returns
-  a hardcoded `postgres:password@localhost:5432/fireup_test`, so the tool cannot
-  connect to any other database (and embeds a credential in source)
+**Fixed under SAK-142** (the defects SAK-139 found by source inspection):
+- `src/main.rs` called only `create_schema` and then returned
+  `total_records_imported: documents.len()` with `table_imports: vec![]`, so a
+  successful-looking `import` wrote **zero rows**. The CLI now transforms the
+  documents into `TableImportSpec`s that carry the rows and calls
+  `execute_full_import`, which calls `import_transformed_data` per table.
+- `parse_postgres_url` discarded `--postgres-url` and returned a hardcoded
+  `postgres:password@localhost:5432/fireup_test`. Replaced by
+  `connection::parse_connection_url`, which parses every component; no
+  credential remains in source.
 
 **Capabilities:**
 - Connection pooling with `deadpool-postgres`
-- Batch processing for large datasets
-- Transaction-based imports with rollback capability
-- Progress tracking and resumable imports
-- Constraint validation during import
-- Configurable batch sizes and connection limits
+- Multi-row INSERTs with text parameters cast to the declared column type, so
+  NULL, UUID, JSONB, array and timestamp values round-trip without
+  string-formatting SQL
+- Batch size honoured from `--batch-size`, clamped to PostgreSQL's 65535
+  bind-parameter limit
+- `--continue-on-error` retries a failed batch row by row, so the importable
+  rows land and the rejected ones are named
+- `--drop-existing` drops the schema's tables in one transaction
+- Transaction-based schema creation with rollback
+- Constraint validation after import
 - Integration with PostgreSQL Docker container
 
-**Test Coverage:** Unit tests and integration tests passing
+**Measured (2026-11-02, SAK-142):** `tests/postgres_import_tests.rs` imports a
+25-document backup through the library path and a 12-document backup through the
+CLI, then counts the rows in PostgreSQL: one row per source document in both
+cases. Re-importing with `--drop-existing` leaves the same count rather than
+doubling it.
+
+**Known gap:** rows are keyed on a random UUID rather than the Datastore key
+(residual risk 4), so a complete import still produces unjoinable rows.
+
+**Test Coverage:** library unit tests, plus `tests/postgres_import_tests.rs`
+(requires `FIREUP_TEST_POSTGRES_URL`) and `tests/cli_exit_code_tests.rs`
 
 #### 6. CLI Interface ✅ **COMPLETE**
 **Status:** Fully functional with comprehensive command set  
