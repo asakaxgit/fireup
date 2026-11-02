@@ -768,16 +768,19 @@ impl FirestoreDocumentParser {
         Ok(Some(document))
     }
     
-    /// Parse a protobuf-encoded Firestore document
-    async fn parse_protobuf_document(&self, _record_data: &Bytes, record_index: usize) -> Result<Option<FirestoreDocument>, FireupError> {
-        // For now, we'll implement a basic protobuf parser
-        // In a production system, you'd use the actual Firestore protobuf definitions
-        
+    /// Parse a protobuf-encoded Firestore / Datastore Entity document
+    async fn parse_protobuf_document(&self, record_data: &Bytes, record_index: usize) -> Result<Option<FirestoreDocument>, FireupError> {
         debug!("Attempting to parse protobuf document at index {}", record_index);
-        
-        // This is a placeholder implementation
-        // Real protobuf parsing would require the Firestore protobuf schema
-        Ok(None)
+        match crate::leveldb_parser::protobuf_entity::try_decode_entity_document(record_data, record_index)? {
+            Some(document) => {
+                debug!(
+                    "Parsed protobuf Entity document: {}/{}",
+                    document.collection, document.id
+                );
+                Ok(Some(document))
+            }
+            None => Ok(None),
+        }
     }
     
     /// Extract document ID and collection name from JSON object

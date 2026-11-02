@@ -1,5 +1,6 @@
 // LevelDB parser module for Firestore backup files
 pub mod parser;
+pub mod protobuf_entity;
 pub mod validator;
 
 #[cfg(test)]
