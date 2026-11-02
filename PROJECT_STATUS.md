@@ -214,11 +214,17 @@ read a real export.
 - Integration tests available
 - Deployment tests available
 
-### Integration Testing ✅
+### Integration Testing ⛔
 **Location:** `tests/`
 
-**Available Test Suites:**
-- `integration_tests.rs` - End-to-end workflow testing
+`cargo test` does not compile — `tests/integration_tests.rs` is stale against
+`src/types.rs` (residual risk 12). This is pre-existing, not a regression. The
+suites below exist as files; only `real_export_validation` currently builds and
+runs.
+
+**Test Suites:**
+- `real_export_validation.rs` - Real-export format validation (builds, runs)
+- `integration_tests.rs` - End-to-end workflow testing (does not compile)
 - `deployment_tests.rs` - Docker and PostgreSQL testing
 - `functional-tests/` - Feature-specific tests
 - `data-generator/` - Test data generation utilities
@@ -403,6 +409,14 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
 
 11. **Library API panics.** `parse_documents()` panics via
     `get_monitoring_system()` unless `initialize_monitoring()` ran first.
+
+12. **`cargo test` does not compile.** `tests/integration_tests.rs` fails with 9
+    errors (`parse_backup` called without the `LevelDBParser` trait in scope;
+    `ColumnDefinition.data_type`, renamed to `column_type`). Pre-existing and
+    long-standing — reproduced at `fd24bf2`, before any SAK-137/SAK-139 work.
+    Only `cargo test --lib` and the individual working test targets run, so the
+    "integration tests available / passing" claim in this document was never
+    true. Either fix or remove the stale targets so `cargo test` is meaningful.
 
 ### Not yet assessed
 
