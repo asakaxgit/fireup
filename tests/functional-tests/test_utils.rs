@@ -52,6 +52,7 @@ pub fn create_test_document(id: &str, collection: &str) -> FirestoreDocument {
             path: format!("projects/test/databases/(default)/documents/{}/{}", collection, id),
             size_bytes: Some(256),
         },
+        key: None,
     }
 }
 

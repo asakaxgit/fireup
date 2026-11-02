@@ -1063,6 +1063,7 @@ fn create_mock_backup_data() -> Vec<FirestoreDocument> {
                 path: "users/user1".to_string(),
                 size_bytes: Some(1024),
             },
+            key: None,
         },
         FirestoreDocument {
             id: "post1".to_string(),
@@ -1090,6 +1091,7 @@ fn create_mock_backup_data() -> Vec<FirestoreDocument> {
                 path: "posts/post1".to_string(),
                 size_bytes: Some(512),
             },
+            key: None,
         },
     ]
 }
