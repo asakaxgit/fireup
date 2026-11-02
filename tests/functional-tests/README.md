@@ -57,20 +57,48 @@ The tests use sample Firestore export data located in `tests/.firestore-data/`:
 - **LevelDB Binary Data**: Real LevelDB format files for testing binary parsing
 - **JSON Documents**: Sample JSON documents with various Firestore value types
 
-## Running the Tests
+## Sample data ladder (Levels 1–4)
+
+Generators run from `tests/data-generator/` against the Firestore emulator and export fixtures to `tests/.firestore-data/`:
 
 ```bash
-# Run all functional tests
-cargo test --test functional_tests
-
-# Run specific test modules
-cargo test --test functional_tests parser_tests
-cargo test --test functional_tests integration_tests
-cargo test --test functional_tests validation_tests
-
-# Run with output for debugging
-cargo test --test functional_tests -- --nocapture
+cd tests/data-generator
+npm install
+npm run generate:level1   # two primitives
+npm run generate:level2   # two rows
+npm run generate:level3   # two primitives × two rows
+npm run generate:level4   # arrays of primitives
+# or: npm run generate:all-levels
 ```
+
+Generic CLI (after `npm run build`):
+
+```bash
+npx firebase emulators:exec --export-on-exit=../.firestore-data 'node dist/run-generator.js level2'
+```
+
+Level 1/3 tests skip when fixtures are missing; Level 2/4 behave the same way.
+
+## Running the Tests
+
+Functional tests are compiled as part of the `integration_tests` test target:
+
+```bash
+# All functional modules (from repo root)
+cargo test --test integration_tests functional_tests::
+
+# Examples
+cargo test --test integration_tests functional_tests::level2_tests
+cargo test --test integration_tests functional_tests::level4_tests
+
+# Shell helper (checks for fixtures)
+./tests/functional-tests/run_tests.sh
+
+# Verbose
+cargo test --test integration_tests functional_tests:: -- --nocapture
+```
+
+Postgres integration tests are separate; they require `FIREUP_TEST_POSTGRES_URL` (see `docs/INTEGRATION_TESTING.md`). Never point them at the Paperclip host database.
 
 ## Test Coverage
 

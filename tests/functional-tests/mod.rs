@@ -4,7 +4,9 @@ pub mod integration_tests;
 pub mod validation_tests;
 pub mod tiny_tests;
 pub mod level1_tests;
+pub mod level2_tests;
 pub mod level3_tests;
+pub mod level4_tests;
 
 // Test utilities and helpers
 pub mod test_utils;

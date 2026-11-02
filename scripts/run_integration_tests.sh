@@ -17,6 +17,8 @@ NC='\033[0m' # No Color
 # Configuration
 POSTGRES_PORT=${POSTGRES_PORT:-5433}
 TEST_DATABASE_URL="postgresql://fireup:fireup_dev_password@localhost:${POSTGRES_PORT}/fireup_test"
+export FIREUP_TEST_POSTGRES_URL="${FIREUP_TEST_POSTGRES_URL:-$TEST_DATABASE_URL}"
+export TEST_DATABASE_URL="${TEST_DATABASE_URL}"
 DOCKER_COMPOSE_FILE="docker-compose.yml"
 
 # Function to print colored output
@@ -147,7 +149,8 @@ run_integration_tests() {
     print_status "Running integration tests..."
     
     export TEST_DATABASE_URL="${TEST_DATABASE_URL}"
-    
+    export FIREUP_TEST_POSTGRES_URL="${FIREUP_TEST_POSTGRES_URL}"
+
     # Run integration tests with detailed output
     if cargo test --test integration_tests -- --nocapture; then
         print_success "Integration tests passed"

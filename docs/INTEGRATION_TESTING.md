@@ -219,8 +219,12 @@ The test suite can use example backup files from `examples/backup_files/`:
 
 ### Environment Variables
 
-- `TEST_DATABASE_URL`: PostgreSQL connection string for tests
-- `POSTGRES_PORT`: PostgreSQL port (default: 5433)
+- `FIREUP_TEST_POSTGRES_URL` (preferred): Dedicated Postgres URL for integration tests
+- `TEST_DATABASE_URL`: Legacy alias; same semantics as `FIREUP_TEST_POSTGRES_URL`
+- **Required:** One of the above must be set before Postgres integration tests run. There is no silent fallback to `localhost:5432` or the host cluster.
+- **Forbidden:** Never use the Paperclip application role (`paperclip`) or the `paperclip` database. Tests refuse those URLs.
+- `FIREUP_TEST_ALLOW_CREATE_DATABASE`: Set to `1` only when the test user has `CREATEDB` and you need per-run database creation (CI); otherwise tests connect to the database named in the URL.
+- `POSTGRES_PORT`: PostgreSQL port (default: 5433 for Docker Compose)
 - `POSTGRES_DB`: Test database name
 - `POSTGRES_USER`: Database user
 - `POSTGRES_PASSWORD`: Database password

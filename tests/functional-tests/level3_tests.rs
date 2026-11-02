@@ -1,5 +1,6 @@
 use super::test_utils::*;
 use fireup::leveldb_parser::parser::FirestoreDocumentParser;
+use fireup::leveldb_parser::LevelDBParser;
 use fireup::types::FirestoreDocument;
 use fireup::schema_analyzer::{DocumentStructureAnalyzer, NormalizationEngine};
 use tokio;
@@ -224,7 +225,7 @@ async fn test_level3_normalization() {
                                     
                                     // Print column details
                                     for column in &table.columns {
-                                        println!("  Column {}: {:?}", column.name, column.data_type);
+                                        println!("  Column {}: {:?}", column.name, column.column_type);
                                     }
                                     
                                     println!("✅ Users table has correct structure");
