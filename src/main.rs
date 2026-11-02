@@ -107,7 +107,9 @@ enum Commands {
         #[arg(long)]
         drop_existing: bool,
         
-        /// Continue import on constraint violations (log errors but don't stop)
+        /// Continue import on constraint violations: import the remaining rows
+        /// instead of aborting. The exit code still reports the failures, since a
+        /// partial import is not a completed migration.
         #[arg(long)]
         continue_on_error: bool,
         

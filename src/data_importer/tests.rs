@@ -757,12 +757,20 @@ mod postgresql_importer_tests {
     #[test]
     fn test_connection_config_defaults() {
         let config = ConnectionConfig::default();
-        
-        assert_eq!(config.host, "localhost");
-        assert_eq!(config.port, 5432);
-        assert_eq!(config.database, "fireup_dev");
-        assert_eq!(config.user, "fireup");
-        assert_eq!(config.password, "fireup_dev_password");
+
+        // The defaults follow libpq's PG* environment variables so that no
+        // credential is baked into the binary.
+        assert_eq!(config.host, std::env::var("PGHOST").unwrap_or_else(|_| "localhost".to_string()));
+        assert_eq!(
+            config.port,
+            std::env::var("PGPORT").ok().and_then(|port| port.parse().ok()).unwrap_or(5432)
+        );
+        assert_eq!(
+            config.database,
+            std::env::var("PGDATABASE").unwrap_or_else(|_| "fireup_dev".to_string())
+        );
+        assert_eq!(config.user, std::env::var("PGUSER").unwrap_or_else(|_| "fireup".to_string()));
+        assert_eq!(config.password, std::env::var("PGPASSWORD").unwrap_or_default());
         assert_eq!(config.max_connections, 10);
         assert_eq!(config.connection_timeout, Duration::from_secs(30));
         assert_eq!(config.retry_attempts, 3);
@@ -803,13 +811,9 @@ mod postgresql_importer_tests {
         let spec = TableImportSpec {
             table_name: "users".to_string(),
             columns: vec!["id".to_string(), "name".to_string(), "email".to_string()],
-            column_types: vec![
-                PostgreSQLType::Text,
-                PostgreSQLType::Text,
-                PostgreSQLType::Text,
-            ],
+            column_types: vec![PostgreSQLType::Uuid, PostgreSQLType::Text, PostgreSQLType::Text],
             rows: vec![vec![
-                Some("1".to_string()),
+                Some(Uuid::new_v4().to_string()),
                 Some("Ada".to_string()),
                 None,
             ]],
@@ -823,7 +827,112 @@ mod postgresql_importer_tests {
         assert_eq!(spec.column_types.len(), spec.columns.len());
         assert_eq!(spec.rows.len(), 1);
         assert_eq!(spec.batch_size, Some(1000));
+        assert_eq!(spec.effective_batch_size(), 1000);
         assert!(spec.validation_enabled);
+    }
+
+    /// A spec built from transformed rows must carry the rows, in column order,
+    /// with absent fields as NULL rather than as a shifted value.
+    #[test]
+    fn test_table_import_spec_from_table_rows() {
+        let table = TableDefinition {
+            name: "users".to_string(),
+            columns: vec![
+                ColumnDefinition {
+                    name: "id".to_string(),
+                    column_type: PostgreSQLType::Uuid,
+                    nullable: false,
+                    default_value: None,
+                    constraints: vec![],
+                },
+                ColumnDefinition {
+                    name: "email".to_string(),
+                    column_type: PostgreSQLType::Text,
+                    nullable: true,
+                    default_value: None,
+                    constraints: vec![],
+                },
+                ColumnDefinition {
+                    name: "profile".to_string(),
+                    column_type: PostgreSQLType::Jsonb,
+                    nullable: true,
+                    default_value: None,
+                    constraints: vec![],
+                },
+            ],
+            primary_key: None,
+            foreign_keys: vec![],
+            indexes: vec![],
+        };
+
+        let id = Uuid::new_v4().to_string();
+        let mut columns = HashMap::new();
+        columns.insert("id".to_string(), json!(id));
+        columns.insert("profile".to_string(), json!({"city": "Tokyo"}));
+        // `email` is deliberately absent.
+
+        let rows = vec![TableRow {
+            columns,
+            primary_key: json!(id),
+            foreign_keys: HashMap::new(),
+        }];
+
+        let spec = TableImportSpec::from_table_rows(&table, &rows);
+
+        assert_eq!(spec.columns, vec!["id", "email", "profile"]);
+        assert_eq!(spec.rows.len(), 1);
+        assert_eq!(spec.rows[0][0].as_deref(), Some(id.as_str()));
+        assert_eq!(spec.rows[0][1], None, "a missing field must become NULL");
+        assert_eq!(spec.rows[0][2].as_deref(), Some(r#"{"city":"Tokyo"}"#));
+    }
+
+    /// A batch may never exceed PostgreSQL's 65535 bind-parameter limit.
+    #[test]
+    fn test_effective_batch_size_respects_bind_parameter_limit() {
+        let spec = TableImportSpec {
+            table_name: "wide".to_string(),
+            columns: (0..100).map(|index| format!("c{index}")).collect(),
+            column_types: vec![PostgreSQLType::Text; 100],
+            rows: vec![],
+            batch_size: Some(10_000),
+            continue_on_error: false,
+            validation_enabled: false,
+        };
+
+        let batch_size = spec.effective_batch_size();
+        assert_eq!(batch_size, 655);
+        assert!(batch_size * 100 <= 65535);
+    }
+
+    #[test]
+    fn test_encode_param_covers_nulls_json_and_arrays() {
+        use crate::data_importer::importer::encode_param;
+
+        assert_eq!(encode_param(&json!(null), &PostgreSQLType::Text), None);
+        assert_eq!(
+            encode_param(&json!("hello"), &PostgreSQLType::Text).as_deref(),
+            Some("hello")
+        );
+        assert_eq!(encode_param(&json!(42), &PostgreSQLType::BigInt).as_deref(), Some("42"));
+        assert_eq!(
+            encode_param(&json!(true), &PostgreSQLType::Boolean).as_deref(),
+            Some("true")
+        );
+        // A JSONB cast needs valid JSON even for a bare string.
+        assert_eq!(
+            encode_param(&json!("hello"), &PostgreSQLType::Jsonb).as_deref(),
+            Some("\"hello\"")
+        );
+        assert_eq!(
+            encode_param(&json!(["a", "b\"c"]), &PostgreSQLType::Array(Box::new(PostgreSQLType::Text)))
+                .as_deref(),
+            Some(r#"{"a","b\"c"}"#)
+        );
+        // Epoch numbers do not cast to timestamptz on their own.
+        assert_eq!(
+            encode_param(&json!(0), &PostgreSQLType::Timestamp).as_deref(),
+            Some("1970-01-01T00:00:00+00:00")
+        );
     }
 
     #[test]
@@ -850,28 +959,66 @@ mod postgresql_importer_tests {
                 ("users".to_string(), vec![]),
                 ("posts".to_string(), vec!["Constraint violation".to_string()]),
             ],
-            total_records_expected: 150,
+            total_records_expected: 152,
             total_records_imported: 150,
             total_records_failed: 2,
             warnings: vec!["Global warning".to_string()],
         };
-        
+
         assert!(!result.is_successful()); // Has constraint violations
-        
+
         let summary = result.summary();
         assert!(summary.contains("2 tables processed"));
-        assert!(summary.contains("150 records imported"));
+        assert!(summary.contains("150/152 records imported"));
         assert!(summary.contains("2 failed"));
         assert!(summary.contains("1 warnings"));
         assert!(summary.contains("1 constraint violations"));
-        
+
         // Test successful result
         result.validation_results = vec![
             ("users".to_string(), vec![]),
             ("posts".to_string(), vec![]),
         ];
         result.total_records_failed = 0;
-        
+        result.total_records_imported = 152;
+
+        assert!(result.is_successful());
+    }
+
+    /// Reporting success while writing nothing is the defect SAK-142 was filed for.
+    #[test]
+    fn test_zero_row_import_is_not_successful() {
+        let result = FullImportResult {
+            schema_creation: Some(ImportResult {
+                imported_records: 3,
+                failed_records: 0,
+                warnings: vec![],
+            }),
+            table_imports: vec![],
+            validation_results: vec![],
+            total_records_expected: 12,
+            total_records_imported: 0,
+            total_records_failed: 0,
+            warnings: vec![],
+        };
+
+        assert!(!result.is_successful(), "0 of 12 rows imported must not report success");
+        assert!(result.summary().contains("0/12 records imported"));
+    }
+
+    /// An import with nothing to import is vacuously successful.
+    #[test]
+    fn test_empty_source_import_is_successful() {
+        let result = FullImportResult {
+            schema_creation: None,
+            table_imports: vec![],
+            validation_results: vec![],
+            total_records_expected: 0,
+            total_records_imported: 0,
+            total_records_failed: 0,
+            warnings: vec![],
+        };
+
         assert!(result.is_successful());
     }
 }
@@ -1298,5 +1445,116 @@ mod utils_tests {
         );
         
         assert!(multi_column_name.starts_with("orders_pk_user_id_order_id_"));
+    }
+}
+/// `--postgres-url` used to be validated and then thrown away in favour of a
+/// hardcoded target. These tests pin every component to the URL.
+#[cfg(test)]
+mod connection_url_tests {
+    use crate::data_importer::connection::parse_connection_url;
+    use std::time::Duration;
+
+    #[test]
+    fn test_parses_every_component() {
+        let config = parse_connection_url(
+            "postgresql://alice:s3cret@db.internal:6543/analytics",
+            7,
+            120,
+        )
+        .expect("parse URL");
+
+        assert_eq!(config.host, "db.internal");
+        assert_eq!(config.port, 6543);
+        assert_eq!(config.database, "analytics");
+        assert_eq!(config.user, "alice");
+        assert_eq!(config.password, "s3cret");
+        assert_eq!(config.max_connections, 7);
+        assert_eq!(config.connection_timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_accepts_postgres_scheme_and_defaults_the_port() {
+        let config = parse_connection_url("postgres://bob:pw@localhost/fireup", 5, 30).expect("parse URL");
+        assert_eq!(config.port, 5432);
+        assert_eq!(config.host, "localhost");
+        assert_eq!(config.database, "fireup");
+    }
+
+    #[test]
+    fn test_percent_decodes_credentials_and_database() {
+        let config = parse_connection_url(
+            "postgresql://us%40er:p%40ss%3Aword@localhost:5432/my%20db",
+            5,
+            30,
+        )
+        .expect("parse URL");
+
+        assert_eq!(config.user, "us@er");
+        assert_eq!(config.password, "p@ss:word");
+        assert_eq!(config.database, "my db");
+    }
+
+    #[test]
+    fn test_parses_bracketed_ipv6_host() {
+        let config = parse_connection_url("postgresql://u:p@[::1]:5433/db", 5, 30).expect("parse URL");
+        assert_eq!(config.host, "::1");
+        assert_eq!(config.port, 5433);
+    }
+
+    #[test]
+    fn test_query_parameters_override_cli_defaults() {
+        let config = parse_connection_url(
+            "postgresql://u:p@localhost/db?connect_timeout=15&max_connections=3&retry_attempts=1&retry_delay=2&sslmode=disable",
+            5,
+            300,
+        )
+        .expect("parse URL");
+
+        assert_eq!(config.connection_timeout, Duration::from_secs(15));
+        assert_eq!(config.max_connections, 3);
+        assert_eq!(config.retry_attempts, 1);
+        assert_eq!(config.retry_delay, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_rejects_wrong_scheme() {
+        let error = parse_connection_url("mysql://u:p@localhost/db", 5, 30).expect_err("must reject");
+        assert!(error.to_string().contains("Invalid PostgreSQL URL format"));
+    }
+
+    #[test]
+    fn test_rejects_missing_database() {
+        let error = parse_connection_url("postgresql://u:p@localhost:5432", 5, 30).expect_err("must reject");
+        assert!(error.to_string().contains("does not specify a database"));
+    }
+
+    /// Silently ignoring a parameter would connect somewhere other than asked.
+    #[test]
+    fn test_rejects_unsupported_query_parameter() {
+        let error = parse_connection_url("postgresql://u:p@localhost/db?target_session_attrs=rw", 5, 30)
+            .expect_err("must reject");
+        assert!(error.to_string().contains("Unsupported PostgreSQL connection parameter"));
+    }
+
+    /// The pool is built with NoTls, so a TLS request must fail loudly rather
+    /// than connect in the clear.
+    #[test]
+    fn test_rejects_tls_requiring_sslmode() {
+        let error =
+            parse_connection_url("postgresql://u:p@localhost/db?sslmode=require", 5, 30).expect_err("must reject");
+        assert!(error.to_string().contains("not supported by this build"));
+    }
+
+    #[test]
+    fn test_rejects_invalid_port() {
+        let error = parse_connection_url("postgresql://u:p@localhost:notaport/db", 5, 30).expect_err("must reject");
+        assert!(error.to_string().contains("Invalid PostgreSQL port"));
+    }
+
+    #[test]
+    fn test_rejects_zero_max_connections() {
+        let error = parse_connection_url("postgresql://u:p@localhost/db?max_connections=0", 5, 30)
+            .expect_err("must reject");
+        assert!(error.to_string().contains("max_connections must be at least 1"));
     }
 }
