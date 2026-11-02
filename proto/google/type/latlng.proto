@@ -1,0 +1,8 @@
+syntax = "proto3";
+package google.type;
+
+// A latitude/longitude pair, as used by Datastore's geo point value.
+message LatLng {
+  double latitude = 1;
+  double longitude = 2;
+}

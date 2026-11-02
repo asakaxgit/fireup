@@ -1,10 +1,18 @@
 //! Map Google Datastore Entity protobuf messages into `FirestoreDocument`.
+//!
+//! This handles `google.datastore.v1.Entity` — the *API* proto. Managed exports
+//! carry the legacy storage proto instead; see
+//! [`crate::leveldb_parser::entity_proto`]. Both are supported, and
+//! `parser::parse_protobuf_document` picks per record.
 
 use crate::error::{ErrorContext, FireupError};
 use crate::protos::google::datastore::v1::key::path_element::IdType;
 use crate::protos::google::datastore::v1::value::ValueType;
 use crate::protos::google::datastore::v1::{Entity, EntityResult, Key, Value};
-use crate::types::{DocumentMetadata, FirestoreDocument};
+use crate::types::{
+    tagged_blob, tagged_geo_point, tagged_key_reference, tagged_timestamp, DatastoreKey,
+    DatastoreKeyId, DatastoreKeyPathElement, DocumentMetadata, FirestoreDocument,
+};
 use bytes::Bytes;
 use prost::Message;
 use serde_json::{Map, Number, Value as JsonValue};
@@ -45,7 +53,22 @@ pub fn try_decode_entity_document(
 }
 
 fn entity_to_document(entity: &Entity, size_bytes: usize) -> Result<FirestoreDocument, FireupError> {
-    let (collection, id, path) = identity_from_key(entity.key.as_ref())?;
+    let datastore_key = datastore_key_from_proto(entity.key.as_ref());
+
+    let collection = datastore_key
+        .as_ref()
+        .and_then(|key| key.kind())
+        .filter(|kind| !kind.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "unknown".to_string());
+    let id = match datastore_key.as_ref().and_then(|key| key.path.last()) {
+        Some(element) => element.id.as_path_segment(),
+        None => format!("doc-{}", uuid::Uuid::new_v4()),
+    };
+    let path = datastore_key
+        .as_ref()
+        .map(|key| key.path_string())
+        .unwrap_or_default();
 
     let mut data = HashMap::new();
     for (name, value) in &entity.properties {
@@ -63,45 +86,38 @@ fn entity_to_document(entity: &Entity, size_bytes: usize) -> Result<FirestoreDoc
             path,
             size_bytes: Some(size_bytes as u64),
         },
+        key: datastore_key,
     })
 }
 
-fn identity_from_key(key: Option<&Key>) -> Result<(String, String, String), FireupError> {
-    let Some(key) = key else {
-        return Ok((
-            "unknown".to_string(),
-            format!("doc-{}", uuid::Uuid::new_v4()),
-            String::new(),
-        ));
-    };
+/// Lift a protobuf `Key` into the full `DatastoreKey` identity, keeping the
+/// namespace and every ancestor path element.
+fn datastore_key_from_proto(key: Option<&Key>) -> Option<DatastoreKey> {
+    let key = key?;
+    if key.path.is_empty() {
+        return None;
+    }
 
-    let path_parts: Vec<String> = key
+    let namespace = key
+        .partition_id
+        .as_ref()
+        .map(|partition| partition.namespace_id.clone())
+        .unwrap_or_default();
+
+    let path = key
         .path
         .iter()
-        .map(|element| {
-            let id = match &element.id_type {
-                Some(IdType::Name(name)) => name.clone(),
-                Some(IdType::Id(id)) => id.to_string(),
-                None => "unknown".to_string(),
-            };
-            format!("{}/{}", element.kind, id)
+        .map(|element| DatastoreKeyPathElement {
+            kind: element.kind.clone(),
+            id: match &element.id_type {
+                Some(IdType::Name(name)) => DatastoreKeyId::Name(name.clone()),
+                Some(IdType::Id(id)) => DatastoreKeyId::Id(*id),
+                None => DatastoreKeyId::Name(String::new()),
+            },
         })
         .collect();
 
-    let path = path_parts.join("/");
-
-    let last = key.path.last();
-    let collection = last
-        .map(|element| element.kind.clone())
-        .filter(|kind| !kind.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
-    let id = match last.and_then(|element| element.id_type.as_ref()) {
-        Some(IdType::Name(name)) => name.clone(),
-        Some(IdType::Id(id)) => id.to_string(),
-        None => format!("doc-{}", uuid::Uuid::new_v4()),
-    };
-
-    Ok((collection, id, path))
+    Some(DatastoreKey { namespace, path })
 }
 
 fn datastore_value_to_json(value: &Value) -> Result<JsonValue, FireupError> {
@@ -135,11 +151,17 @@ fn datastore_value_to_json(value: &Value) -> Result<JsonValue, FireupError> {
                         context(),
                     )
                 })?;
-            Ok(JsonValue::String(datetime.to_rfc3339()))
+            Ok(tagged_timestamp(datetime.to_rfc3339()))
         }
         Some(ValueType::StringValue(v)) => Ok(JsonValue::String(v.clone())),
-        Some(ValueType::BlobValue(v)) => Ok(JsonValue::String(base64_encode(v))),
-        Some(ValueType::KeyValue(key)) => Ok(JsonValue::String(format_key(key))),
+        // Blobs, geo points and key references are tagged rather than flattened
+        // into strings: the analyzer needs the source type to pick BYTEA/POINT
+        // instead of inferring TEXT or JSONB from the stringified form.
+        Some(ValueType::BlobValue(v)) => Ok(tagged_blob(base64_encode(v))),
+        Some(ValueType::GeoPointValue(point)) => {
+            Ok(tagged_geo_point(point.latitude, point.longitude))
+        }
+        Some(ValueType::KeyValue(key)) => Ok(tagged_key_reference(format_key(key))),
         Some(ValueType::EntityValue(entity)) => {
             let mut map = Map::new();
             for (name, nested) in &entity.properties {

@@ -16,6 +16,181 @@ pub struct FirestoreDocument {
     pub subcollections: Vec<FirestoreDocument>,
     /// Document metadata
     pub metadata: DocumentMetadata,
+    /// Full Datastore key (namespace + ancestor path) when the source carried one.
+    ///
+    /// This is the document's natural identity and is what the generated schema
+    /// keys rows on, so re-importing the same export is idempotent.
+    #[serde(default)]
+    pub key: Option<DatastoreKey>,
+}
+
+/// Name of the generated column holding the namespace-qualified Datastore key path.
+pub const KEY_PATH_COLUMN: &str = "key_path";
+/// Name of the generated column holding the Datastore namespace.
+pub const KEY_NAMESPACE_COLUMN: &str = "key_namespace";
+/// Name of the generated column holding the leaf kind of the Datastore key.
+pub const KEY_KIND_COLUMN: &str = "key_kind";
+/// Name of the generated column holding a string key name (NULL for numeric ids).
+pub const KEY_NAME_COLUMN: &str = "key_name";
+/// Name of the generated column holding a numeric key id (NULL for string names).
+pub const KEY_ID_COLUMN: &str = "key_id";
+/// Name of the generated column holding the parent entity's key path.
+pub const PARENT_KEY_PATH_COLUMN: &str = "parent_key_path";
+
+/// Identity of a Datastore/Firestore entity: its namespace plus full ancestor path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatastoreKey {
+    /// Partition namespace; empty string for the default namespace.
+    pub namespace: String,
+    /// Ancestor path, root first. The last element identifies this entity.
+    pub path: Vec<DatastoreKeyPathElement>,
+}
+
+/// One `kind`/`id` pair of a Datastore key path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatastoreKeyPathElement {
+    /// Entity kind (the collection name at this level).
+    pub kind: String,
+    /// Either an application-assigned name or an auto-allocated numeric id.
+    pub id: DatastoreKeyId,
+}
+
+/// The identifier half of a Datastore key path element.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DatastoreKeyId {
+    /// Application-assigned string name.
+    Name(String),
+    /// Auto-allocated 64-bit id. These routinely exceed `int32`.
+    Id(i64),
+}
+
+impl DatastoreKeyId {
+    /// Render the identifier as it appears in a key path.
+    pub fn as_path_segment(&self) -> String {
+        match self {
+            DatastoreKeyId::Name(name) => name.clone(),
+            DatastoreKeyId::Id(id) => id.to_string(),
+        }
+    }
+}
+
+impl DatastoreKey {
+    /// Create a root-level key in the default namespace.
+    pub fn root(kind: impl Into<String>, id: DatastoreKeyId) -> Self {
+        Self {
+            namespace: String::new(),
+            path: vec![DatastoreKeyPathElement {
+                kind: kind.into(),
+                id,
+            }],
+        }
+    }
+
+    /// Leaf kind — the kind of the entity this key identifies.
+    pub fn kind(&self) -> Option<&str> {
+        self.path.last().map(|element| element.kind.as_str())
+    }
+
+    /// Leaf string key name, if the entity is named rather than numbered.
+    pub fn name(&self) -> Option<&str> {
+        match self.path.last().map(|element| &element.id) {
+            Some(DatastoreKeyId::Name(name)) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Leaf numeric key id, if the entity has an auto-allocated id.
+    pub fn numeric_id(&self) -> Option<i64> {
+        match self.path.last().map(|element| &element.id) {
+            Some(DatastoreKeyId::Id(id)) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Path without the namespace prefix, e.g. `Users/ada/Orders/1001`.
+    pub fn path_string(&self) -> String {
+        self.path
+            .iter()
+            .map(|element| format!("{}/{}", element.kind, element.id.as_path_segment()))
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// Canonical, namespace-qualified key path. This is the generated natural key.
+    ///
+    /// A non-default namespace is prefixed as `[namespace]`, so keys from
+    /// different namespaces never collide in a single column.
+    pub fn encoded_path(&self) -> String {
+        Self::encode(&self.namespace, &self.path_string())
+    }
+
+    /// Encoded path of the parent entity, or `None` for a root entity.
+    pub fn parent_encoded_path(&self) -> Option<String> {
+        if self.path.len() < 2 {
+            return None;
+        }
+        let parent = DatastoreKey {
+            namespace: self.namespace.clone(),
+            path: self.path[..self.path.len() - 1].to_vec(),
+        };
+        Some(parent.encoded_path())
+    }
+
+    fn encode(namespace: &str, path: &str) -> String {
+        if namespace.is_empty() {
+            path.to_string()
+        } else {
+            format!("[{}]{}", namespace, path)
+        }
+    }
+}
+
+/// Object key marking a value whose Datastore type JSON cannot represent natively.
+///
+/// Blobs, timestamps, geo points and key references are decoded into tagged
+/// objects so the schema analyzer can map them to `BYTEA`, `TIMESTAMPTZ`,
+/// `POINT` and `TEXT` instead of guessing from a stringified form.
+pub const DATASTORE_TYPE_TAG: &str = "__fireup_type__";
+
+/// Tag value for a blob; the bytes live under `base64`.
+pub const DATASTORE_TYPE_BLOB: &str = "blob";
+/// Tag value for a timestamp; the instant lives under `rfc3339`.
+pub const DATASTORE_TYPE_TIMESTAMP: &str = "timestamp";
+/// Tag value for a geo point; coordinates live under `latitude`/`longitude`.
+pub const DATASTORE_TYPE_GEO_POINT: &str = "geo_point";
+/// Tag value for a key reference; the encoded path lives under `key_path`.
+pub const DATASTORE_TYPE_KEY: &str = "key";
+
+/// Read the Datastore type tag of a value, if it carries one.
+pub fn datastore_type_tag(value: &serde_json::Value) -> Option<&str> {
+    value
+        .as_object()?
+        .get(DATASTORE_TYPE_TAG)?
+        .as_str()
+}
+
+/// Build a tagged blob value from raw bytes.
+pub fn tagged_blob(base64: String) -> serde_json::Value {
+    serde_json::json!({ DATASTORE_TYPE_TAG: DATASTORE_TYPE_BLOB, "base64": base64 })
+}
+
+/// Build a tagged timestamp value from an RFC 3339 instant.
+pub fn tagged_timestamp(rfc3339: String) -> serde_json::Value {
+    serde_json::json!({ DATASTORE_TYPE_TAG: DATASTORE_TYPE_TIMESTAMP, "rfc3339": rfc3339 })
+}
+
+/// Build a tagged geo point value.
+pub fn tagged_geo_point(latitude: f64, longitude: f64) -> serde_json::Value {
+    serde_json::json!({
+        DATASTORE_TYPE_TAG: DATASTORE_TYPE_GEO_POINT,
+        "latitude": latitude,
+        "longitude": longitude,
+    })
+}
+
+/// Build a tagged key-reference value from an encoded key path.
+pub fn tagged_key_reference(key_path: String) -> serde_json::Value {
+    serde_json::json!({ DATASTORE_TYPE_TAG: DATASTORE_TYPE_KEY, "key_path": key_path })
 }
 
 /// Metadata associated with a Firestore document
@@ -81,6 +256,10 @@ pub enum PostgreSQLType {
     Integer,
     /// Big integer (64-bit)
     BigInt,
+    /// Raw bytes
+    Bytea,
+    /// Geometric point (x = longitude, y = latitude)
+    Point,
     /// Numeric with optional precision and scale
     Numeric(Option<u32>, Option<u32>),
     /// Boolean
@@ -361,6 +540,22 @@ impl FirestoreDocument {
                 path,
                 size_bytes: None,
             },
+            key: None,
+        }
+    }
+
+    /// Attach the document's Datastore key.
+    pub fn with_key(mut self, key: DatastoreKey) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// Natural key for this document: the encoded Datastore key path when the
+    /// source carried one, otherwise the collection-qualified document path.
+    pub fn natural_key(&self) -> String {
+        match &self.key {
+            Some(key) => key.encoded_path(),
+            None => format!("{}/{}", self.collection, self.id),
         }
     }
     
@@ -459,13 +654,15 @@ impl PostgreSQLType {
             PostgreSQLType::Numeric(Some(precision), None) => {
                 format!("NUMERIC({})", precision)
             }
-            PostgreSQLType::Numeric(None, None) => "NUMERIC".to_string(),
+            // A scale without a precision is not expressible in PostgreSQL.
+            PostgreSQLType::Numeric(None, _) => "NUMERIC".to_string(),
             PostgreSQLType::Boolean => "BOOLEAN".to_string(),
-            PostgreSQLType::Timestamp => "TIMESTAMP WITH TIME ZONE".to_string(),
+            PostgreSQLType::Timestamp => "TIMESTAMPTZ".to_string(),
             PostgreSQLType::Uuid => "UUID".to_string(),
             PostgreSQLType::Jsonb => "JSONB".to_string(),
+            PostgreSQLType::Bytea => "BYTEA".to_string(),
+            PostgreSQLType::Point => "POINT".to_string(),
             PostgreSQLType::Array(inner_type) => format!("{}[]", inner_type.to_sql()),
-            _ => "TEXT".to_string(), // Fallback for unhandled cases
         }
     }
 }
