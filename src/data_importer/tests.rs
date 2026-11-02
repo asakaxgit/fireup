@@ -803,13 +803,25 @@ mod postgresql_importer_tests {
         let spec = TableImportSpec {
             table_name: "users".to_string(),
             columns: vec!["id".to_string(), "name".to_string(), "email".to_string()],
-            data_source: "users_collection".to_string(),
+            column_types: vec![
+                PostgreSQLType::Text,
+                PostgreSQLType::Text,
+                PostgreSQLType::Text,
+            ],
+            rows: vec![vec![
+                Some("1".to_string()),
+                Some("Ada".to_string()),
+                None,
+            ]],
             batch_size: Some(1000),
+            continue_on_error: false,
             validation_enabled: true,
         };
-        
+
         assert_eq!(spec.table_name, "users");
         assert_eq!(spec.columns.len(), 3);
+        assert_eq!(spec.column_types.len(), spec.columns.len());
+        assert_eq!(spec.rows.len(), 1);
         assert_eq!(spec.batch_size, Some(1000));
         assert!(spec.validation_enabled);
     }
@@ -838,6 +850,7 @@ mod postgresql_importer_tests {
                 ("users".to_string(), vec![]),
                 ("posts".to_string(), vec!["Constraint violation".to_string()]),
             ],
+            total_records_expected: 150,
             total_records_imported: 150,
             total_records_failed: 2,
             warnings: vec!["Global warning".to_string()],
