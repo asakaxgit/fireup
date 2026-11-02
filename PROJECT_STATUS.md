@@ -38,28 +38,34 @@ which exercised the real on-disk export format.
 
 ### Core Components
 
-#### 1. LevelDB Parser ⛔ **BLOCKING DEFECTS**
-**Status:** Structure in place; does not read real export files  
+#### 1. LevelDB Parser ✅ **READS REAL EXPORTS**
+**Status:** Reads a managed Firestore/Datastore export end to end  
 **Location:** `src/leveldb_parser/`
 
 **Implemented:**
 - 32 KiB block iteration and 7-byte record header parsing
+- Masked CRC32C record checksums, per `leveldb/util/crc32c.h` (`crc32c.rs`)
 - FIRST/MIDDLE/LAST fragment reassembly
+- Legacy `storage_onestore_v3.EntityProto` decoding, including proto2 groups,
+  `meaning`-based types, repeated-property arrays and nested `ENTITY_PROTO`
+  maps (`entity_proto.rs`, a hand-written wire decoder — `prost` cannot
+  represent groups)
+- Datastore `v1.Entity` protobuf decoding, kept for Datastore Admin / BigQuery
+  export paths and selected per record (`protobuf_entity.rs`)
+- Whole-tree input resolution: every `all_namespaces/kind_*/output-N` shard of
+  every kind, aggregated, with `.export_metadata` files excluded
 - JSON Lines fallback path
-- Datastore `v1.Entity` protobuf decoding (`protobuf_entity.rs`)
 
-**Blocking defects (evidence: SAK-139):**
-- Checksums are computed with unmasked IEEE CRC-32 instead of LevelDB's masked
-  CRC32C, so **every** record of a real export fails validation and is skipped
-- Payloads of a real export are legacy `storage_onestore_v3.EntityProto`, not
-  `google.datastore.v1.Entity`; nothing decodes
-- An export directory is collapsed to a single `output-0`, dropping all other
-  kinds and output shards
-- `parse_documents()` panics unless `initialize_monitoring()` was called first
+**Measured (2026-11-02, SAK-141):** `validate --backup-file
+tests/fixtures/export-onestore` reads 2 input files, 13 records, **12 of 12
+entities**, 2 collections, 0 errors. The same tree previously reported
+`No records found in LevelDB file`.
 
-**Test Coverage:** unit tests pass but use hand-built inputs that match the
-implementation rather than the format. `tests/real_export_validation.rs` adds
-format-level coverage.
+**Test Coverage:** `tests/real_export_validation.rs` (7 tests) checks the
+fixtures with a reader written independently of `src/`, then reads them through
+fireup. `cargo test --lib leveldb_parser` is 53 tests; the in-crate fixtures are
+now built with masked CRC32C, so they test the format rather than mirroring the
+implementation.
 
 #### 2. Schema Analyzer ✅ **COMPLETE**
 **Status:** Fully implemented with advanced features  
@@ -302,10 +308,10 @@ chrono = "0.4"                   # Date/time handling
 ### Requirements Compliance
 
 #### ⛔ Requirement 1: Firestore Backup Import
-- [ ] Parse LevelDB backup files per Google's specification — framing reader
-      exists but rejects every real record (residual risk 1)
-- [ ] Validate backup integrity with CRC32 checksums — wrong algorithm; LevelDB
-      uses masked CRC32C (residual risk 1)
+- [x] Parse LevelDB backup files per Google's specification — 12 of 12 fixture
+      entities read, across every kind and shard of the tree (SAK-141)
+- [x] Validate backup integrity with CRC32 checksums — masked CRC32C, verified
+      against the independently CRC-checked fixtures (SAK-141)
 - [x] Provide detailed error messages for corrupted files
 - [ ] Import parsed data to PostgreSQL-compatible format — schema is created,
       no rows are written (residual risk 3)
@@ -354,43 +360,60 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
 
 ### Critical — silent data loss
 
-1. **Wrong record checksum algorithm** (`parser.rs:360` `calculate_crc32`)
-   Uses `crc32fast` (unmasked IEEE CRC-32) over `type || data`. LevelDB uses
-   **masked CRC32C**: Castagnoli `0x82F63B78`, masked with
-   `((crc >> 15) | (crc << 17)) + 0xA282EAD8`. Every record of a real export
-   therefore mismatches, `parse_record_at_offset` errors, and
-   `parse_block_records` advances one byte at a time until the block is
-   exhausted. Observed: `validate` → `No records found in LevelDB file`;
-   0 of 12 entities read. Re-framing the same fixtures with the bug-compatible
-   checksum recovers all records, which isolates this as the sole framing defect.
+1. ~~**Wrong record checksum algorithm**~~ — **resolved (SAK-141)**
+   `calculate_crc32` compared an unmasked IEEE CRC-32 against LevelDB's masked
+   CRC32C, so every record of a real export mismatched and
+   `parse_block_records` advanced one byte at a time until the block was
+   exhausted (`validate` → `No records found in LevelDB file`, 0 of 12
+   entities). Now `leveldb_parser::crc32c` computes Castagnoli `0x82F63B78`
+   masked with `((crc >> 15) | (crc << 17)) + 0xA282EAD8`; `crc32fast` cannot
+   produce that, so the implementation is local and no dependency was added.
 
-2. **Wrong payload protobuf schema** (`protobuf_entity.rs`)
-   Decodes `google.datastore.v1.Entity` (the API proto). A managed export
-   contains legacy `storage_onestore_v3.EntityProto`, with unrelated field
-   numbers, **proto2 groups** (which `prost` cannot represent at all), and types
-   carried in `Property.meaning` rather than in the value field. Observed: with
-   framing bypassed, 6 of 6 records read and 0 documents decoded. Field-level
-   notes are in `tests/fixtures/README.md`.
+2. ~~**Wrong payload protobuf schema**~~ — **resolved (SAK-141)**
+   The decoder only handled `google.datastore.v1.Entity` (the API proto), while
+   a managed export carries legacy `storage_onestore_v3.EntityProto`: unrelated
+   field numbers, **proto2 groups** (which `prost` cannot represent at all), and
+   types carried in `Property.meaning` rather than in the value field.
+   `entity_proto.rs` now decodes it with a hand-written wire decoder — groups,
+   `meaning` types (`GD_WHEN` microseconds, `BLOB`, `TEXT`, `ENTITY_PROTO`,
+   `EMPTY_LIST`), repeated-property arrays, and the full key including
+   namespace. The `v1.Entity` path is kept for Datastore Admin / BigQuery
+   exports and chosen per record. Field-level notes remain in
+   `tests/fixtures/README.md`.
 
-3. **`import` reports rows it never wrote** (`main.rs:398-407`)
-   Only `create_schema` is called; the result is then constructed with
-   `total_records_imported: documents.len()`. A run that creates tables and
-   inserts nothing reports a full successful import. This is the most dangerous
-   defect in the tool: it would be read as a completed migration.
+3. ~~**`import` reports rows it never wrote**~~ — **resolved (SAK-142)**
+   Only `create_schema` was called and the result was then constructed with
+   `total_records_imported: documents.len()`, so a run that created tables and
+   inserted nothing reported a full successful import. `TableImportSpec` now
+   carries the transformed rows, `execute_full_import` actually calls
+   `import_transformed_data`, and `FullImportResult` tracks
+   `total_records_expected` so `is_successful()` rejects an import that did not
+   write what it was given. Values are bound as text parameters cast to the
+   column type (`$1::UUID`, `$2::JSONB`, `$3::TEXT[]`), so NULLs and structured
+   values round-trip without string-formatting SQL; INSERTs never retry, because
+   a transparent retry duplicates rows. `tests/postgres_import_tests.rs` asserts
+   the row counts actually present in PostgreSQL after an import.
 
-4. **Document identity is discarded**
+4. **Document identity is discarded** — *parser half resolved (SAK-141)*
    Generated tables use `id UUID` populated from `uuid::Uuid::new_v4()`, and no
    column holds the Datastore key name or id. Datastore keys are strings or
    `int64` (the fixture includes `ada`, `unicode-ユーザー`, and
    `4503599627370496`). Even a working import would produce unjoinable rows.
+   Parsing now preserves the identity — both decoders emit the full
+   `DatastoreKey` (namespace plus ancestor path), so `ada` and
+   `unicode-ユーザー` survive. Carrying it into the generated schema and the
+   inserted rows is the remaining half.
 
 ### High — partial data loss or failed migrations
 
-5. **Only one file of an export tree is read** (`parser.rs:92`
-   `resolve_backup_path`) An export is split per kind and per `output-N` shard.
-   The resolver returns the first `output-0` found, so all other kinds and shards
-   are dropped with no warning. Observed: the 12-entity tree yields at most one
-   kind.
+5. ~~**Only one file of an export tree is read**~~ — **resolved (SAK-141)**
+   `resolve_backup_path` returned the first `output-0` it found, so every other
+   kind and every shard past the first was dropped with no warning (the
+   12-entity tree yielded one kind), and the resolver could also fall back to an
+   `.export_metadata` file and parse metadata as entities. `resolve_export_inputs`
+   now collects every `kind_*/output-N`, ordered by directory and shard number,
+   excludes metadata files, and both `FirestoreDocumentParser` and
+   `BackupValidatorImpl` aggregate across all of them.
 
 6. **Generated DDL is not always loadable**
    `Orders` DDL emits `user TEXT NOT NULL` unquoted; `user` is reserved, and
@@ -409,17 +432,36 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
 
 ### Medium — operability
 
-9. **Failures are reported as success.** `analyze` exits 0 after parsing 0
-   documents and generating 0 tables; `validate --check-quality` reports
-   `Integrity score: 1.00` and `is_valid` when 0 documents decoded from valid
-   records. A migration tool must exit non-zero on total parse loss.
+9. **Failures are reported as success** — **partially resolved (SAK-142).**
+   `analyze` and `import` now exit non-zero when a non-empty source yields 0
+   documents, and `import` exits non-zero on a 0-row or partial import.
+   Still open: `validate --check-quality` reports `Integrity score: 1.00` and
+   `is_valid` when 0 documents decoded from valid records.
 
-10. **Hardcoded credentials / ignored connection string.** `parse_postgres_url`
-    returns a fixed `postgres:password@localhost:5432/fireup_test` regardless of
-    `--postgres-url`.
+10. ~~**Hardcoded credentials / ignored connection string**~~ — **resolved
+    (SAK-142).** `parse_postgres_url` validated only the `postgresql://` prefix
+    and then returned a fixed `postgres:password@localhost:5432/fireup_test`.
+    `data_importer::connection::parse_connection_url` now parses scheme, user,
+    password, host (including bracketed IPv6), port, database and query
+    parameters, percent-decoding each component. Unsupported parameters and a
+    TLS-requiring `sslmode` are rejected rather than silently dropped, since the
+    pool is built with `NoTls`. No credential remains in source: `--postgres-url`
+    supplies them, with `PGUSER`/`PGPASSWORD` as the fallback.
 
-11. **Library API panics.** `parse_documents()` panics via
-    `get_monitoring_system()` unless `initialize_monitoring()` ran first.
+11. ~~**Library API panics**~~ — **resolved (SAK-142).**
+    `get_monitoring_system()` now lazily installs the default configuration
+    instead of panicking, so `parse_documents()` works for a consumer that never
+    called `initialize_monitoring()`. Guarded by
+    `tests/library_api_tests.rs`, which runs in its own process so no other test
+    can mask the regression.
+
+13. **`--drop-existing`, `--batch-size`, `--continue-on-error`** — **resolved
+    (SAK-142).** `--drop-existing` was a log line with no effect; it now runs
+    `DROP TABLE IF EXISTS … CASCADE` for the schema's tables in one transaction.
+    `--batch-size` sets the rows per multi-row INSERT (clamped to PostgreSQL's
+    65535 bind-parameter limit) and `--continue-on-error` retries a failed batch
+    row by row so the importable rows land. A partial import still exits
+    non-zero: it is not a completed migration.
 
 12. **`cargo test` does not compile.** `tests/integration_tests.rs` fails with 9
     errors (`parse_backup` called without the `LevelDBParser` trait in scope;
@@ -661,10 +703,12 @@ src/
 
 ## Conclusion
 
-Fireup is well-organized and broadly unit-tested, but the real-export validation
-run under SAK-139 showed the end-to-end migration path does not work: 0 of 12
+Fireup is well-organized and broadly unit-tested. The real-export validation run
+under SAK-139 showed the end-to-end migration path did not work: 0 of 12
 entities were recovered from a spec-correct export, and `import` would have
-reported a full successful migration while writing no rows.
+reported a full successful migration while writing no rows. The read side is now
+fixed — SAK-141 took the parser from 0 to 12 of 12 entities across every kind of
+the export tree — so the remaining work is downstream of parsing.
 
 The structure is sound and the gaps are specific and fixable — they are format
 correctness bugs (checksum algorithm, payload proto, multi-file handling) plus
