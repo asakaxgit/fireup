@@ -480,14 +480,23 @@ use std::sync::OnceLock;
 // Global monitoring system instance using OnceLock for thread safety
 static MONITORING_SYSTEM: OnceLock<Arc<MonitoringSystem>> = OnceLock::new();
 
-/// Initialize the global monitoring system
+/// Initialize the global monitoring system.
+///
+/// Only the first call takes effect; later calls are ignored, including one made
+/// after [`get_monitoring_system`] has already installed the default config.
 pub fn initialize_monitoring(config: MonitoringConfig) {
-    let _ = MONITORING_SYSTEM.set(Arc::new(MonitoringSystem::new(config)));
+    if MONITORING_SYSTEM.set(Arc::new(MonitoringSystem::new(config))).is_err() {
+        debug!("Monitoring system already initialized; keeping the existing configuration");
+    }
 }
 
-/// Get the global monitoring system instance
+/// Get the global monitoring system instance.
+///
+/// Falls back to the default configuration instead of panicking: the parser,
+/// analyzer and importer all monitor their work, and a library consumer that
+/// never called [`initialize_monitoring`] must not crash because of it.
 pub fn get_monitoring_system() -> Arc<MonitoringSystem> {
-    MONITORING_SYSTEM.get()
-        .expect("Monitoring system not initialized. Call initialize_monitoring() first.")
+    MONITORING_SYSTEM
+        .get_or_init(|| Arc::new(MonitoringSystem::new(MonitoringConfig::default())))
         .clone()
 }
