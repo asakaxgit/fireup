@@ -16,12 +16,12 @@ fn create_record_header(record_type: RecordType, data_length: u16, checksum: u32
     header
 }
 
-/// Helper function to calculate CRC32 checksum for test data
+/// Checksum a test record the way LevelDB does: masked CRC32C over
+/// `type_byte || data`. These fixtures used to be built with unmasked IEEE
+/// CRC-32, which made them bug-compatible with the parser instead of a check on
+/// it — a real export never matched.
 fn calculate_test_checksum(record_type: u8, data: &[u8]) -> u32 {
-    let mut crc = crc32fast::Hasher::new();
-    crc.update(&[record_type]);
-    crc.update(data);
-    crc.finalize()
+    crate::leveldb_parser::crc32c::masked_record_checksum(record_type, data)
 }
 
 /// Helper function to create a valid LevelDB block with test data

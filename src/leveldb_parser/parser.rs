@@ -1,5 +1,6 @@
 // LevelDB parser implementation for Firestore backup files
 use crate::error::{FireupError, ErrorContext};
+use crate::leveldb_parser::crc32c;
 use crate::types::FirestoreDocument;
 use crate::monitoring::{get_monitoring_system, AuditOperationType, AuditResult};
 use bytes::{Buf, Bytes};
@@ -10,6 +11,99 @@ use std::fs as stdfs;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, info, warn, instrument};
+
+/// Resolve a backup path into every LevelDB data file it contains.
+///
+/// A managed export is a tree, split per kind **and** per output shard:
+///
+/// ```text
+/// <root>/<timestamp>.overall_export_metadata
+/// <root>/all_namespaces/kind_<Kind>/all_namespaces_kind_<Kind>.export_metadata
+/// <root>/all_namespaces/kind_<Kind>/output-0, output-1, ...
+/// ```
+///
+/// Resolving such a root to a single file silently drops every other kind and
+/// every shard past the first, so all `output-N` files are returned, ordered by
+/// directory and then by shard number. `.export_metadata` /
+/// `.overall_export_metadata` files are deliberately excluded: they describe the
+/// export, and parsing them as entities invents documents that do not exist.
+///
+/// A path that is already a file resolves to itself. A directory with no
+/// `output-N` files falls back to the data-looking files it does contain, so
+/// ad-hoc backup directories still work.
+pub fn resolve_export_inputs(input: &str) -> Vec<PathBuf> {
+    let root = Path::new(input);
+    if root.is_file() {
+        return vec![root.to_path_buf()];
+    }
+    if !root.is_dir() {
+        return Vec::new();
+    }
+
+    let mut outputs = Vec::new();
+    collect_files(root, &mut outputs, &is_export_output);
+    if !outputs.is_empty() {
+        outputs.sort_by_key(|path| {
+            (
+                path.parent().map(Path::to_path_buf).unwrap_or_default(),
+                shard_number(path),
+                path.clone(),
+            )
+        });
+        debug!(
+            "Resolved export tree {} to {} output file(s)",
+            input,
+            outputs.len()
+        );
+        return outputs;
+    }
+
+    let mut fallback = Vec::new();
+    collect_files(root, &mut fallback, &|path| !is_export_metadata(path));
+    fallback.sort();
+    fallback
+}
+
+/// `output-0`, `output-1`, … — the entity data files of an export.
+fn is_export_output(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("output-"))
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_export_metadata(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.ends_with(".export_metadata") || name.ends_with(".overall_export_metadata")
+        })
+}
+
+/// Shard number of an `output-N` file, so `output-10` sorts after `output-2`.
+fn shard_number(path: &Path) -> u64 {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("output-"))
+        .and_then(|suffix| suffix.parse().ok())
+        .unwrap_or(u64::MAX)
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, accept: &dyn Fn(&Path) -> bool) {
+    let Ok(entries) = stdfs::read_dir(dir) else {
+        warn!("Failed to read export directory {}", dir.display());
+        return;
+    };
+    let mut children: Vec<PathBuf> = entries.filter_map(|entry| entry.ok()).map(|entry| entry.path()).collect();
+    children.sort();
+    for path in children {
+        if path.is_dir() {
+            collect_files(&path, out, accept);
+        } else if path.is_file() && accept(&path) {
+            out.push(path);
+        }
+    }
+}
 
 /// LevelDB log record types according to specification
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,69 +172,28 @@ pub struct LevelDBReader {
 }
 
 impl LevelDBReader {
-    /// Create a new LevelDB reader
+    /// Create a reader for a single backup file.
+    ///
+    /// A directory resolves to the *first* LevelDB file of the export; use
+    /// [`resolve_export_inputs`] and [`FirestoreDocumentParser`] to read a whole
+    /// export tree.
     pub fn new(file_path: impl Into<String>) -> Self {
         let input = file_path.into();
-        let resolved = Self::resolve_backup_path(&input).unwrap_or(input);
+        let resolved = resolve_export_inputs(&input)
+            .first()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or(input);
+        Self::for_file(resolved)
+    }
+
+    /// Create a reader for an already-resolved file path.
+    pub fn for_file(file_path: impl Into<String>) -> Self {
         Self {
-            file_path: resolved,
+            file_path: file_path.into(),
             block_size: 32768, // 32KB blocks as per LevelDB specification
         }
     }
-    
-    /// Resolve a backup path that may be a directory to the actual backup file
-    fn resolve_backup_path(input: &str) -> Option<String> {
-        let p = Path::new(input);
-        if p.is_file() {
-            return Some(input.to_string());
-        }
-        if p.is_dir() {
-            // Prefer a file named "output-0" within common firestore export structure
-            if let Some(found) = Self::find_file_named(p, "output-0") {
-                return Some(found.to_string_lossy().to_string());
-            }
-            // Fallback: first regular file found (depth-first)
-            if let Some(any_file) = Self::find_any_file(p) {
-                return Some(any_file.to_string_lossy().to_string());
-            }
-        }
-        None
-    }
-    
-    fn find_file_named(dir: &Path, target_name: &str) -> Option<PathBuf> {
-        for entry in stdfs::read_dir(dir).ok()? {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name == target_name {
-                        return Some(path);
-                    }
-                }
-            } else if path.is_dir() {
-                if let Some(found) = Self::find_file_named(&path, target_name) {
-                    return Some(found);
-                }
-            }
-        }
-        None
-    }
-    
-    fn find_any_file(dir: &Path) -> Option<PathBuf> {
-        for entry in stdfs::read_dir(dir).ok()? {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if path.is_file() {
-                return Some(path);
-            } else if path.is_dir() {
-                if let Some(found) = Self::find_any_file(&path) {
-                    return Some(found);
-                }
-            }
-        }
-        None
-    }
-    
+
     /// Read and validate the entire LevelDB file
     pub async fn read_file(&self) -> Result<Vec<LogBlock>, FireupError> {
         let context = ErrorContext {
@@ -339,9 +392,8 @@ impl LevelDBReader {
             call_path: vec!["leveldb_parser::parser::LevelDBReader".to_string()],
         };
         
-        // Calculate CRC32 checksum
-        let calculated_checksum = self.calculate_crc32(header.record_type as u8, data);
-        
+        let calculated_checksum = self.calculate_record_checksum(header.record_type as u8, data);
+
         if calculated_checksum != header.checksum {
             return Err(FireupError::leveldb_parse(
                 format!(
@@ -351,20 +403,20 @@ impl LevelDBReader {
                 context
             ));
         }
-        
+
         debug!("Checksum validation passed: 0x{:08x}", calculated_checksum);
         Ok(())
     }
-    
-    /// Calculate CRC32 checksum according to LevelDB specification
-    fn calculate_crc32(&self, record_type: u8, data: &Bytes) -> u32 {
-        // LevelDB uses a specific CRC32 implementation
-        // For now, we'll use a simple implementation
-        // In production, this should use the exact same CRC32 as LevelDB
-        let mut crc = crc32fast::Hasher::new();
-        crc.update(&[record_type]);
-        crc.update(data);
-        crc.finalize()
+
+    /// Calculate the record checksum exactly as LevelDB does.
+    ///
+    /// LevelDB stores a **masked CRC32C** over `type_byte || data`: the
+    /// Castagnoli polynomial, not the IEEE CRC-32 that `crc32fast` computes, and
+    /// masked afterwards. Getting either half wrong rejects every record of a
+    /// real export, which surfaces as "no records found" rather than as a
+    /// checksum error.
+    fn calculate_record_checksum(&self, record_type: u8, data: &Bytes) -> u32 {
+        crc32c::masked_record_checksum(record_type, data)
     }
     
     /// Get file size
@@ -420,56 +472,180 @@ pub trait LevelDBParser {
 
 /// Firestore document parser that converts LevelDB records to Firestore documents
 pub struct FirestoreDocumentParser {
-    reader: LevelDBReader,
+    /// Every LevelDB file of the backup, in export order. Never empty.
+    inputs: Vec<LevelDBReader>,
+}
+
+/// What one input file contributed to a [`ParseResult`].
+struct InputCounts {
+    blocks: usize,
+    records: usize,
 }
 
 impl FirestoreDocumentParser {
     /// Create a new Firestore document parser
     pub fn new(file_path: impl Into<String>) -> Self {
-        Self {
-            reader: LevelDBReader::new(file_path),
+        let input = file_path.into();
+        let mut inputs: Vec<LevelDBReader> = resolve_export_inputs(&input)
+            .into_iter()
+            .map(|path| LevelDBReader::for_file(path.to_string_lossy().to_string()))
+            .collect();
+        if inputs.is_empty() {
+            // Nothing resolved (missing path, empty directory): keep the input so
+            // reading it reports the real I/O error instead of silently doing
+            // nothing.
+            inputs.push(LevelDBReader::for_file(input));
+        }
+        Self { inputs }
+    }
+
+    /// The first input. Used for reporting and for single-file callers.
+    fn primary(&self) -> &LevelDBReader {
+        &self.inputs[0]
+    }
+
+    /// Path this parser reports as its source: the file, or the shared root of
+    /// an export tree.
+    fn source_label(&self) -> String {
+        match self.inputs.len() {
+            1 => self.primary().file_path.clone(),
+            count => format!("{} (+{} more input files)", self.primary().file_path, count - 1),
         }
     }
-    
-    /// Parse the entire backup file and extract Firestore documents
+
+    /// Parse every input of the backup and extract Firestore documents.
+    ///
+    /// An export tree contributes all of its kinds and all of its `output-N`
+    /// shards; the results are aggregated into one [`ParseResult`].
     #[instrument(skip(self))]
     pub async fn parse_documents(&self) -> Result<ParseResult, FireupError> {
         let tracker = get_monitoring_system().start_operation("leveldb_parsing").await;
-        tracker.add_metadata("file_path", &self.reader.file_path).await.ok();
-        let context = ErrorContext {
-            operation: "parse_documents".to_string(),
-            metadata: HashMap::from([
-                ("file_path".to_string(), self.reader.file_path.clone()),
-            ]),
-            timestamp: chrono::Utc::now(),
-            call_path: vec!["leveldb_parser::parser::FirestoreDocumentParser".to_string()],
-        };
-        
-        info!("Starting Firestore document parsing");
-        
-        let file_size = self.reader.file_size().await?;
-        let format = self.detect_backup_format().await.unwrap_or(BackupFormat::LevelDb);
-        
+        let source_label = self.source_label();
+        tracker.add_metadata("file_path", &source_label).await.ok();
+
+        info!(
+            "Starting Firestore document parsing over {} input file(s)",
+            self.inputs.len()
+        );
+
         // Parse each complete record as a Firestore document
         let mut documents = Vec::new();
         let mut collections = std::collections::HashSet::new();
         let mut errors = Vec::new();
+        let mut file_size = 0u64;
         let mut blocks_processed: usize = 0;
         let mut records_processed: usize = 0;
+
+        for reader in &self.inputs {
+            file_size += reader.file_size().await?;
+            let format = self
+                .detect_backup_format(reader)
+                .await
+                .unwrap_or(BackupFormat::LevelDb);
+
+            let counts = self
+                .parse_input(
+                    reader,
+                    format,
+                    records_processed,
+                    &mut documents,
+                    &mut collections,
+                    &mut errors,
+                )
+                .await?;
+            blocks_processed += counts.blocks;
+            records_processed += counts.records;
+        }
+
+        let collections: Vec<String> = collections.into_iter().collect();
+
+        let metadata = BackupMetadata {
+            file_size,
+            document_count: documents.len(),
+            collection_count: collections.len(),
+            blocks_processed,
+            records_processed,
+        };
+
+        info!(
+            "Parsing complete: {} documents, {} collections, {} errors",
+            documents.len(), collections.len(), errors.len()
+        );
+
+        // Log data access audit entry
+        let mut details = HashMap::new();
+        details.insert("file_path".to_string(), source_label.clone());
+        details.insert("input_files".to_string(), self.inputs.len().to_string());
+        details.insert("documents_parsed".to_string(), documents.len().to_string());
+        details.insert("collections_found".to_string(), collections.len().to_string());
+        details.insert("blocks_processed".to_string(), metadata.blocks_processed.to_string());
+        details.insert("file_size_bytes".to_string(), metadata.file_size.to_string());
+
+        let audit_result = if errors.is_empty() {
+            AuditResult::Success
+        } else if !documents.is_empty() {
+            AuditResult::PartialSuccess(format!("{} parsing errors", errors.len()))
+        } else {
+            AuditResult::Failure("Failed to parse any documents".to_string())
+        };
+
+        get_monitoring_system().log_audit_entry(
+            AuditOperationType::DataAccess,
+            "backup_file",
+            &source_label,
+            "parse_documents",
+            audit_result,
+            details,
+            None,
+        ).await.ok();
+
+        tracker.update_progress(documents.len() as u64, None).await.ok();
+        tracker.complete_success().await.ok();
+
+        Ok(ParseResult {
+            documents,
+            collections,
+            metadata,
+            errors,
+        })
+    }
+
+    /// Parse one input file into the shared accumulators.
+    ///
+    /// `index_base` keeps record indices unique across inputs so a warning
+    /// points at a single record of the whole export.
+    async fn parse_input(
+        &self,
+        reader: &LevelDBReader,
+        format: BackupFormat,
+        index_base: usize,
+        documents: &mut Vec<FirestoreDocument>,
+        collections: &mut std::collections::HashSet<String>,
+        errors: &mut Vec<FireupError>,
+    ) -> Result<InputCounts, FireupError> {
+        let context = ErrorContext {
+            operation: "parse_input".to_string(),
+            metadata: HashMap::from([
+                ("file_path".to_string(), reader.file_path.clone()),
+            ]),
+            timestamp: chrono::Utc::now(),
+            call_path: vec!["leveldb_parser::parser::FirestoreDocumentParser".to_string()],
+        };
 
         match format {
             BackupFormat::JsonLines => {
                 info!(
                     "Detected JSON Lines backup; parsing as JSON lines: {}",
-                    self.reader.file_path
+                    reader.file_path
                 );
-                let file_bytes = tokio::fs::read(&self.reader.file_path).await.map_err(|e| {
+                let file_bytes = tokio::fs::read(&reader.file_path).await.map_err(|e| {
                     FireupError::leveldb_parse(
                         format!("Failed to read file for JSON parsing: {}", e),
                         context.clone(),
                     )
                 })?;
                 let mut non_empty_lines = 0usize;
+                let mut parsed = 0usize;
                 for (index, line) in file_bytes.split(|b| *b == b'\n').enumerate() {
                     let Ok(line_str) = std::str::from_utf8(line) else { continue };
                     let trimmed = line_str.trim();
@@ -477,10 +653,11 @@ impl FirestoreDocumentParser {
                     non_empty_lines += 1;
                     match serde_json::from_str::<serde_json::Value>(trimmed) {
                         Ok(json_value) => {
-                            match self.parse_json_document(&json_value, index).await {
+                            match self.parse_json_document(&json_value, index_base + index).await {
                                 Ok(Some(document)) => {
                                     collections.insert(document.collection.clone());
                                     documents.push(document);
+                                    parsed += 1;
                                 }
                                 Ok(None) => {
                                     debug!("Skipped non-document JSON line at index {}", index);
@@ -498,19 +675,21 @@ impl FirestoreDocumentParser {
                         }
                     }
                 }
-                if documents.is_empty() {
-                    warn!("JSON Lines parsing did not produce any documents ({} non-empty lines)", non_empty_lines);
+                if parsed == 0 {
+                    warn!(
+                        "JSON Lines parsing of {} did not produce any documents ({} non-empty lines)",
+                        reader.file_path, non_empty_lines
+                    );
                 }
-                blocks_processed = 0;
-                records_processed = documents.len();
+                Ok(InputCounts { blocks: 0, records: parsed })
             }
             BackupFormat::LevelDb => {
                 // Read all blocks from the LevelDB file
-                let blocks = self.reader.read_file().await?;
+                let blocks = reader.read_file().await?;
                 // Reconstruct complete records from potentially fragmented log records
                 let complete_records = self.reconstruct_records(&blocks)?;
                 for (index, record_data) in complete_records.iter().enumerate() {
-                    match self.parse_firestore_record(record_data, index).await {
+                    match self.parse_firestore_record(record_data, index_base + index).await {
                         Ok(Some(document)) => {
                             collections.insert(document.collection.clone());
                             documents.push(document);
@@ -525,70 +704,21 @@ impl FirestoreDocumentParser {
                         }
                     }
                 }
-                blocks_processed = blocks.len();
-                records_processed = complete_records.len();
+                Ok(InputCounts {
+                    blocks: blocks.len(),
+                    records: complete_records.len(),
+                })
             }
         }
-        
-        let collections: Vec<String> = collections.into_iter().collect();
-        
-        let metadata = BackupMetadata {
-            file_size,
-            document_count: documents.len(),
-            collection_count: collections.len(),
-            blocks_processed,
-            records_processed,
-        };
-        
-        info!(
-            "Parsing complete: {} documents, {} collections, {} errors",
-            documents.len(), collections.len(), errors.len()
-        );
-
-        // Log data access audit entry
-        let mut details = HashMap::new();
-        details.insert("file_path".to_string(), self.reader.file_path.clone());
-        details.insert("documents_parsed".to_string(), documents.len().to_string());
-        details.insert("collections_found".to_string(), collections.len().to_string());
-        details.insert("blocks_processed".to_string(), metadata.blocks_processed.to_string());
-        details.insert("file_size_bytes".to_string(), metadata.file_size.to_string());
-        
-        let audit_result = if errors.is_empty() {
-            AuditResult::Success
-        } else if !documents.is_empty() {
-            AuditResult::PartialSuccess(format!("{} parsing errors", errors.len()))
-        } else {
-            AuditResult::Failure("Failed to parse any documents".to_string())
-        };
-        
-        get_monitoring_system().log_audit_entry(
-            AuditOperationType::DataAccess,
-            "backup_file",
-            &self.reader.file_path,
-            "parse_documents",
-            audit_result,
-            details,
-            None,
-        ).await.ok();
-
-        tracker.update_progress(documents.len() as u64, None).await.ok();
-        tracker.complete_success().await.ok();
-        
-        Ok(ParseResult {
-            documents,
-            collections,
-            metadata,
-            errors,
-        })
     }
 
-    /// Detect whether the backup file is a LevelDB log or JSON Lines
-    async fn detect_backup_format(&self) -> Result<BackupFormat, FireupError> {
+    /// Detect whether a backup file is a LevelDB log or JSON Lines
+    async fn detect_backup_format(&self, reader: &LevelDBReader) -> Result<BackupFormat, FireupError> {
         // Read a small prefix of the file
-        let mut file = File::open(&self.reader.file_path).await
+        let mut file = File::open(&reader.file_path).await
             .map_err(|e| FireupError::leveldb_parse(format!("Failed to open file for format detection: {}", e), ErrorContext {
                 operation: "detect_backup_format".to_string(),
-                metadata: HashMap::from([("file_path".to_string(), self.reader.file_path.clone())]),
+                metadata: HashMap::from([("file_path".to_string(), reader.file_path.clone())]),
                 timestamp: chrono::Utc::now(),
                 call_path: vec!["leveldb_parser::parser::FirestoreDocumentParser".to_string()],
             }))?;
@@ -762,15 +892,34 @@ impl FirestoreDocumentParser {
             data,
             subcollections,
             metadata,
+            // JSON exports carry a document path rather than a Datastore key.
+            key: None,
         };
-        
+
         debug!("Parsed JSON document: {}/{}", document.collection, document.id);
         Ok(Some(document))
     }
     
-    /// Parse a protobuf-encoded Firestore / Datastore Entity document
+    /// Parse a protobuf-encoded Firestore / Datastore entity document.
+    ///
+    /// Managed exports carry legacy `storage_onestore_v3.EntityProto` records,
+    /// while Datastore Admin / BigQuery export paths and our fixtures carry
+    /// `google.datastore.v1.Entity`. The field numbering of the two is disjoint,
+    /// so the payload itself selects the decoder and a mixed export still reads.
     async fn parse_protobuf_document(&self, record_data: &Bytes, record_index: usize) -> Result<Option<FirestoreDocument>, FireupError> {
         debug!("Attempting to parse protobuf document at index {}", record_index);
+
+        if let Some(document) = crate::leveldb_parser::entity_proto::try_decode_entity_proto_document(
+            record_data,
+            record_index,
+        ) {
+            debug!(
+                "Parsed legacy EntityProto document: {}/{}",
+                document.collection, document.id
+            );
+            return Ok(Some(document));
+        }
+
         match crate::leveldb_parser::protobuf_entity::try_decode_entity_document(record_data, record_index)? {
             Some(document) => {
                 debug!(

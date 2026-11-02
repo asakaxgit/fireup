@@ -79,17 +79,44 @@ impl ProgressCallback for LoggingProgressCallback {
 
 /// Backup validator implementation
 pub struct BackupValidatorImpl {
-    reader: LevelDBReader,
+    /// The path as given: a single file, or the root of an export tree.
+    input_path: String,
+    /// Every LevelDB file the input resolves to. Validating only the first one
+    /// would pass a backup whose other kinds or shards are corrupt. Never empty.
+    inputs: Vec<LevelDBReader>,
     progress_callback: Option<Box<dyn ProgressCallback>>,
 }
 
 impl BackupValidatorImpl {
     /// Create a new backup validator
     pub fn new(file_path: impl Into<String>) -> Self {
+        let input_path = file_path.into();
+        let mut inputs: Vec<LevelDBReader> =
+            crate::leveldb_parser::parser::resolve_export_inputs(&input_path)
+                .into_iter()
+                .map(|path| LevelDBReader::for_file(path.to_string_lossy().to_string()))
+                .collect();
+        if inputs.is_empty() {
+            inputs.push(LevelDBReader::for_file(input_path.clone()));
+        }
         Self {
-            reader: LevelDBReader::new(file_path),
+            input_path,
+            inputs,
             progress_callback: None,
         }
+    }
+
+    /// Read the blocks of every input, reporting per-file failures.
+    async fn read_all_blocks(&self) -> (Vec<crate::leveldb_parser::parser::LogBlock>, Vec<String>) {
+        let mut blocks = Vec::new();
+        let mut errors = Vec::new();
+        for reader in &self.inputs {
+            match reader.read_file().await {
+                Ok(mut file_blocks) => blocks.append(&mut file_blocks),
+                Err(e) => errors.push(format!("{}: {}", reader.file_path, e)),
+            }
+        }
+        (blocks, errors)
     }
     
     /// Set a progress callback for long-running operations
@@ -100,7 +127,7 @@ impl BackupValidatorImpl {
     
     /// Validate the backup file comprehensively
     pub async fn validate_comprehensive(&self, _file_path: &str) -> Result<ValidationResult, FireupError> {
-        let file_path = &self.reader.file_path;
+        let file_path = &self.input_path;
         let _context = ErrorContext {
             operation: "validate_comprehensive".to_string(),
             metadata: HashMap::from([
@@ -210,32 +237,41 @@ impl BackupValidatorImpl {
             ));
         }
         
-        // Check if it's a file (not a directory)
-        if !path.is_file() {
-            return Err(FireupError::backup_validation(
-                format!("Path is not a file: {}", file_path),
-                file_path,
-                context
-            ));
+        // A directory is an export tree: every file it resolved to is checked,
+        // and the reported size/readability covers the whole backup.
+        let mut file_size = 0u64;
+        let mut is_readable = true;
+        let mut last_modified = None;
+
+        for reader in &self.inputs {
+            let input = Path::new(&reader.file_path);
+            if !input.is_file() {
+                return Err(FireupError::backup_validation(
+                    format!("Backup input is not a file: {}", reader.file_path),
+                    file_path,
+                    context
+                ));
+            }
+
+            let metadata = fs::metadata(input).await
+                .map_err(|e| FireupError::backup_validation(
+                    format!("Failed to read file metadata for {}: {}", reader.file_path, e),
+                    file_path,
+                    context.clone()
+                ))?;
+
+            file_size += metadata.len();
+            is_readable &= fs::File::open(input).await.is_ok();
+
+            let modified = metadata.modified().ok()
+                .and_then(|time| chrono::DateTime::from_timestamp(
+                    time.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64, 0
+                ));
+            if modified > last_modified {
+                last_modified = modified;
+            }
         }
-        
-        // Get file metadata
-        let metadata = fs::metadata(path).await
-            .map_err(|e| FireupError::backup_validation(
-                format!("Failed to read file metadata: {}", e),
-                file_path,
-                context.clone()
-            ))?;
-        
-        let file_size = metadata.len();
-        let last_modified = metadata.modified().ok()
-            .and_then(|time| chrono::DateTime::from_timestamp(
-                time.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64, 0
-            ));
-        
-        // Check if file is readable
-        let is_readable = fs::File::open(path).await.is_ok();
-        
+
         // Validate minimum file size (LevelDB files should be at least a few KB)
         if file_size < 1024 {
             return Err(FireupError::backup_validation(
@@ -260,10 +296,12 @@ impl BackupValidatorImpl {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
         
-        let blocks = match self.reader.read_file().await {
-            Ok(blocks) => blocks,
-            Err(e) => {
-                errors.push(format!("Failed to read LevelDB blocks: {}", e));
+        let (blocks, read_errors) = self.read_all_blocks().await;
+        if !read_errors.is_empty() {
+            for message in &read_errors {
+                errors.push(format!("Failed to read LevelDB blocks: {}", message));
+            }
+            if blocks.is_empty() {
                 return (StructureInfo {
                     total_blocks: 0,
                     total_records: 0,
@@ -273,8 +311,8 @@ impl BackupValidatorImpl {
                     document_records: 0,
                 }, errors, warnings);
             }
-        };
-        
+        }
+
         let mut total_records = 0;
         let mut valid_records = 0;
         let mut corrupted_records = 0;
@@ -342,18 +380,18 @@ impl BackupValidatorImpl {
         let incomplete_records = 0;
         let parsing_errors = 0;
         
-        let blocks = match self.reader.read_file().await {
-            Ok(blocks) => blocks,
-            Err(e) => {
-                errors.push(format!("Failed to read file for integrity check: {}", e));
-                return (IntegrityInfo {
-                    checksum_failures: 0,
-                    incomplete_records: 0,
-                    parsing_errors: 0,
-                    overall_integrity_score: 0.0,
-                }, errors, warnings);
+        let (blocks, read_errors) = self.read_all_blocks().await;
+        if !read_errors.is_empty() && blocks.is_empty() {
+            for message in read_errors {
+                errors.push(format!("Failed to read file for integrity check: {}", message));
             }
-        };
+            return (IntegrityInfo {
+                checksum_failures: 0,
+                incomplete_records: 0,
+                parsing_errors: 0,
+                overall_integrity_score: 0.0,
+            }, errors, warnings);
+        }
         
         let mut total_records = 0;
         
@@ -410,7 +448,7 @@ impl BackupValidatorImpl {
         let mut warnings = Vec::new();
         
         // Try to parse a few documents to validate format
-        let parser = FirestoreDocumentParser::new(&self.reader.file_path);
+        let parser = FirestoreDocumentParser::new(&self.input_path);
         
         match parser.parse_documents().await {
             Ok(parse_result) => {
