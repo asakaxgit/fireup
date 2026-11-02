@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 mod error;
 mod types;
+mod protos;
 mod leveldb_parser;
 mod schema_analyzer;
 mod data_importer;
