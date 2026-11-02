@@ -439,20 +439,33 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
    excludes metadata files, and both `FirestoreDocumentParser` and
    `BackupValidatorImpl` aggregate across all of them.
 
-6. **Generated DDL is not always loadable**
-   `Orders` DDL emits `user TEXT NOT NULL` unquoted; `user` is reserved, and
-   `psql` rejects it with `syntax error at or near "user"`. Identifiers are never
-   quoted, so table names also silently fold to lower case.
+6. ~~**Generated DDL is not always loadable**~~ — **resolved (SAK-143)**
+   `Orders` DDL emitted `user TEXT NOT NULL` unquoted; `user` is reserved, so
+   `psql` rejected it with `syntax error at or near "user"` and aborted every
+   statement after it. Identifiers were never quoted, so table names also
+   silently folded to lower case and disagreed with the names foreign keys used.
+   Every generated identifier now goes through `ddl_generator::quote_identifier`
+   (embedded quotes doubled), so reserved words load and `Users` stays `Users`.
 
-7. **`NOT NULL` emitted for sparse fields**
-   `nickname` is null in 4 of 5 fixture users yet is generated `TEXT NOT NULL`.
-   Any real import would violate the constraint.
+7. ~~**`NOT NULL` emitted for sparse fields**~~ — **resolved (SAK-143)**
+   `nickname` is null in 4 of 5 fixture users yet was generated `TEXT NOT NULL`,
+   which any real import would violate. The cause was in the analyzer, not the
+   threshold: `presence_percentage` counted explicit nulls as occurrences, so a
+   field present-but-null in every document scored 100%. Nulls are now excluded
+   from presence, and a column is `NOT NULL` only at 100% populated presence.
 
-8. **Type mapping loses fidelity**
+8. ~~**Type mapping loses fidelity**~~ — **resolved (SAK-143)**
    Observed in generated DDL: timestamp → `TEXT`, blob → `JSONB` (should be
    `BYTEA`), `int64` → `INTEGER` (overflows on auto-allocated key ids),
    nested map emitted both as `address JSONB` *and* flattened
    `address_city`/`address_postcode`/`address_verified` (duplicated data).
+   The decoders tag the types JSON cannot express (`__fireup_type__`: blob,
+   timestamp, geo point, key reference) instead of stringifying them, so the
+   analyzer maps them exactly: timestamp → `TIMESTAMPTZ`, blob → `BYTEA`,
+   integer → `BIGINT`, geo point → `POINT` (previously dropped), key reference →
+   `TEXT`. A nested map is emitted as JSONB *or* flattened, never both, and the
+   redundant `pk_<table>` unique index on the primary key is gone — PostgreSQL
+   already indexes a `PRIMARY KEY`.
 
 ### Medium — operability
 

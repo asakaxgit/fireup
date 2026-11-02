@@ -307,17 +307,122 @@ mod normalizer_tests {
             .find(|t| t.name == "users")
             .expect("Users table should be created");
         
-        // Should have primary key
+        // The natural key, not a random surrogate, is the primary key
         assert!(users_table.primary_key.is_some());
         let pk = users_table.primary_key.as_ref().unwrap();
-        assert_eq!(pk.columns[0], "id");
-        
-        // Should have basic columns
-        let id_column = users_table.columns.iter()
-            .find(|c| c.name == "id")
-            .expect("ID column should exist");
-        assert!(!id_column.nullable);
-        assert!(matches!(id_column.column_type, PostgreSQLType::Uuid));
+        assert_eq!(pk.columns, vec![KEY_PATH_COLUMN.to_string()]);
+
+        let key_path_column = users_table.columns.iter()
+            .find(|c| c.name == KEY_PATH_COLUMN)
+            .expect("key_path column should exist");
+        assert!(!key_path_column.nullable);
+        assert!(matches!(key_path_column.column_type, PostgreSQLType::Text));
+
+        // Every part of the Datastore key is preserved
+        for expected in [
+            KEY_NAMESPACE_COLUMN,
+            KEY_KIND_COLUMN,
+            KEY_NAME_COLUMN,
+            KEY_ID_COLUMN,
+            PARENT_KEY_PATH_COLUMN,
+        ] {
+            assert!(
+                users_table.columns.iter().any(|c| c.name == expected),
+                "missing key column {expected}"
+            );
+        }
+
+        // Auto-allocated key ids exceed int32, so the id column must be BIGINT
+        let key_id_column = users_table.columns.iter()
+            .find(|c| c.name == KEY_ID_COLUMN)
+            .expect("key_id column should exist");
+        assert!(matches!(key_id_column.column_type, PostgreSQLType::BigInt));
+
+        // No surrogate UUID key is generated any more
+        assert!(!users_table.columns.iter().any(|c| c.name == "id"));
+    }
+
+    #[test]
+    fn test_primary_key_has_no_duplicate_index() {
+        // PostgreSQL already creates a unique index to back a PRIMARY KEY.
+        let normalizer = NormalizationEngine::new();
+        let analysis = create_test_analysis();
+
+        let schema = normalizer.normalize_schema(&analysis).unwrap();
+
+        for table in &schema.tables {
+            if let Some(ref pk) = table.primary_key {
+                assert!(
+                    !table.indexes.iter().any(|idx| idx.columns == pk.columns),
+                    "table {} duplicates its primary key index",
+                    table.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_sparse_fields_are_nullable() {
+        let normalizer = NormalizationEngine::new();
+        let mut analysis = create_test_analysis();
+
+        // Present in only 1 of 3 documents — e.g. a nickname most users omit.
+        analysis.add_field_type(FieldTypeAnalysis {
+            field_path: "users.nickname".to_string(),
+            type_frequencies: {
+                let mut map = HashMap::new();
+                map.insert("string".to_string(), 1);
+                map.insert("null".to_string(), 2);
+                map
+            },
+            total_occurrences: 3,
+            presence_percentage: 33.3,
+            recommended_type: PostgreSQLType::Text,
+        });
+
+        let schema = normalizer.normalize_schema(&analysis).unwrap();
+        let users_table = schema.tables.iter().find(|t| t.name == "users").unwrap();
+
+        let nickname = users_table.columns.iter()
+            .find(|c| c.name == "nickname")
+            .expect("nickname column should exist");
+        assert!(nickname.nullable, "a field missing from some documents must be nullable");
+
+        // A field present in every document still gets NOT NULL
+        let name = users_table.columns.iter().find(|c| c.name == "name").unwrap();
+        assert!(!name.nullable);
+    }
+
+    #[test]
+    fn test_nested_map_is_not_both_jsonb_and_flattened() {
+        let normalizer = NormalizationEngine::new();
+        let mut analysis = create_test_analysis();
+
+        for (path, recommended) in [
+            ("users.address", PostgreSQLType::Jsonb),
+            ("users.address.city", PostgreSQLType::Text),
+            ("users.address.postcode", PostgreSQLType::Text),
+            ("users.address.verified", PostgreSQLType::Boolean),
+        ] {
+            analysis.add_field_type(FieldTypeAnalysis {
+                field_path: path.to_string(),
+                type_frequencies: HashMap::new(),
+                total_occurrences: 3,
+                presence_percentage: 100.0,
+                recommended_type: recommended,
+            });
+        }
+
+        let schema = normalizer.normalize_schema(&analysis).unwrap();
+        let users_table = schema.tables.iter().find(|t| t.name == "users").unwrap();
+
+        assert!(users_table.columns.iter().any(|c| c.name == "address"));
+        for flattened in ["address_city", "address_postcode", "address_verified"] {
+            assert!(
+                !users_table.columns.iter().any(|c| c.name == flattened),
+                "map was emitted as JSONB and flattened into {flattened}"
+            );
+        }
     }
 
     #[test]
@@ -351,7 +456,7 @@ mod normalizer_tests {
             assert!(!table.foreign_keys.is_empty());
             let fk = &table.foreign_keys[0];
             assert_eq!(fk.referenced_table, "users");
-            assert_eq!(fk.referenced_column, "id");
+            assert_eq!(fk.referenced_column, KEY_PATH_COLUMN);
             
             // Should create relationship
             let relationship = schema.relationships.iter()
@@ -384,14 +489,8 @@ mod normalizer_tests {
         
         let schema = normalizer.normalize_schema(&analysis).unwrap();
         
-        // Should generate indexes for primary keys and foreign keys
+        // Foreign keys get an index; primary keys already have one implicitly
         for table in &schema.tables {
-            if let Some(ref pk) = table.primary_key {
-                let pk_index = table.indexes.iter()
-                    .find(|idx| idx.unique && idx.columns == pk.columns);
-                assert!(pk_index.is_some(), "Primary key index should be created for table {}", table.name);
-            }
-            
             for fk in &table.foreign_keys {
                 let fk_index = table.indexes.iter()
                     .find(|idx| idx.columns.contains(&fk.column));

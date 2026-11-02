@@ -1,5 +1,11 @@
 use crate::error::FireupError;
-use crate::types::{FirestoreDocument, NormalizedSchema, TableDefinition, ColumnDefinition, PostgreSQLType};
+use crate::types::{
+    datastore_type_tag, FirestoreDocument, ForeignKeyDefinition, NormalizedSchema, TableDefinition,
+    ColumnDefinition,
+    PostgreSQLType, DATASTORE_TYPE_BLOB, DATASTORE_TYPE_GEO_POINT, DATASTORE_TYPE_KEY,
+    DATASTORE_TYPE_TIMESTAMP, KEY_ID_COLUMN, KEY_KIND_COLUMN, KEY_NAMESPACE_COLUMN,
+    KEY_NAME_COLUMN, KEY_PATH_COLUMN, PARENT_KEY_PATH_COLUMN,
+};
 use crate::data_importer::type_mapper::DataTypeMapper;
 use serde_json::{Value, Map};
 use std::collections::{HashMap, HashSet};
@@ -204,8 +210,17 @@ impl DocumentTransformer {
         let mut columns = HashMap::new();
         let mut foreign_keys = HashMap::new();
 
-        // Generate or use existing primary key
-        let primary_key = if document.data.contains_key("id") {
+        // The generated schema keys rows on the Datastore key, so the row must
+        // carry it. Writing a fresh UUID instead is what made imported rows
+        // unjoinable and re-imports non-idempotent.
+        let keys_on_natural_key = table
+            .columns
+            .iter()
+            .any(|column| column.name == KEY_PATH_COLUMN);
+
+        let primary_key = if keys_on_natural_key {
+            Value::String(document.natural_key())
+        } else if document.data.contains_key("id") {
             document.data["id"].clone()
         } else if self.config.generate_missing_ids {
             let uuid = self.get_or_generate_uuid(&document.id);
@@ -221,12 +236,20 @@ impl DocumentTransformer {
             }
         }
 
+        if keys_on_natural_key {
+            Self::populate_key_columns(document, table, &mut columns);
+        }
+
         // Transform each field according to the table schema
         for column in &table.columns {
             if let Some(ref pk) = table.primary_key {
                 if pk.columns.contains(&column.name) {
                     continue; // Already handled primary key
                 }
+            }
+
+            if keys_on_natural_key && Self::is_key_column(&column.name) {
+                continue; // Already populated from the Datastore key
             }
 
             let field_value = self.extract_field_value(&document.data, &column.name, &column.column_type)?;
@@ -265,6 +288,89 @@ impl DocumentTransformer {
             primary_key,
             foreign_keys,
         })
+    }
+
+    /// Is this one of the generated Datastore key columns?
+    fn is_key_column(name: &str) -> bool {
+        matches!(
+            name,
+            KEY_PATH_COLUMN
+                | KEY_NAMESPACE_COLUMN
+                | KEY_KIND_COLUMN
+                | KEY_NAME_COLUMN
+                | KEY_ID_COLUMN
+                | PARENT_KEY_PATH_COLUMN
+        )
+    }
+
+    /// Foreign key pointing back at the owning parent row, if the table has one.
+    ///
+    /// Normalized child tables reference the parent's natural key once the
+    /// schema keys on the Datastore key, and the legacy surrogate `id` otherwise.
+    fn parent_foreign_key(table: &TableDefinition) -> Option<&ForeignKeyDefinition> {
+        table
+            .foreign_keys
+            .iter()
+            .find(|fk| fk.referenced_column == KEY_PATH_COLUMN)
+            .or_else(|| {
+                table
+                    .foreign_keys
+                    .iter()
+                    .find(|fk| fk.referenced_column == "id")
+            })
+    }
+
+    /// Fill the Datastore key columns of a row from the document's key.
+    fn populate_key_columns(
+        document: &FirestoreDocument,
+        table: &TableDefinition,
+        columns: &mut HashMap<String, Value>,
+    ) {
+        let has_column = |name: &str| table.columns.iter().any(|column| column.name == name);
+        let key = document.key.as_ref();
+
+        if has_column(KEY_PATH_COLUMN) {
+            columns.insert(
+                KEY_PATH_COLUMN.to_string(),
+                Value::String(document.natural_key()),
+            );
+        }
+        if has_column(KEY_NAMESPACE_COLUMN) {
+            let namespace = key.map(|k| k.namespace.clone()).unwrap_or_default();
+            columns.insert(KEY_NAMESPACE_COLUMN.to_string(), Value::String(namespace));
+        }
+        if has_column(KEY_KIND_COLUMN) {
+            let kind = key
+                .and_then(|k| k.kind())
+                .map(str::to_string)
+                .unwrap_or_else(|| document.collection.clone());
+            columns.insert(KEY_KIND_COLUMN.to_string(), Value::String(kind));
+        }
+        if has_column(KEY_NAME_COLUMN) {
+            // Exactly one of name/id is populated, mirroring the Datastore key.
+            let name = match key {
+                Some(key) => key.name().map(str::to_string),
+                None => Some(document.id.clone()),
+            };
+            columns.insert(
+                KEY_NAME_COLUMN.to_string(),
+                name.map(Value::String).unwrap_or(Value::Null),
+            );
+        }
+        if has_column(KEY_ID_COLUMN) {
+            let id = key
+                .and_then(|k| k.numeric_id())
+                .map(|id| Value::Number(id.into()))
+                .unwrap_or(Value::Null);
+            columns.insert(KEY_ID_COLUMN.to_string(), id);
+        }
+        if has_column(PARENT_KEY_PATH_COLUMN) {
+            let parent = key
+                .and_then(|k| k.parent_encoded_path())
+                .map(Value::String)
+                .unwrap_or(Value::Null);
+            columns.insert(PARENT_KEY_PATH_COLUMN.to_string(), parent);
+        }
     }
 
     /// Extract field value from document data, handling nested paths
@@ -311,6 +417,19 @@ impl DocumentTransformer {
         column: &ColumnDefinition,
         warnings: &mut Vec<String>,
     ) -> Result<Value, FireupError> {
+        // Unwrap the tagged Datastore types into the literal text PostgreSQL
+        // accepts for the target column before the generic matching below.
+        if let Some(tag) = datastore_type_tag(value) {
+            if let Some(unwrapped) = Self::unwrap_tagged_value(tag, value, &column.column_type) {
+                return Ok(unwrapped);
+            }
+            warnings.push(format!(
+                "Datastore {} value kept as JSON for column '{}' of type {:?}",
+                tag, column.name, column.column_type
+            ));
+            return Ok(value.clone());
+        }
+
         match (&column.column_type, value) {
             // Direct type matches
             (PostgreSQLType::Boolean, Value::Bool(_)) => Ok(value.clone()),
@@ -362,6 +481,34 @@ impl DocumentTransformer {
                 ));
                 Ok(value.clone())
             }
+        }
+    }
+
+    /// Convert a tagged Datastore value into the literal PostgreSQL expects.
+    ///
+    /// Returns `None` when the tag does not fit the column's type, so the
+    /// caller can warn and fall back to keeping the JSON.
+    fn unwrap_tagged_value(
+        tag: &str,
+        value: &Value,
+        column_type: &PostgreSQLType,
+    ) -> Option<Value> {
+        let field = |name: &str| value.get(name).cloned();
+
+        match (tag, column_type) {
+            // `decode(…, 'base64')` on the way in; BYTEA keeps the exact bytes.
+            (DATASTORE_TYPE_BLOB, PostgreSQLType::Bytea) => field("base64"),
+            (DATASTORE_TYPE_TIMESTAMP, PostgreSQLType::Timestamp) => field("rfc3339"),
+            (DATASTORE_TYPE_GEO_POINT, PostgreSQLType::Point) => {
+                let latitude = value.get("latitude")?.as_f64()?;
+                let longitude = value.get("longitude")?.as_f64()?;
+                // PostgreSQL point input is `(x, y)`, i.e. longitude first.
+                Some(Value::String(format!("({},{})", longitude, latitude)))
+            }
+            (DATASTORE_TYPE_KEY, PostgreSQLType::Text) => field("key_path"),
+            // Any tagged value is still faithfully representable as JSONB.
+            (_, PostgreSQLType::Jsonb) => Some(value.clone()),
+            _ => None,
         }
     }
 
@@ -424,12 +571,12 @@ impl DocumentTransformer {
                 match field_value {
                     Value::Array(arr) => {
                         self.transform_array_to_normalized_table(
-                            arr, table, &document.id, table_data, warnings
+                            arr, table, &document.natural_key(), table_data, warnings
                         )?;
                     }
                     Value::Object(obj) => {
                         self.transform_object_to_normalized_table(
-                            obj, table, &document.id, table_data, warnings
+                            obj, table, &document.natural_key(), table_data, warnings
                         )?;
                     }
                     _ => {
@@ -455,6 +602,11 @@ impl DocumentTransformer {
         warnings: &mut Vec<String>,
     ) -> Result<(), FireupError> {
         let parent_uuid = self.get_or_generate_uuid(parent_id);
+        // `parent_id` is the parent's natural key when the schema keys on it.
+        let keys_on_natural_key = table
+            .columns
+            .iter()
+            .any(|column| column.name == PARENT_KEY_PATH_COLUMN);
 
         for (index, item) in array.iter().enumerate() {
             let mut columns = HashMap::new();
@@ -463,17 +615,34 @@ impl DocumentTransformer {
             // Generate primary key for this array item
             let item_id = format!("{}_{}", parent_id, index);
             let item_uuid = self.get_or_generate_uuid(&item_id);
-            
-            if let Some(ref pk) = table.primary_key {
-                if let Some(pk_column) = pk.columns.first() {
-                    columns.insert(pk_column.clone(), Value::String(item_uuid.to_string()));
+            let item_key = if keys_on_natural_key {
+                // The element's identity is its parent plus its position.
+                columns.insert(
+                    "array_index".to_string(),
+                    Value::Number((index as u64).into()),
+                );
+                Value::String(item_id.clone())
+            } else {
+                Value::String(item_uuid.to_string())
+            };
+
+            if !keys_on_natural_key {
+                if let Some(ref pk) = table.primary_key {
+                    if let Some(pk_column) = pk.columns.first() {
+                        columns.insert(pk_column.clone(), item_key.clone());
+                    }
                 }
             }
 
             // Add parent foreign key
-            if let Some(parent_fk) = table.foreign_keys.iter().find(|fk| fk.referenced_column == "id") {
-                foreign_keys.insert(parent_fk.column.clone(), Value::String(parent_uuid.to_string()));
-                columns.insert(parent_fk.column.clone(), Value::String(parent_uuid.to_string()));
+            if let Some(parent_fk) = Self::parent_foreign_key(table) {
+                let parent_value = if parent_fk.referenced_column == KEY_PATH_COLUMN {
+                    Value::String(parent_id.to_string())
+                } else {
+                    Value::String(parent_uuid.to_string())
+                };
+                foreign_keys.insert(parent_fk.column.clone(), parent_value.clone());
+                columns.insert(parent_fk.column.clone(), parent_value);
             }
 
             // Transform the array item based on its type
@@ -540,9 +709,14 @@ impl DocumentTransformer {
         }
 
         // Add parent foreign key
-        if let Some(parent_fk) = table.foreign_keys.iter().find(|fk| fk.referenced_column == "id") {
-            foreign_keys.insert(parent_fk.column.clone(), Value::String(parent_uuid.to_string()));
-            columns.insert(parent_fk.column.clone(), Value::String(parent_uuid.to_string()));
+        if let Some(parent_fk) = Self::parent_foreign_key(table) {
+            let parent_value = if parent_fk.referenced_column == KEY_PATH_COLUMN {
+                Value::String(parent_id.to_string())
+            } else {
+                Value::String(parent_uuid.to_string())
+            };
+            foreign_keys.insert(parent_fk.column.clone(), parent_value.clone());
+            columns.insert(parent_fk.column.clone(), parent_value);
         }
 
         // Map object fields to table columns

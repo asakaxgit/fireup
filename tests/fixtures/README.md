@@ -120,6 +120,25 @@ fixtures as spec-correct with a reader written independently of `src/`, plus
 acceptance tests that read the fixtures through fireup itself. All of them run
 by default — `cargo test --test real_export_validation`.
 
+`tests/ddl_postgres_load_tests.rs` takes the next step and generates DDL from
+these fixtures, then loads it with `psql --variable=ON_ERROR_STOP=1` and reads
+the resulting catalog back, so PostgreSQL itself decides whether the generated
+schema is valid. Asserting on the DDL string could not catch what this does: a
+property named `user` emitted unquoted is a `syntax error at or near "user"`
+that aborts the rest of the script. Each test loads into its own randomly named
+schema and drops it even on failure, so runs do not collide. It needs a
+reachable database and is skipped without one:
+
+```bash
+FIREUP_TEST_POSTGRES_URL='postgresql:///fireup_test?host=/var/run/postgresql' \
+  cargo test --test ddl_postgres_load_tests
+```
+
+The deliberate edge cases above are what give that test its teeth — `user` as a
+reserved-word column, `nickname` for nullability, the blob/geo-point/timestamp
+properties for type fidelity, and the two-element `Orders` keys for the
+ancestor link. Keep them when extending the dataset.
+
 Which decoder handles a payload is decided per record, so both trees are read by
 the same code path:
 

@@ -1,9 +1,10 @@
 use crate::error::FireupResult;
 use crate::monitoring::{get_monitoring_system, AuditOperationType, AuditResult};
 use crate::types::{
-    CollectionAnalysis, DetectedRelationship, FieldTypeAnalysis, FirestoreDocument,
-    NormalizationImpact, NormalizationOpportunity, NormalizationType, PostgreSQLType,
-    RelationshipType, SchemaAnalysis,
+    datastore_type_tag, CollectionAnalysis, DetectedRelationship, FieldTypeAnalysis,
+    FirestoreDocument, NormalizationImpact, NormalizationOpportunity, NormalizationType,
+    PostgreSQLType, RelationshipType, SchemaAnalysis, DATASTORE_TYPE_BLOB,
+    DATASTORE_TYPE_GEO_POINT, DATASTORE_TYPE_KEY, DATASTORE_TYPE_TIMESTAMP,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -216,7 +217,16 @@ impl DocumentStructureAnalyzer {
         let mut results = Vec::new();
         for (field_path, type_counts) in field_analysis {
             let total_occurrences = type_counts.values().sum::<u32>();
-            let presence_percentage = (total_occurrences as f64 / documents.len() as f64) * 100.0;
+
+            // A field explicitly set to null is *not* populated. Counting those
+            // as present is what produced `NOT NULL` on sparse columns.
+            let null_occurrences = type_counts.get("null").copied().unwrap_or(0);
+            let populated_occurrences = total_occurrences.saturating_sub(null_occurrences);
+            let presence_percentage = if documents.is_empty() {
+                0.0
+            } else {
+                (populated_occurrences as f64 / documents.len() as f64) * 100.0
+            };
 
             let recommended_type = self.recommend_postgresql_type(&type_counts);
 
@@ -256,8 +266,10 @@ impl DocumentStructureAnalyzer {
                 .and_modify(|count| *count += 1)
                 .or_insert(1);
 
-            // Recursively analyze nested objects
-            if let Value::Object(nested_obj) = value {
+            // Recursively analyze nested objects. A tagged value is a scalar
+            // wearing an object's clothes — descending into it would invent
+            // `avatar.base64`-style columns.
+            if let (Value::Object(nested_obj), None) = (value, datastore_type_tag(value)) {
                 // Convert serde_json::Map to HashMap for recursive call
                 let nested_hashmap: HashMap<String, Value> = nested_obj
                     .iter()
@@ -277,6 +289,12 @@ impl DocumentStructureAnalyzer {
 
     /// Get the type name of a JSON value
     fn get_value_type_name(&self, value: &Value) -> String {
+        // Datastore types that JSON cannot represent arrive tagged by the
+        // decoder, so they are identified exactly rather than guessed at.
+        if let Some(tag) = datastore_type_tag(value) {
+            return tag.to_string();
+        }
+
         match value {
             Value::Null => "null".to_string(),
             Value::Bool(_) => "boolean".to_string(),
@@ -288,10 +306,14 @@ impl DocumentStructureAnalyzer {
                 }
             }
             Value::String(s) => {
-                // Try to detect special string types
-                if s.len() == 36 && s.chars().filter(|c| *c == '-').count() == 4 {
+                // Untagged strings come from the JSON Lines path, where the only
+                // signal is the text itself. Both probes are strict parses: the
+                // old length/character heuristics mislabelled ordinary strings
+                // (a 36-char base64 blob read as a UUID) and so produced mixed
+                // type sets that collapsed the column to JSONB.
+                if uuid::Uuid::parse_str(s).is_ok() {
                     "uuid".to_string()
-                } else if s.contains('T') && s.contains('Z') {
+                } else if chrono::DateTime::parse_from_rfc3339(s).is_ok() {
                     "timestamp".to_string()
                 } else {
                     "string".to_string()
@@ -304,16 +326,28 @@ impl DocumentStructureAnalyzer {
 
     /// Recommend PostgreSQL type based on detected types
     fn recommend_postgresql_type(&self, type_counts: &HashMap<String, u32>) -> PostgreSQLType {
-        let total_count: u32 = type_counts.values().sum();
+        // Nulls say nothing about the column's type — only about its
+        // nullability — so they never take part in picking one.
+        let populated: HashMap<&str, u32> = type_counts
+            .iter()
+            .filter(|(type_name, _)| type_name.as_str() != "null")
+            .map(|(type_name, count)| (type_name.as_str(), *count))
+            .collect();
+
+        let total_count: u32 = populated.values().sum();
+        if total_count == 0 {
+            // Every observed value was null; nothing better than TEXT to offer.
+            return PostgreSQLType::Text;
+        }
 
         // Find the most common type
-        let dominant_type = type_counts
+        let dominant_type = populated
             .iter()
             .max_by_key(|(_, count)| *count)
-            .map(|(type_name, _)| type_name.as_str())
+            .map(|(type_name, _)| *type_name)
             .unwrap_or("string");
 
-        let dominant_percentage = type_counts.get(dominant_type).unwrap_or(&0) * 100 / total_count;
+        let dominant_percentage = populated.get(dominant_type).unwrap_or(&0) * 100 / total_count;
 
         // If dominant type is less than threshold, use JSONB for flexibility
         if (dominant_percentage as f64) < (self.type_recommendation_threshold * 100.0) {
@@ -322,10 +356,18 @@ impl DocumentStructureAnalyzer {
 
         match dominant_type {
             "boolean" => PostgreSQLType::Boolean,
-            "integer" => PostgreSQLType::Integer,
+            // Datastore integers are int64. INTEGER silently overflows on
+            // auto-allocated key ids, which routinely exceed int32.
+            "integer" => PostgreSQLType::BigInt,
             "number" => PostgreSQLType::Numeric(None, None),
             "uuid" => PostgreSQLType::Uuid,
-            "timestamp" => PostgreSQLType::Timestamp,
+            // Covers both the decoder's tag and the RFC 3339 string probe:
+            // `DATASTORE_TYPE_TIMESTAMP` is itself "timestamp".
+            DATASTORE_TYPE_TIMESTAMP => PostgreSQLType::Timestamp,
+            // Non-UTF-8 bytes cannot round-trip through JSONB or TEXT.
+            DATASTORE_TYPE_BLOB => PostgreSQLType::Bytea,
+            DATASTORE_TYPE_GEO_POINT => PostgreSQLType::Point,
+            DATASTORE_TYPE_KEY => PostgreSQLType::Text,
             "string" => {
                 // Determine appropriate string type based on length analysis
                 PostgreSQLType::Text
@@ -382,21 +424,31 @@ impl DocumentStructureAnalyzer {
         collection_name: &str,
     ) -> FireupResult<()> {
         for (key, value) in data {
-            if let Value::String(s) = value {
-                // Look for reference-like patterns (e.g., collection/document_id)
-                if s.contains('/') {
-                    let parts: Vec<&str> = s.split('/').collect();
-                    if parts.len() >= 2 {
-                        let target_collection = parts[0].to_string();
-                        if target_collection != collection_name {
-                            patterns
-                                .entry(key.clone())
-                                .or_insert_with(HashMap::new)
-                                .entry(target_collection)
-                                .and_modify(|count| *count += 1)
-                                .or_insert(1);
-                        }
-                    }
+            // A decoded Datastore key reference is authoritative; an untagged
+            // string that merely looks like `kind/id` is the JSON Lines guess.
+            let reference_path = match datastore_type_tag(value) {
+                Some(DATASTORE_TYPE_KEY) => value
+                    .get("key_path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                Some(_) => None,
+                None => value.as_str().filter(|s| s.contains('/')).map(str::to_string),
+            };
+
+            let Some(reference_path) = reference_path else {
+                continue;
+            };
+
+            let parts: Vec<&str> = reference_path.split('/').collect();
+            if parts.len() >= 2 {
+                let target_collection = parts[0].to_string();
+                if target_collection != collection_name {
+                    patterns
+                        .entry(key.clone())
+                        .or_insert_with(HashMap::new)
+                        .entry(target_collection)
+                        .and_modify(|count| *count += 1)
+                        .or_insert(1);
                 }
             }
         }
@@ -504,7 +556,7 @@ impl DocumentStructureAnalyzer {
                         .and_modify(|count| *count += 1)
                         .or_insert(1);
                 }
-                Value::Object(nested_obj) => {
+                Value::Object(nested_obj) if datastore_type_tag(value).is_none() => {
                     // Convert serde_json::Map to HashMap for recursive call
                     let nested_hashmap: HashMap<String, Value> = nested_obj
                         .iter()

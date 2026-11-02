@@ -1,9 +1,12 @@
 use crate::error::FireupResult;
 use crate::types::{
-    SchemaAnalysis, NormalizedSchema, TableDefinition, ColumnDefinition, 
+    SchemaAnalysis, NormalizedSchema, TableDefinition, ColumnDefinition,
     PostgreSQLType, ForeignKeyDefinition, IndexDefinition, Relationship, SchemaWarning, WarningLevel, SchemaMetadata,
-    RelationshipType, NormalizationType, NormalizationOpportunity, PrimaryKeyDefinition
+    RelationshipType, NormalizationType, NormalizationOpportunity, PrimaryKeyDefinition,
+    KEY_ID_COLUMN, KEY_KIND_COLUMN, KEY_NAME_COLUMN, KEY_NAMESPACE_COLUMN, KEY_PATH_COLUMN,
+    PARENT_KEY_PATH_COLUMN,
 };
+use std::collections::{BTreeSet, HashSet};
 use tracing::{info, debug};
 use chrono::Utc;
 use uuid::Uuid;
@@ -79,83 +82,181 @@ impl NormalizationEngine {
         
         for collection in &analysis.collections {
             let mut main_table = TableDefinition::new(collection.name.clone());
-            
-            // Add primary key
-            main_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
-            main_table.set_primary_key(PrimaryKeyDefinition {
-                name: format!("{}_pkey", collection.name),
-                columns: vec!["id".to_string()],
-            });
-            
-            // Process field types for this collection
-            let collection_fields: Vec<_> = analysis.field_types.iter()
-                .filter(|ft| ft.field_path.starts_with(&format!("{}.", collection.name)))
+            Self::add_key_columns(&mut main_table, &collection.name);
+
+            // Process field types for this collection. Sorted so the generated
+            // DDL is stable across runs — `field_types` comes out of a HashMap.
+            let field_prefix = format!("{}.", collection.name);
+            let mut collection_fields: Vec<_> = analysis.field_types.iter()
+                .filter(|ft| ft.field_path.starts_with(&field_prefix))
                 .collect();
-            
+            collection_fields.sort_by(|a, b| a.field_path.cmp(&b.field_path));
+
+            let field_names: HashSet<&str> = collection_fields.iter()
+                .map(|ft| &ft.field_path[field_prefix.len()..])
+                .collect();
+
             let mut array_tables = Vec::new();
-            
+            let mut used_column_names: HashSet<String> = main_table.columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect();
+            let mut maps_kept_whole: BTreeSet<&str> = BTreeSet::new();
+
             for field_type in collection_fields {
-                let field_name = field_type.field_path
-                    .strip_prefix(&format!("{}.", collection.name))
-                    .unwrap_or(&field_type.field_path);
-                
+                let field_name = &field_type.field_path[field_prefix.len()..];
+
+                // A nested map is emitted as a single JSONB column, so its leaves
+                // must not also become flattened columns — emitting both doubles
+                // storage and lets the two copies drift apart.
+                if let Some(ancestor) = Self::emitted_ancestor(field_name, &field_names) {
+                    maps_kept_whole.insert(ancestor);
+                    continue;
+                }
+
                 // Check if this field represents an array that should be normalized
                 if self.should_normalize_array(field_type, &analysis.normalization_opportunities) {
-                    // Create separate table for array elements
+                    // Create separate table for array elements, keyed on the
+                    // parent entity's natural key plus the element's position.
                     let array_table_name = format!("{}_{}", collection.name, field_name);
                     let mut array_table = TableDefinition::new(array_table_name.clone());
-                    
-                    // Add columns for array table
-                    array_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
+
                     array_table.add_column(ColumnDefinition::new(
-                        format!("{}_id", collection.name), 
-                        PostgreSQLType::Uuid
+                        PARENT_KEY_PATH_COLUMN.to_string(),
+                        PostgreSQLType::Text,
                     ).not_null());
+                    array_table.add_column(ColumnDefinition::new("array_index".to_string(), PostgreSQLType::Integer).not_null());
                     array_table.add_column(ColumnDefinition::new("value".to_string(), field_type.recommended_type.clone()));
-                    array_table.add_column(ColumnDefinition::new("array_index".to_string(), PostgreSQLType::Integer));
-                    
+
                     array_table.set_primary_key(PrimaryKeyDefinition {
                         name: format!("{}_pkey", array_table_name),
-                        columns: vec!["id".to_string()],
+                        columns: vec![PARENT_KEY_PATH_COLUMN.to_string(), "array_index".to_string()],
                     });
-                    
+
                     // Add foreign key relationship
                     array_table.add_foreign_key(ForeignKeyDefinition {
-                        column: format!("{}_id", collection.name),
+                        column: PARENT_KEY_PATH_COLUMN.to_string(),
                         referenced_table: collection.name.clone(),
-                        referenced_column: "id".to_string(),
+                        referenced_column: KEY_PATH_COLUMN.to_string(),
                         constraint_name: format!("fk_{}_{}", array_table_name, collection.name),
                     });
-                    
+
                     array_tables.push(array_table);
-                    
+
                     // Add relationship
                     schema.relationships.push(Relationship {
                         from_table: array_table_name,
                         to_table: collection.name.clone(),
-                        from_column: format!("{}_id", collection.name),
-                        to_column: "id".to_string(),
+                        from_column: PARENT_KEY_PATH_COLUMN.to_string(),
+                        to_column: KEY_PATH_COLUMN.to_string(),
                         relationship_type: RelationshipType::ManyToOne,
                     });
                 } else {
                     // Add as regular column to main table
-                    let column_name = field_name.replace('.', "_"); // Handle nested fields
-                    let nullable = field_type.presence_percentage < 95.0; // Not null if present in 95%+ of documents
-                    
+                    let column_name = Self::unique_column_name(
+                        field_name.replace('.', "_"), // Handle nested fields
+                        &mut used_column_names,
+                    );
+                    // Firestore/Datastore schemas are sparse: a field missing (or
+                    // explicitly null) in even one document cannot be NOT NULL.
+                    let nullable = field_type.presence_percentage < 100.0;
+
                     let mut column = ColumnDefinition::new(column_name, field_type.recommended_type.clone());
                     if !nullable {
                         column = column.not_null();
                     }
-                    
+
                     main_table.add_column(column);
                 }
             }
-            
+
+            for map_field in maps_kept_whole {
+                schema.warnings.push(SchemaWarning {
+                    level: WarningLevel::Info,
+                    message: format!(
+                        "Nested map '{}' is stored as a single JSONB column; its sub-fields were not flattened into separate columns",
+                        map_field
+                    ),
+                    context: format!("{}.{}", collection.name, map_field),
+                    suggestion: Some(
+                        "Query the JSONB column, or add an explicit projection if flat columns are required".to_string(),
+                    ),
+                });
+            }
+
             schema.tables.push(main_table);
             schema.tables.extend(array_tables);
         }
-        
+
         Ok(())
+    }
+
+    /// Add the Datastore key columns and the natural primary key to a table.
+    ///
+    /// `key_path` is the namespace-qualified key path (`Users/ada`,
+    /// `[tenant]Users/ada/Orders/1001`), which makes it unique across
+    /// namespaces and ancestor paths. Keying rows on it rather than on a fresh
+    /// UUID is what makes a re-import idempotent and the rows joinable.
+    fn add_key_columns(table: &mut TableDefinition, collection: &str) {
+        table.add_column(
+            ColumnDefinition::new(KEY_PATH_COLUMN.to_string(), PostgreSQLType::Text).not_null(),
+        );
+        table.add_column(
+            ColumnDefinition::new(KEY_NAMESPACE_COLUMN.to_string(), PostgreSQLType::Text)
+                .not_null()
+                .with_default(serde_json::json!("")),
+        );
+        table.add_column(
+            ColumnDefinition::new(KEY_KIND_COLUMN.to_string(), PostgreSQLType::Text).not_null(),
+        );
+        // Exactly one of these is populated: Datastore keys carry either an
+        // application-assigned name or an auto-allocated int64 id.
+        table.add_column(ColumnDefinition::new(
+            KEY_NAME_COLUMN.to_string(),
+            PostgreSQLType::Text,
+        ));
+        table.add_column(ColumnDefinition::new(
+            KEY_ID_COLUMN.to_string(),
+            PostgreSQLType::BigInt,
+        ));
+        // NULL for a root entity; the parent's key_path for a child entity.
+        table.add_column(ColumnDefinition::new(
+            PARENT_KEY_PATH_COLUMN.to_string(),
+            PostgreSQLType::Text,
+        ));
+
+        table.set_primary_key(PrimaryKeyDefinition {
+            name: format!("{}_pkey", collection),
+            columns: vec![KEY_PATH_COLUMN.to_string()],
+        });
+    }
+
+    /// Nearest ancestor field of `field_name` that is itself emitted as a column.
+    fn emitted_ancestor<'a>(field_name: &str, field_names: &HashSet<&'a str>) -> Option<&'a str> {
+        let mut boundary = field_name.rfind('.');
+        while let Some(index) = boundary {
+            let ancestor = &field_name[..index];
+            if let Some(found) = field_names.get(ancestor) {
+                return Some(found);
+            }
+            boundary = ancestor.rfind('.');
+        }
+        None
+    }
+
+    /// Reserve a column name, suffixing it if the table already uses it.
+    fn unique_column_name(candidate: String, used: &mut HashSet<String>) -> String {
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        let mut suffix = 1;
+        loop {
+            let alternative = format!("{}_{}", candidate, suffix);
+            if used.insert(alternative.clone()) {
+                return alternative;
+            }
+            suffix += 1;
+        }
     }
 
     /// Check if an array field should be normalized into a separate table
@@ -219,64 +320,81 @@ impl NormalizationEngine {
     /// Create a lookup table for a detected relationship
     fn create_lookup_table(&self, relationship: &crate::types::DetectedRelationship, schema: &mut NormalizedSchema) -> FireupResult<()> {
         let lookup_table_name = format!("{}_{}_lookup", relationship.from_collection, relationship.to_collection);
-        
+
         // Check if table already exists
         if schema.tables.iter().any(|t| t.name == lookup_table_name) {
             return Ok(());
         }
-        
+
+        // A foreign key to a table this export does not contain would make the
+        // whole DDL script unloadable, so only link kinds we actually generated.
+        let has_table = |name: &str| schema.tables.iter().any(|t| t.name == name);
+        if !has_table(&relationship.from_collection) || !has_table(&relationship.to_collection) {
+            schema.warnings.push(SchemaWarning {
+                level: WarningLevel::Warning,
+                message: format!(
+                    "Skipped lookup table for '{}' → '{}': the referenced kind is not present in this export",
+                    relationship.from_collection, relationship.to_collection
+                ),
+                context: relationship.reference_field.clone(),
+                suggestion: Some("Export both kinds together to generate the relationship".to_string()),
+            });
+            return Ok(());
+        }
+
+        let from_column = format!("{}_{}", relationship.from_collection, KEY_PATH_COLUMN);
+        let to_column = format!("{}_{}", relationship.to_collection, KEY_PATH_COLUMN);
+
         let mut lookup_table = TableDefinition::new(lookup_table_name.clone());
-        
-        // Add columns
-        lookup_table.add_column(ColumnDefinition::new("id".to_string(), PostgreSQLType::Uuid).not_null());
-        lookup_table.add_column(ColumnDefinition::new(
-            format!("{}_id", relationship.from_collection), 
-            PostgreSQLType::Uuid
-        ).not_null());
-        lookup_table.add_column(ColumnDefinition::new(
-            format!("{}_id", relationship.to_collection), 
-            PostgreSQLType::Uuid
-        ).not_null());
-        
+
+        // Both sides reference the natural key of the entity table, so the pair
+        // itself identifies the row — no surrogate id is needed.
+        lookup_table.add_column(
+            ColumnDefinition::new(from_column.clone(), PostgreSQLType::Text).not_null(),
+        );
+        lookup_table.add_column(
+            ColumnDefinition::new(to_column.clone(), PostgreSQLType::Text).not_null(),
+        );
+
         lookup_table.set_primary_key(PrimaryKeyDefinition {
             name: format!("{}_pkey", lookup_table_name),
-            columns: vec!["id".to_string()],
+            columns: vec![from_column.clone(), to_column.clone()],
         });
-        
+
         // Add foreign keys
         lookup_table.add_foreign_key(ForeignKeyDefinition {
-            column: format!("{}_id", relationship.from_collection),
+            column: from_column.clone(),
             referenced_table: relationship.from_collection.clone(),
-            referenced_column: "id".to_string(),
+            referenced_column: KEY_PATH_COLUMN.to_string(),
             constraint_name: format!("fk_{}_{}", lookup_table_name, relationship.from_collection),
         });
-        
+
         lookup_table.add_foreign_key(ForeignKeyDefinition {
-            column: format!("{}_id", relationship.to_collection),
+            column: to_column.clone(),
             referenced_table: relationship.to_collection.clone(),
-            referenced_column: "id".to_string(),
+            referenced_column: KEY_PATH_COLUMN.to_string(),
             constraint_name: format!("fk_{}_{}", lookup_table_name, relationship.to_collection),
         });
-        
+
         schema.tables.push(lookup_table);
-        
+
         // Add relationships
         schema.relationships.push(Relationship {
             from_table: lookup_table_name.clone(),
             to_table: relationship.from_collection.clone(),
-            from_column: format!("{}_id", relationship.from_collection),
-            to_column: "id".to_string(),
+            from_column,
+            to_column: KEY_PATH_COLUMN.to_string(),
             relationship_type: RelationshipType::ManyToOne,
         });
-        
+
         schema.relationships.push(Relationship {
             from_table: lookup_table_name,
             to_table: relationship.to_collection.clone(),
-            from_column: format!("{}_id", relationship.to_collection),
-            to_column: "id".to_string(),
+            from_column: to_column,
+            to_column: KEY_PATH_COLUMN.to_string(),
             relationship_type: RelationshipType::ManyToOne,
         });
-        
+
         Ok(())
     }
 
@@ -297,16 +415,9 @@ impl NormalizationEngine {
                 });
             }
             
-            // Add unique index for primary key if not already present
-            if let Some(ref pk) = table.primary_key {
-                let pk_index_name = format!("pk_{}", table.name);
-                table.add_index(IndexDefinition {
-                    name: pk_index_name,
-                    columns: pk.columns.clone(),
-                    unique: true,
-                    index_type: Some("btree".to_string()),
-                });
-            }
+            // No index is added for the primary key: PostgreSQL already creates
+            // a unique btree index to back the PRIMARY KEY constraint, so a
+            // second one would only duplicate storage and write cost.
         }
         
         Ok(())
