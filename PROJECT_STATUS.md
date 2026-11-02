@@ -9,11 +9,12 @@
 ## Executive Summary
 
 Fireup aims to migrate Firestore/Datastore backup data into PostgreSQL. The
-internal components are built out and unit-tested, but **the end-to-end path
-does not work on a realistic managed export.** Validated on 2026-11-02 against
-spec-correct export fixtures (SAK-139): `fireup validate` reports
-`No records found in LevelDB file`, and `fireup analyze` produces an empty
-schema while exiting 0. Zero of 12 entities were recovered.
+internal components are built out and unit-tested. Validated on 2026-11-02
+against spec-correct export fixtures (SAK-139), `fireup validate` reported
+`No records found in LevelDB file` and zero of 12 entities were recovered.
+**The read path is now fixed** (SAK-141): `validate` reads all 12 entities of
+the fixture tree across both kinds. The remaining gaps are downstream of
+parsing — see Residual Risks.
 
 Treat the previous "Development Complete - Production Ready" assessment as
 withdrawn. It was based on unit tests over synthetic in-memory inputs, none of
@@ -26,11 +27,14 @@ which exercised the real on-disk export format.
 - Realistic export fixtures plus a format-level validation suite
   (`tests/fixtures/`, `tests/real_export_validation.rs`)
 
+### What works on a real export
+- Reading a managed export end to end: masked CRC32C framing, legacy
+  `EntityProto` payloads, and every kind and `output-N` shard of the tree
+  (SAK-141)
+
 ### What does not work yet
-- Reading any real export file (checksum algorithm is wrong — see Residual Risks)
-- Decoding real export payloads (wrong protobuf schema)
-- Reading more than one kind of an export tree
-- Inserting any rows during `import`
+- Carrying the Datastore key into the generated schema (rows are keyed on a
+  random UUID, so they are unjoinable — residual risk 4)
 
 ---
 
@@ -455,6 +459,17 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
     `tests/library_api_tests.rs`, which runs in its own process so no other test
     can mask the regression.
 
+12. **`cargo test` does not compile** — **resolved (SAK-142).**
+    `tests/integration_tests.rs` failed with 9 errors (`parse_backup` called
+    without the `LevelDBParser` trait in scope; `ColumnDefinition.data_type`,
+    renamed to `column_type`), pre-existing and reproduced at `fd24bf2`. Both
+    are fixed, so the whole suite compiles. `cargo test` is now meaningful —
+    and immediately shows one real failure,
+    `functional_tests::level3_tests::test_level3_parsing`, which reads 0
+    documents from the checked-in `tests/.firestore-data/` export. That is the
+    SAK-141 parser gap, not a test defect, and it should stay red until the
+    parser reads that export.
+
 13. **`--drop-existing`, `--batch-size`, `--continue-on-error`** — **resolved
     (SAK-142).** `--drop-existing` was a log line with no effect; it now runs
     `DROP TABLE IF EXISTS … CASCADE` for the schema's tables in one transaction.
@@ -463,19 +478,14 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
     row by row so the importable rows land. A partial import still exits
     non-zero: it is not a completed migration.
 
-12. **`cargo test` does not compile.** `tests/integration_tests.rs` fails with 9
-    errors (`parse_backup` called without the `LevelDBParser` trait in scope;
-    `ColumnDefinition.data_type`, renamed to `column_type`). Pre-existing and
-    long-standing — reproduced at `fd24bf2`, before any SAK-137/SAK-139 work.
-    Only `cargo test --lib` and the individual working test targets run, so the
-    "integration tests available / passing" claim in this document was never
-    true. Either fix or remove the stale targets so `cargo test` is meaningful.
-
 ### Not yet assessed
 
-- **`import` end-to-end.** Could not be executed: the hardcoded connection
-  target is unreachable in the validation environment. Findings 3 and 10 are
-  from source inspection; everything else above was observed at runtime.
+- **`import` against a real export.** The import path itself is now verified
+  end-to-end against a live PostgreSQL by `tests/postgres_import_tests.rs`
+  (set `FIREUP_TEST_POSTGRES_URL` to run it), using a JSON Lines backup the
+  parser can read. What remains unverified is the combination: a managed
+  LevelDB export parsed *and* imported in one run, which needs the SAK-141
+  parser work.
 - **Performance / large exports.** No benchmark has been run against a
   multi-shard export.
 - **A genuine GCP-produced export.** The fixtures are built to the documented
@@ -523,8 +533,9 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
 ### ⛔ NOT Ready for Production Use
 
 Do not run this against data anyone depends on. It cannot read a real export,
-and the `import` path reports success without writing rows — a failure mode that
-looks exactly like a completed migration.
+and the generated schema keys rows on a random UUID rather than the Datastore
+key, so even a complete import produces unjoinable rows. The `import` path no
+longer reports success without writing rows (SAK-142).
 
 **Strengths:**
 1. **Clean Architecture:** Well-organized, modular codebase
