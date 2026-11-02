@@ -415,15 +415,18 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
    a transparent retry duplicates rows. `tests/postgres_import_tests.rs` asserts
    the row counts actually present in PostgreSQL after an import.
 
-4. **Document identity is discarded** — *parser half resolved (SAK-141)*
-   Generated tables use `id UUID` populated from `uuid::Uuid::new_v4()`, and no
-   column holds the Datastore key name or id. Datastore keys are strings or
+4. ~~**Document identity is discarded**~~ — **resolved (SAK-141 + SAK-143)**
+   Generated tables used `id UUID` populated from `uuid::Uuid::new_v4()`, and no
+   column held the Datastore key name or id. Datastore keys are strings or
    `int64` (the fixture includes `ada`, `unicode-ユーザー`, and
-   `4503599627370496`). Even a working import would produce unjoinable rows.
-   Parsing now preserves the identity — both decoders emit the full
-   `DatastoreKey` (namespace plus ancestor path), so `ada` and
-   `unicode-ユーザー` survive. Carrying it into the generated schema and the
-   inserted rows is the remaining half.
+   `4503599627370496`), so even a working import produced unjoinable,
+   non-idempotent rows. Parsing preserves the identity (SAK-141): both decoders
+   emit the full `DatastoreKey` (namespace plus ancestor path). The generated
+   schema now carries it (SAK-143): every entity table has `key_path`
+   (namespace-qualified, e.g. `[tenant]Users/ada/Orders/1001`) as its primary
+   key, plus `key_namespace`, `key_kind`, `key_name`, `key_id BIGINT` and
+   `parent_key_path` for the ancestor link. The surrogate UUID is gone, so
+   re-importing the same export is idempotent.
 
 ### High — partial data loss or failed migrations
 
@@ -480,12 +483,12 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
     `tests/integration_tests.rs` failed with 9 errors (`parse_backup` called
     without the `LevelDBParser` trait in scope; `ColumnDefinition.data_type`,
     renamed to `column_type`), pre-existing and reproduced at `fd24bf2`. Both
-    are fixed, so the whole suite compiles. `cargo test` is now meaningful —
-    and immediately shows one real failure,
-    `functional_tests::level3_tests::test_level3_parsing`, which reads 0
-    documents from the checked-in `tests/.firestore-data/` export. That is the
-    SAK-141 parser gap, not a test defect, and it should stay red until the
-    parser reads that export.
+    are fixed, so the whole suite compiles. `cargo test` is now meaningful.
+    The 4 `functional_tests::level3_tests` tests it exposed were failing on a
+    stale expectation — they asserted `name`/`age` on the `users` collection,
+    which the generator never wrote — and were rewritten against the fixture's
+    actual `first`/`last`/`born`/`middle` fields in SAK-145. All 46 tests in
+    `tests/integration_tests.rs` now pass with nothing ignored.
 
 13. **`--drop-existing`, `--batch-size`, `--continue-on-error`** — **resolved
     (SAK-142).** `--drop-existing` was a log line with no effect; it now runs
