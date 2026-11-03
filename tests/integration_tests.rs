@@ -7,6 +7,9 @@ use tempfile::TempDir;
 use tokio::time::sleep;
 use tokio_postgres::{Client, NoTls};
 
+mod postgres_test_env;
+use postgres_test_env::{resolve_integration_postgres_url, skip_postgres_integration_test};
+
 // Import the main application types
 use fireup::types::*;
 
@@ -33,14 +36,13 @@ struct TestConfig {
 }
 
 impl TestConfig {
-    fn new() -> Self {
-        Self {
-            postgres_url: std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-                "postgresql://fireup:fireup_dev_password@localhost:5433/fireup_test".to_string()
-            }),
+    fn from_env() -> Option<Self> {
+        let postgres_url = resolve_integration_postgres_url()?;
+        Some(Self {
+            postgres_url,
             test_db_name: "fireup_integration_test".to_string(),
             backup_files_dir: PathBuf::from("examples/backup_files"),
-        }
+        })
     }
 }
 
@@ -51,48 +53,52 @@ struct TestDatabase {
 }
 
 impl TestDatabase {
-    async fn new() -> Result<Self> {
-        let config = TestConfig::new();
-        Ok(Self {
+    async fn new() -> Result<Option<Self>> {
+        let Some(config) = TestConfig::from_env() else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
             config,
             client: None,
-        })
+        }))
     }
 
     async fn setup(&mut self) -> Result<()> {
-        // Connect to PostgreSQL and create test database
-        let (client, connection) =
-            tokio_postgres::connect(&self.config.postgres_url, NoTls).await?;
+        let allow_create_db = std::env::var("FIREUP_TEST_ALLOW_CREATE_DATABASE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-        // Spawn connection task
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("Connection error: {}", e);
-            }
-        });
+        let connect_url = if allow_create_db {
+            let (client, connection) =
+                tokio_postgres::connect(&self.config.postgres_url, NoTls).await?;
 
-        // Create test database if it doesn't exist
-        let create_db_query = format!(
-            "CREATE DATABASE {} WITH ENCODING 'UTF8'",
-            self.config.test_db_name
-        );
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("Connection error: {}", e);
+                }
+            });
 
-        // Ignore error if database already exists
-        let _ = client.execute(&create_db_query, &[]).await;
+            let create_db_query = format!(
+                "CREATE DATABASE {} WITH ENCODING 'UTF8'",
+                self.config.test_db_name
+            );
+            let _ = client.execute(&create_db_query, &[]).await;
 
-        // Connect to the test database
-        let test_db_url = format!(
-            "{}/{}",
-            self.config
-                .postgres_url
-                .rsplit('/')
-                .skip(1)
-                .collect::<Vec<_>>()
-                .join("/"),
-            self.config.test_db_name
-        );
+            format!(
+                "{}/{}",
+                self.config
+                    .postgres_url
+                    .rsplit('/')
+                    .skip(1)
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                self.config.test_db_name
+            )
+        } else {
+            self.config.postgres_url.clone()
+        };
 
-        let (test_client, test_connection) = tokio_postgres::connect(&test_db_url, NoTls).await?;
+        let (test_client, test_connection) = tokio_postgres::connect(&connect_url, NoTls).await?;
 
         tokio::spawn(async move {
             if let Err(e) = test_connection.await {
@@ -121,6 +127,18 @@ impl TestDatabase {
     fn get_client(&self) -> &Client {
         self.client.as_ref().expect("Database not set up")
     }
+}
+
+async fn prepare_test_database(test_name: &str) -> Result<Option<TestDatabase>> {
+    if skip_postgres_integration_test(test_name) {
+        return Ok(None);
+    }
+    let Some(mut test_db) = TestDatabase::new().await? else {
+        println!("Skipping {test_name}: Postgres test URL rejected or missing.");
+        return Ok(None);
+    };
+    test_db.setup().await?;
+    Ok(Some(test_db))
 }
 
 /// Test Docker container management
@@ -176,6 +194,9 @@ impl DockerTestManager {
 
 #[tokio::test]
 async fn test_end_to_end_backup_import_workflow() -> Result<()> {
+    if skip_postgres_integration_test("test_end_to_end_backup_import_workflow") {
+        return Ok(());
+    }
     if !docker_available() {
         println!("Skipping Docker-dependent test: test_end_to_end_backup_import_workflow");
         return Ok(());
@@ -191,8 +212,10 @@ async fn test_end_to_end_backup_import_workflow() -> Result<()> {
         sleep(Duration::from_secs(1)).await;
     }
 
-    let mut test_db = TestDatabase::new().await?;
-    test_db.setup().await?;
+    let Some(mut test_db) = prepare_test_database("test_end_to_end_backup_import_workflow").await?
+    else {
+        return Ok(());
+    };
 
     // Test with small sample backup file
     let backup_file = PathBuf::from("examples/backup_files/small_sample.leveldb");
@@ -276,6 +299,9 @@ async fn test_end_to_end_backup_import_workflow() -> Result<()> {
 
 #[tokio::test]
 async fn test_postgresql_client_tool_compatibility() -> Result<()> {
+    if skip_postgres_integration_test("test_postgresql_client_tool_compatibility") {
+        return Ok(());
+    }
     if !docker_available() {
         println!("Skipping Docker-dependent test: test_postgresql_client_tool_compatibility");
         return Ok(());
@@ -290,8 +316,11 @@ async fn test_postgresql_client_tool_compatibility() -> Result<()> {
         sleep(Duration::from_secs(1)).await;
     }
 
-    let mut test_db = TestDatabase::new().await?;
-    test_db.setup().await?;
+    let Some(mut test_db) =
+        prepare_test_database("test_postgresql_client_tool_compatibility").await?
+    else {
+        return Ok(());
+    };
 
     // Create sample data for testing client compatibility
     let client = test_db.get_client();
@@ -444,6 +473,9 @@ async fn test_postgresql_client_tool_compatibility() -> Result<()> {
 
 #[tokio::test]
 async fn test_docker_container_integration() -> Result<()> {
+    if skip_postgres_integration_test("test_docker_container_integration") {
+        return Ok(());
+    }
     if !docker_available() {
         println!("Skipping Docker-dependent test: test_docker_container_integration");
         return Ok(());
@@ -492,8 +524,10 @@ async fn test_docker_container_integration() -> Result<()> {
     );
 
     // Test 4: Test volume persistence
-    let mut test_db = TestDatabase::new().await?;
-    test_db.setup().await?;
+    let Some(mut test_db) = prepare_test_database("test_docker_container_integration").await?
+    else {
+        return Ok(());
+    };
 
     // Create test data
     let client = test_db.get_client();
@@ -537,8 +571,11 @@ async fn test_docker_container_integration() -> Result<()> {
     }
 
     // Reconnect and verify data persistence
-    let mut test_db_after_restart = TestDatabase::new().await?;
-    test_db_after_restart.setup().await?;
+    let Some(mut test_db_after_restart) =
+        prepare_test_database("test_docker_container_integration").await?
+    else {
+        return Ok(());
+    };
 
     let client_after_restart = test_db_after_restart.get_client();
     let persistence_check = client_after_restart
@@ -579,6 +616,9 @@ async fn test_docker_container_integration() -> Result<()> {
 
 #[tokio::test]
 async fn test_complex_schema_normalization_workflow() -> Result<()> {
+    if skip_postgres_integration_test("test_complex_schema_normalization_workflow") {
+        return Ok(());
+    }
     if !docker_available() {
         println!("Skipping Docker-dependent test: test_complex_schema_normalization_workflow");
         return Ok(());
@@ -592,8 +632,11 @@ async fn test_complex_schema_normalization_workflow() -> Result<()> {
         sleep(Duration::from_secs(1)).await;
     }
 
-    let mut test_db = TestDatabase::new().await?;
-    test_db.setup().await?;
+    let Some(mut test_db) =
+        prepare_test_database("test_complex_schema_normalization_workflow").await?
+    else {
+        return Ok(());
+    };
 
     // Test with nested documents backup file
     let backup_file = PathBuf::from("examples/backup_files/nested_documents.leveldb");
@@ -669,6 +712,9 @@ async fn test_complex_schema_normalization_workflow() -> Result<()> {
 
 #[tokio::test]
 async fn test_error_handling_and_recovery() -> Result<()> {
+    if skip_postgres_integration_test("test_error_handling_and_recovery") {
+        return Ok(());
+    }
     if !docker_available() {
         println!("Skipping Docker-dependent test: test_error_handling_and_recovery");
         return Ok(());
@@ -682,8 +728,10 @@ async fn test_error_handling_and_recovery() -> Result<()> {
         sleep(Duration::from_secs(1)).await;
     }
 
-    let mut test_db = TestDatabase::new().await?;
-    test_db.setup().await?;
+    let Some(mut test_db) = prepare_test_database("test_error_handling_and_recovery").await?
+    else {
+        return Ok(());
+    };
 
     // Test 1: Invalid backup file handling
     let temp_dir = TempDir::new()?;
@@ -747,6 +795,9 @@ async fn test_error_handling_and_recovery() -> Result<()> {
 
 #[tokio::test]
 async fn test_performance_and_monitoring() -> Result<()> {
+    if skip_postgres_integration_test("test_performance_and_monitoring") {
+        return Ok(());
+    }
     if !docker_available() {
         println!("Skipping Docker-dependent test: test_performance_and_monitoring");
         return Ok(());
@@ -760,8 +811,10 @@ async fn test_performance_and_monitoring() -> Result<()> {
         sleep(Duration::from_secs(1)).await;
     }
 
-    let mut test_db = TestDatabase::new().await?;
-    test_db.setup().await?;
+    let Some(mut test_db) = prepare_test_database("test_performance_and_monitoring").await?
+    else {
+        return Ok(());
+    };
 
     // Test with larger dataset (products catalog)
     let backup_file = PathBuf::from("examples/backup_files/products_catalog.leveldb");
@@ -1043,6 +1096,9 @@ fn create_mock_backup_data() -> Vec<FirestoreDocument> {
 
 #[tokio::test]
 async fn test_mock_data_workflow() -> Result<()> {
+    if skip_postgres_integration_test("test_mock_data_workflow") {
+        return Ok(());
+    }
     if !docker_available() {
         println!("Skipping Docker-dependent test: test_mock_data_workflow");
         return Ok(());
@@ -1056,8 +1112,9 @@ async fn test_mock_data_workflow() -> Result<()> {
         sleep(Duration::from_secs(1)).await;
     }
 
-    let mut test_db = TestDatabase::new().await?;
-    test_db.setup().await?;
+    let Some(mut test_db) = prepare_test_database("test_mock_data_workflow").await? else {
+        return Ok(());
+    };
 
     // Use mock data when backup files are not available
     let mock_documents = create_mock_backup_data();

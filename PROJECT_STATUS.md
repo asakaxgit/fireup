@@ -229,6 +229,17 @@ runs.
 - `functional-tests/` - Feature-specific tests
 - `data-generator/` - Test data generation utilities
 
+**Postgres test database (November 2026):**
+- Integration tests require `FIREUP_TEST_POSTGRES_URL` or `TEST_DATABASE_URL` pointing at a **dedicated** fireup test database (preferred: Docker Compose on port **5433** via `docker-compose.yml`).
+- Tests **skip** when no URL is set; they do **not** fall back to host Postgres on 5432.
+- URLs using the Paperclip `paperclip` role or `paperclip` database are **rejected**.
+- Run `./scripts/run_integration_tests.sh` to start Compose Postgres and export the correct URL.
+
+**Functional sample-data ladder:**
+- Levels 1–4 generators live under `tests/data-generator/` (`npm run generate:level1` … `generate:level4`, or `generate:all-levels`).
+- Rust coverage: `tests/functional-tests/level{1,2,3,4}_tests.rs` (skips when `tests/.firestore-data` fixtures are missing).
+- See `tests/functional-tests/README.md` for fixture generation and `cargo test --test integration_tests functional_tests::`.
+
 ---
 
 ## Dependencies & Environment
