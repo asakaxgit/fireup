@@ -65,3 +65,6 @@ path = "tests/integration_tests.rs"
 [[test]]
 name = "deployment_tests"
 path = "tests/deployment_tests.rs"
+[[test]]
+name = "real_export_validation"
+path = "tests/real_export_validation.rs"

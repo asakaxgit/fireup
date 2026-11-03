@@ -1,24 +1,36 @@
 # Fireup Project Status
 
-**Last Updated:** November 22, 2025  
+**Last Updated:** November 2, 2026  
 **Version:** 0.1.0  
-**Status:** ✅ Development Complete - Production Ready
+**Status:** ⛔ NOT production ready — fails against a realistic Firestore/Datastore export
 
 ---
 
 ## Executive Summary
 
-Fireup is a comprehensive migration tool that enables seamless migration of Firestore backup data to PostgreSQL. The project has successfully completed all planned implementation tasks, with 156 passing unit tests and full integration testing capabilities. The codebase consists of approximately 15,000 lines of Rust code across 25 source files and 11 test files.
+Fireup aims to migrate Firestore/Datastore backup data into PostgreSQL. The
+internal components are built out and unit-tested, but **the end-to-end path
+does not work on a realistic managed export.** Validated on 2026-11-02 against
+spec-correct export fixtures (SAK-139): `fireup validate` reports
+`No records found in LevelDB file`, and `fireup analyze` produces an empty
+schema while exiting 0. Zero of 12 entities were recovered.
 
-### Key Achievements
-- ✅ Complete LevelDB parser for Firestore backup files
-- ✅ Advanced schema analysis with automatic normalization (1NF, 2NF, 3NF)
-- ✅ DDL generation for PostgreSQL schema creation
-- ✅ Data transformation and import pipeline
-- ✅ Full CLI interface with import, analyze, and validate commands
-- ✅ Docker-based PostgreSQL backend integration
-- ✅ Comprehensive logging and monitoring system
-- ✅ 156 passing unit tests with zero failures
+Treat the previous "Development Complete - Production Ready" assessment as
+withdrawn. It was based on unit tests over synthetic in-memory inputs, none of
+which exercised the real on-disk export format.
+
+### What is built
+- LevelDB log framing reader, schema analyzer with 1NF/2NF/3NF normalization,
+  DDL generator, transformer, PostgreSQL importer, CLI, monitoring
+- 159 passing library unit tests
+- Realistic export fixtures plus a format-level validation suite
+  (`tests/fixtures/`, `tests/real_export_validation.rs`)
+
+### What does not work yet
+- Reading any real export file (checksum algorithm is wrong — see Residual Risks)
+- Decoding real export payloads (wrong protobuf schema)
+- Reading more than one kind of an export tree
+- Inserting any rows during `import`
 
 ---
 
@@ -26,19 +38,28 @@ Fireup is a comprehensive migration tool that enables seamless migration of Fire
 
 ### Core Components
 
-#### 1. LevelDB Parser ✅ **COMPLETE**
-**Status:** Fully implemented and tested  
+#### 1. LevelDB Parser ⛔ **BLOCKING DEFECTS**
+**Status:** Structure in place; does not read real export files  
 **Location:** `src/leveldb_parser/`
 
-**Capabilities:**
-- Parse Firestore backup files in LevelDB format per Google's specification
-- CRC32 checksum validation for data integrity
-- Support for compressed and uncompressed log blocks
-- Streaming parsing for large backup files
-- Document hierarchy and collection relationship tracking
-- Comprehensive backup validation
+**Implemented:**
+- 32 KiB block iteration and 7-byte record header parsing
+- FIRST/MIDDLE/LAST fragment reassembly
+- JSON Lines fallback path
+- Datastore `v1.Entity` protobuf decoding (`protobuf_entity.rs`)
 
-**Test Coverage:** Unit tests passing
+**Blocking defects (evidence: SAK-139):**
+- Checksums are computed with unmasked IEEE CRC-32 instead of LevelDB's masked
+  CRC32C, so **every** record of a real export fails validation and is skipped
+- Payloads of a real export are legacy `storage_onestore_v3.EntityProto`, not
+  `google.datastore.v1.Entity`; nothing decodes
+- An export directory is collapsed to a single `output-0`, dropping all other
+  kinds and output shards
+- `parse_documents()` panics unless `initialize_monitoring()` was called first
+
+**Test Coverage:** unit tests pass but use hand-built inputs that match the
+implementation rather than the format. `tests/real_export_validation.rs` adds
+format-level coverage.
 
 #### 2. Schema Analyzer ✅ **COMPLETE**
 **Status:** Fully implemented with advanced features  
@@ -91,9 +112,19 @@ Fireup is a comprehensive migration tool that enables seamless migration of Fire
 
 **Test Coverage:** Unit tests passing
 
-#### 5. Data Importer ✅ **COMPLETE**
-**Status:** Production ready with PostgreSQL integration  
+#### 5. Data Importer ⛔ **NOT WIRED UP**
+**Status:** Library methods exist; the CLI never calls them  
 **Location:** `src/data_importer/importer.rs`
+
+**Blocking defects (evidence: SAK-139):**
+- `src/main.rs` calls only `create_schema`. `import_transformed_data` and
+  `execute_full_import` are never invoked, and the pipeline then returns
+  `total_records_imported: documents.len()` with `table_imports: vec![]` — so a
+  successful-looking `import` writes **zero rows** while reporting the full
+  document count as imported
+- `parse_postgres_url` discards the `--postgres-url` value entirely and returns
+  a hardcoded `postgres:password@localhost:5432/fireup_test`, so the tool cannot
+  connect to any other database (and embeds a credential in source)
 
 **Capabilities:**
 - Connection pooling with `deadpool-postgres`
@@ -159,15 +190,20 @@ Warnings: 110 warnings (mostly unused code for future features)
 - All warnings are related to dead code analysis of derived traits
 - These represent planned features and comprehensive API surface
 
-### Test Status ✅
+### Test Status ⚠️
 ```
-Total Tests: 156
-Passed: 156 ✅
-Failed: 0
-Ignored: 0
-Test Time: 0.21 seconds
-Coverage: Core functionality fully tested
+Library unit tests:        159 passed, 0 failed       (cargo test --lib)
+Real-export validation:     3 passed, 4 ignored       (cargo test --test real_export_validation)
+Test Time: <1 second
+Coverage: components covered; end-to-end format path NOT covered
 ```
+
+The 4 ignored tests are pending acceptance tests that assert correct behaviour
+against the export fixtures. They fail today — run them with
+`cargo test --test real_export_validation -- --ignored` to see the current gaps.
+The high library test count does not indicate format correctness: those tests
+build inputs that match the implementation, so they pass while the tool cannot
+read a real export.
 
 **Test Categories:**
 - Unit tests for LevelDB parsing
@@ -178,11 +214,17 @@ Coverage: Core functionality fully tested
 - Integration tests available
 - Deployment tests available
 
-### Integration Testing ✅
+### Integration Testing ⛔
 **Location:** `tests/`
 
-**Available Test Suites:**
-- `integration_tests.rs` - End-to-end workflow testing
+`cargo test` does not compile — `tests/integration_tests.rs` is stale against
+`src/types.rs` (residual risk 12). This is pre-existing, not a regression. The
+suites below exist as files; only `real_export_validation` currently builds and
+runs.
+
+**Test Suites:**
+- `real_export_validation.rs` - Real-export format validation (builds, runs)
+- `integration_tests.rs` - End-to-end workflow testing (does not compile)
 - `deployment_tests.rs` - Docker and PostgreSQL testing
 - `functional-tests/` - Feature-specific tests
 - `data-generator/` - Test data generation utilities
@@ -248,12 +290,16 @@ chrono = "0.4"                   # Date/time handling
 
 ### Requirements Compliance
 
-#### ✅ Requirement 1: Firestore Backup Import
-- [x] Parse LevelDB backup files per Google's specification
-- [x] Validate backup integrity with CRC32 checksums
+#### ⛔ Requirement 1: Firestore Backup Import
+- [ ] Parse LevelDB backup files per Google's specification — framing reader
+      exists but rejects every real record (residual risk 1)
+- [ ] Validate backup integrity with CRC32 checksums — wrong algorithm; LevelDB
+      uses masked CRC32C (residual risk 1)
 - [x] Provide detailed error messages for corrupted files
-- [x] Import parsed data to PostgreSQL-compatible format
-- [x] Generate summary reports of import operations
+- [ ] Import parsed data to PostgreSQL-compatible format — schema is created,
+      no rows are written (residual risk 3)
+- [ ] Generate summary reports of import operations — the summary reports counts
+      that were never imported (residual risk 3)
 
 #### ✅ Requirement 2: Schema Analysis & Normalization
 - [x] Automatic document structure detection
@@ -287,25 +333,116 @@ chrono = "0.4"                   # Date/time handling
 
 ---
 
-## Known Issues & Limitations
+## Residual Risks
 
-### Current Limitations
+**Evidence basis.** All items below were observed on 2026-11-02 under SAK-139 by
+running the CLI against `tests/fixtures/export-onestore/` and
+`tests/fixtures/export-v1-entity/`. Those fixtures are independently verified as
+spec-correct by `tests/fixtures/verify_datastore_export.py`, so these are tool
+defects, not fixture artifacts. Severity is "does this silently lose data?".
 
-1. **LevelDB Protobuf Parsing (Partial Implementation)**
-   - Basic LevelDB parsing is complete
-   - Full Firestore document protobuf deserialization needs real-world testing
-   - May require adjustments based on actual Firestore backup format variations
+### Critical — silent data loss
 
-2. **Unused API Surface (Not Issues - Design Choice)**
+1. **Wrong record checksum algorithm** (`parser.rs:360` `calculate_crc32`)
+   Uses `crc32fast` (unmasked IEEE CRC-32) over `type || data`. LevelDB uses
+   **masked CRC32C**: Castagnoli `0x82F63B78`, masked with
+   `((crc >> 15) | (crc << 17)) + 0xA282EAD8`. Every record of a real export
+   therefore mismatches, `parse_record_at_offset` errors, and
+   `parse_block_records` advances one byte at a time until the block is
+   exhausted. Observed: `validate` → `No records found in LevelDB file`;
+   0 of 12 entities read. Re-framing the same fixtures with the bug-compatible
+   checksum recovers all records, which isolates this as the sole framing defect.
+
+2. **Wrong payload protobuf schema** (`protobuf_entity.rs`)
+   Decodes `google.datastore.v1.Entity` (the API proto). A managed export
+   contains legacy `storage_onestore_v3.EntityProto`, with unrelated field
+   numbers, **proto2 groups** (which `prost` cannot represent at all), and types
+   carried in `Property.meaning` rather than in the value field. Observed: with
+   framing bypassed, 6 of 6 records read and 0 documents decoded. Field-level
+   notes are in `tests/fixtures/README.md`.
+
+3. **`import` reports rows it never wrote** (`main.rs:398-407`)
+   Only `create_schema` is called; the result is then constructed with
+   `total_records_imported: documents.len()`. A run that creates tables and
+   inserts nothing reports a full successful import. This is the most dangerous
+   defect in the tool: it would be read as a completed migration.
+
+4. **Document identity is discarded**
+   Generated tables use `id UUID` populated from `uuid::Uuid::new_v4()`, and no
+   column holds the Datastore key name or id. Datastore keys are strings or
+   `int64` (the fixture includes `ada`, `unicode-ユーザー`, and
+   `4503599627370496`). Even a working import would produce unjoinable rows.
+
+### High — partial data loss or failed migrations
+
+5. **Only one file of an export tree is read** (`parser.rs:92`
+   `resolve_backup_path`) An export is split per kind and per `output-N` shard.
+   The resolver returns the first `output-0` found, so all other kinds and shards
+   are dropped with no warning. Observed: the 12-entity tree yields at most one
+   kind.
+
+6. **Generated DDL is not always loadable**
+   `Orders` DDL emits `user TEXT NOT NULL` unquoted; `user` is reserved, and
+   `psql` rejects it with `syntax error at or near "user"`. Identifiers are never
+   quoted, so table names also silently fold to lower case.
+
+7. **`NOT NULL` emitted for sparse fields**
+   `nickname` is null in 4 of 5 fixture users yet is generated `TEXT NOT NULL`.
+   Any real import would violate the constraint.
+
+8. **Type mapping loses fidelity**
+   Observed in generated DDL: timestamp → `TEXT`, blob → `JSONB` (should be
+   `BYTEA`), `int64` → `INTEGER` (overflows on auto-allocated key ids),
+   nested map emitted both as `address JSONB` *and* flattened
+   `address_city`/`address_postcode`/`address_verified` (duplicated data).
+
+### Medium — operability
+
+9. **Failures are reported as success.** `analyze` exits 0 after parsing 0
+   documents and generating 0 tables; `validate --check-quality` reports
+   `Integrity score: 1.00` and `is_valid` when 0 documents decoded from valid
+   records. A migration tool must exit non-zero on total parse loss.
+
+10. **Hardcoded credentials / ignored connection string.** `parse_postgres_url`
+    returns a fixed `postgres:password@localhost:5432/fireup_test` regardless of
+    `--postgres-url`.
+
+11. **Library API panics.** `parse_documents()` panics via
+    `get_monitoring_system()` unless `initialize_monitoring()` ran first.
+
+12. **`cargo test` does not compile.** `tests/integration_tests.rs` fails with 9
+    errors (`parse_backup` called without the `LevelDBParser` trait in scope;
+    `ColumnDefinition.data_type`, renamed to `column_type`). Pre-existing and
+    long-standing — reproduced at `fd24bf2`, before any SAK-137/SAK-139 work.
+    Only `cargo test --lib` and the individual working test targets run, so the
+    "integration tests available / passing" claim in this document was never
+    true. Either fix or remove the stale targets so `cargo test` is meaningful.
+
+### Not yet assessed
+
+- **`import` end-to-end.** Could not be executed: the hardcoded connection
+  target is unreachable in the validation environment. Findings 3 and 10 are
+  from source inspection; everything else above was observed at runtime.
+- **Performance / large exports.** No benchmark has been run against a
+  multi-shard export.
+- **A genuine GCP-produced export.** The fixtures are built to the documented
+  format, not captured from a live project. Confirming against a real
+  `gcloud firestore export` remains outstanding and should gate any
+  production claim.
+
+### Non-issues
+
+1. **Unused API Surface (Not Issues - Design Choice)**
    - Many structs and methods are implemented but not yet utilized
    - Represents comprehensive API design for future features
    - Examples: Advanced SQL generation options, custom type mappings
    - These generate compiler warnings but are intentionally preserved
 
 3. **Test Data Availability**
-   - Limited real-world Firestore backup samples for testing
-   - Test data generator available in `tests/data-generator/`
-   - Recommendation: Test with actual Firestore backups before production use
+   - Realistic export fixtures now live in `tests/fixtures/` (see its README),
+     generated to the documented format and independently CRC-verified
+   - Still missing: a capture from a live `gcloud firestore export`, which is
+     what would let any production claim be made
 
 4. **Performance Tuning**
    - Default batch sizes may need adjustment for very large datasets
@@ -330,22 +467,36 @@ chrono = "0.4"                   # Date/time handling
 
 ## Production Readiness Assessment
 
-### ✅ Ready for Production Use
+### ⛔ NOT Ready for Production Use
+
+Do not run this against data anyone depends on. It cannot read a real export,
+and the `import` path reports success without writing rows — a failure mode that
+looks exactly like a completed migration.
 
 **Strengths:**
-1. **Solid Foundation:** Core functionality complete and tested
-2. **Clean Architecture:** Well-organized, modular codebase
-3. **Comprehensive Testing:** 156 passing tests
-4. **Good Documentation:** Complete user and developer guides
-5. **Modern Stack:** Rust + PostgreSQL + Docker
-6. **Error Handling:** Comprehensive error types and handling
-7. **Monitoring:** Built-in logging and metrics
+1. **Clean Architecture:** Well-organized, modular codebase
+2. **Unit Test Breadth:** 159 passing library tests
+3. **Good Documentation:** Complete user and developer guides
+4. **Modern Stack:** Rust + PostgreSQL + Docker
+5. **Error Handling:** Comprehensive error types and context
+6. **Monitoring:** Built-in logging and metrics
 
-**Recommended Actions Before Production:**
+**Exit criteria before any production claim:**
+
+1. Residual risks 1-5 fixed, with the `#[ignore]` removed from the pending
+   acceptance tests in `tests/real_export_validation.rs`
+2. `validate`, `analyze`, and `import` all pass against
+   `tests/fixtures/export-onestore/`, recovering all 12 entities across both
+   kinds, with row counts asserted in PostgreSQL after `import`
+3. The same three commands pass against an export captured from a live GCP
+   project
+4. Non-zero exit on total parse loss (residual risk 9)
+
+**Also recommended:**
 
 1. **Test with Real Data** (Priority: HIGH)
-   - Validate with actual Firestore backup files
-   - Test various backup sizes (small, medium, large)
+   - Capture an export from a live Firestore/Datastore project
+   - Test various backup sizes (small, medium, large) and multi-shard exports
    - Verify schema detection accuracy
 
 2. **Performance Validation** (Priority: MEDIUM)
@@ -499,26 +650,37 @@ src/
 
 ## Conclusion
 
-Fireup is a well-architected, thoroughly tested migration tool ready for real-world validation. The core implementation is complete with all planned features delivered. The project demonstrates excellent code organization, comprehensive error handling, and production-grade logging.
+Fireup is well-organized and broadly unit-tested, but the real-export validation
+run under SAK-139 showed the end-to-end migration path does not work: 0 of 12
+entities were recovered from a spec-correct export, and `import` would have
+reported a full successful migration while writing no rows.
 
-**Current State:** Development complete, ready for validation testing  
-**Recommended Next Step:** Real-world testing with actual Firestore backups  
-**Production Timeline:** 2-4 weeks after successful validation testing
+The structure is sound and the gaps are specific and fixable — they are format
+correctness bugs (checksum algorithm, payload proto, multi-file handling) plus
+unwired plumbing, not architectural problems. The validation harness to prove
+each fix now exists in the repo.
 
-### Success Criteria Met
-- ✅ All implementation tasks completed (per tasks.md)
-- ✅ 156 tests passing with zero failures
-- ✅ Clean build with no errors
+**Current State:** Implementation incomplete; blocked on format correctness  
+**Recommended Next Step:** Fix residual risks 1-5, driven by the pending
+acceptance tests in `tests/real_export_validation.rs`  
+**Production Timeline:** Not estimable until a real export round-trips
+
+### Verified
+- ✅ 159 library unit tests passing, clean build
 - ✅ Comprehensive documentation
-- ✅ Docker integration working
-- ✅ CLI interface functional
-- ✅ PostgreSQL compatibility confirmed
+- ✅ CLI argument surface functional
+- ✅ Realistic, independently verified export fixtures in `tests/fixtures/`
+- ✅ `analyze` → DDL → `psql` load path exercised (one of two generated DDL
+  files loads; the other is rejected — residual risk 6)
 
 ### Outstanding Items
-- ⚠️ Real-world backup testing needed
+- ⛔ Cannot read a real export (residual risks 1, 2, 5)
+- ⛔ `import` writes no rows and misreports success (residual risk 3)
+- ⛔ Document identity dropped (residual risk 4)
+- ⚠️ Real GCP-captured export still untested
 - ⚠️ Performance benchmarking pending
 - ⚠️ Production deployment configuration needed
-- ⚠️ Security audit recommended
+- ⚠️ Security audit recommended (hardcoded credential, residual risk 10)
 
 ---
 
