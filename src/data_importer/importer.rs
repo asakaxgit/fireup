@@ -1,11 +1,22 @@
 // PostgreSQL data importer implementation
+use crate::data_importer::sql_generator::utils::escape_identifier;
+use crate::data_importer::transformer::TableRow;
 use crate::error::FireupError;
 use crate::monitoring::{get_monitoring_system, AuditOperationType, AuditResult};
+use crate::types::{PostgreSQLType, TableDefinition};
 use deadpool_postgres::{Config, Pool, Runtime};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
+use tokio_postgres::types::Type;
 use tokio_postgres::{NoTls, Row};
 use tracing::{info, warn, error, instrument};
+
+/// PostgreSQL caps a single extended-protocol message at 65535 bound parameters.
+const MAX_BIND_PARAMS: usize = 65535;
+
+/// Default number of rows per multi-row INSERT.
+pub const DEFAULT_IMPORT_BATCH_SIZE: usize = 1000;
 
 #[derive(Debug, Clone)]
 pub struct ImportResult {
@@ -29,12 +40,14 @@ pub struct ConnectionConfig {
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
+        // Credentials are never baked into the binary: the password comes from the
+        // environment, exactly like libpq's PGPASSWORD.
         Self {
-            host: "localhost".to_string(),
-            port: 5432,
-            database: "fireup_dev".to_string(),
-            user: "fireup".to_string(),
-            password: "fireup_dev_password".to_string(),
+            host: std::env::var("PGHOST").unwrap_or_else(|_| "localhost".to_string()),
+            port: std::env::var("PGPORT").ok().and_then(|port| port.parse().ok()).unwrap_or(5432),
+            database: std::env::var("PGDATABASE").unwrap_or_else(|_| "fireup_dev".to_string()),
+            user: std::env::var("PGUSER").unwrap_or_else(|_| "fireup".to_string()),
+            password: std::env::var("PGPASSWORD").unwrap_or_default(),
             max_connections: 10,
             connection_timeout: Duration::from_secs(30),
             retry_attempts: 3,
@@ -236,6 +249,38 @@ impl PostgreSQLImporter {
                 }
             }
         }
+    }
+
+    /// Execute a statement with explicitly typed parameters and no retry.
+    ///
+    /// Unlike [`Self::execute_statement`] this never retries. INSERTs are not
+    /// idempotent, so a transparent retry after a partially applied statement
+    /// would duplicate rows — the caller decides how to recover instead.
+    pub async fn execute_prepared(
+        &self,
+        statement: &str,
+        param_types: &[Type],
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> Result<u64, FireupError> {
+        let client = self.get_connection().await?;
+
+        let prepared = client.prepare_typed(statement, param_types).await.map_err(|e| {
+            FireupError::data_import(
+                format!("Failed to prepare statement: {}", e),
+                None,
+                None,
+                FireupError::new_context("prepare_typed_statement"),
+            )
+        })?;
+
+        client.execute(&prepared, params).await.map_err(|e| {
+            FireupError::data_import(
+                format!("Statement execution failed: {}", e),
+                None,
+                None,
+                FireupError::new_context("execute_prepared_statement"),
+            )
+        })
     }
 
     /// Get pool status information
@@ -621,27 +666,112 @@ impl PostgreSQLImporter {
         Ok(result)
     }
 
-    /// Import transformed data using bulk INSERT operations
-    #[instrument(skip(self, data))]
-    pub async fn import_transformed_data(
-        &self,
-        table_name: &str,
-        columns: &[String],
-        data: Vec<Vec<String>>,
-    ) -> Result<ImportResult, FireupError> {
+    /// Drop the given tables so a re-import starts from a clean schema.
+    ///
+    /// Backs `--drop-existing`. The drops run in a single transaction and use
+    /// `CASCADE`, so dependent foreign keys and views go with them.
+    #[instrument(skip(self, table_names))]
+    pub async fn drop_tables(&self, table_names: &[String]) -> Result<ImportResult, FireupError> {
+        info!("Dropping {} existing tables", table_names.len());
+
+        let mut result = ImportResult {
+            imported_records: 0,
+            failed_records: 0,
+            warnings: Vec::new(),
+        };
+
+        if table_names.is_empty() {
+            result.warnings.push("No tables to drop".to_string());
+            return Ok(result);
+        }
+
+        let mut client = self.get_connection().await?;
+        let transaction = client.transaction().await.map_err(|e| FireupError::Transaction {
+            message: format!("Failed to start drop-tables transaction: {}", e),
+            operation: "drop_tables".to_string(),
+            context: FireupError::new_context("start_drop_transaction"),
+            suggestions: vec!["Check database connection".to_string()],
+        })?;
+
+        for table_name in table_names {
+            let statement = format!("DROP TABLE IF EXISTS {} CASCADE", escape_identifier(table_name));
+            transaction.execute(&statement, &[]).await.map_err(|e| {
+                FireupError::data_import(
+                    format!("Failed to drop table '{}': {}", table_name, e),
+                    Some(table_name.clone()),
+                    None,
+                    FireupError::new_context("drop_table"),
+                )
+            })?;
+            result.imported_records += 1;
+        }
+
+        transaction.commit().await.map_err(|e| FireupError::Transaction {
+            message: format!("Failed to commit drop-tables transaction: {}", e),
+            operation: "drop_tables".to_string(),
+            context: FireupError::new_context("commit_drop_transaction"),
+            suggestions: vec!["Check database connection".to_string()],
+        })?;
+
+        let mut details = HashMap::new();
+        details.insert("tables_dropped".to_string(), result.imported_records.to_string());
+        details.insert("tables".to_string(), table_names.join(","));
+
+        get_monitoring_system()
+            .log_audit_entry(
+                AuditOperationType::SchemaChange,
+                "database_schema",
+                "drop_existing_tables",
+                "tables_dropped",
+                AuditResult::Success,
+                details,
+                None,
+            )
+            .await
+            .ok();
+
+        info!("Dropped {} tables", result.imported_records);
+        Ok(result)
+    }
+
+    /// Import transformed rows into a single table using multi-row INSERTs.
+    ///
+    /// Every value is bound as a text parameter and cast to the column's declared
+    /// type inside the statement, so NULLs, UUIDs, JSONB and arrays all round-trip
+    /// without string-formatting values into SQL.
+    #[instrument(skip(self, spec), fields(table = %spec.table_name, rows = spec.rows.len()))]
+    pub async fn import_transformed_data(&self, spec: &TableImportSpec) -> Result<ImportResult, FireupError> {
+        let table_name = spec.table_name.as_str();
+        let columns = spec.columns.as_slice();
+
         let tracker = get_monitoring_system().start_operation("data_import").await;
         tracker.add_metadata("table_name", table_name).await.ok();
-        tracker.add_metadata("record_count", &data.len().to_string()).await.ok();
+        tracker.add_metadata("record_count", &spec.rows.len().to_string()).await.ok();
         tracker.add_metadata("column_count", &columns.len().to_string()).await.ok();
-        
-        info!("Starting data import for table '{}' with {} records", table_name, data.len());
-        
-        if data.is_empty() {
-            return Ok(ImportResult {
-                imported_records: 0,
-                failed_records: 0,
-                warnings: vec!["No data to import".to_string()],
-            });
+
+        info!("Starting data import for table '{}' with {} records", table_name, spec.rows.len());
+
+        if columns.is_empty() {
+            return Err(FireupError::data_import(
+                format!("Table '{}' has no columns to import into", table_name),
+                Some(table_name.to_string()),
+                None,
+                FireupError::new_context("import_transformed_data"),
+            ));
+        }
+
+        if spec.column_types.len() != columns.len() {
+            return Err(FireupError::data_import(
+                format!(
+                    "Table '{}' import spec is inconsistent: {} columns but {} column types",
+                    table_name,
+                    columns.len(),
+                    spec.column_types.len()
+                ),
+                Some(table_name.to_string()),
+                None,
+                FireupError::new_context("import_transformed_data"),
+            ));
         }
 
         let mut result = ImportResult {
@@ -650,43 +780,120 @@ impl PostgreSQLImporter {
             warnings: Vec::new(),
         };
 
-        // Generate INSERT statement template
-        let placeholders: Vec<String> = (1..=columns.len())
-            .map(|i| format!("${}", i))
-            .collect();
-        let insert_statement = format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            table_name,
-            columns.join(", "),
-            placeholders.join(", ")
-        );
+        if spec.rows.is_empty() {
+            result.warnings.push(format!("No data to import for table '{}'", table_name));
+            tracker.complete_success().await.ok();
+            return Ok(result);
+        }
 
-        info!("Using INSERT statement: {}", insert_statement);
+        let batch_size = spec.effective_batch_size();
+        let column_list = columns
+            .iter()
+            .map(|column| escape_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let single_row_statement = spec.insert_statement(&column_list, 1);
+        let param_types = vec![Type::TEXT; columns.len()];
 
-        // Process data in batches
-        let batch_size = 1000;
-        for (batch_index, batch) in data.chunks(batch_size).enumerate() {
-            info!("Processing batch {} with {} records", batch_index + 1, batch.len());
-            
-            for row in batch {
-                if row.len() != columns.len() {
-                    result.failed_records += 1;
-                    result.warnings.push(format!(
-                        "Row has {} columns but expected {}", 
-                        row.len(), 
-                        columns.len()
-                    ));
-                    continue;
+        for (batch_index, batch) in spec.rows.chunks(batch_size).enumerate() {
+            // Rows with the wrong arity never reach the database: they would shift
+            // every following value into the wrong column.
+            let (valid_rows, malformed): (Vec<&Vec<Option<String>>>, Vec<&Vec<Option<String>>>) =
+                batch.iter().partition(|row| row.len() == columns.len());
+
+            for row in &malformed {
+                result.failed_records += 1;
+                result.warnings.push(format!(
+                    "Table '{}': row has {} values but the table has {} columns",
+                    table_name,
+                    row.len(),
+                    columns.len()
+                ));
+            }
+
+            if !malformed.is_empty() && !spec.continue_on_error {
+                let message = format!(
+                    "Table '{}': {} row(s) do not match the table arity",
+                    table_name,
+                    malformed.len()
+                );
+                tracker.complete_failure(&message).await.ok();
+                return Err(FireupError::data_import(
+                    message,
+                    Some(table_name.to_string()),
+                    None,
+                    FireupError::new_context("import_row_arity"),
+                ));
+            }
+
+            if valid_rows.is_empty() {
+                continue;
+            }
+
+            debug_assert!(valid_rows.len() * columns.len() <= MAX_BIND_PARAMS);
+            let statement = spec.insert_statement(&column_list, valid_rows.len());
+            let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = valid_rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .map(|value| value as &(dyn tokio_postgres::types::ToSql + Sync))
+                .collect();
+            let batch_param_types = vec![Type::TEXT; valid_rows.len() * columns.len()];
+
+            match self.execute_prepared(&statement, &batch_param_types, &params).await {
+                Ok(rows_affected) => {
+                    result.imported_records += rows_affected as usize;
                 }
+                Err(batch_error) => {
+                    if !spec.continue_on_error {
+                        let message = format!(
+                            "Table '{}': batch {} failed: {}",
+                            table_name,
+                            batch_index + 1,
+                            batch_error
+                        );
+                        tracker.complete_failure(&message).await.ok();
+                        return Err(FireupError::data_import(
+                            message,
+                            Some(table_name.to_string()),
+                            None,
+                            FireupError::new_context("import_batch"),
+                        ));
+                    }
 
-                let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = 
-                    row.iter().map(|s| s as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
-                
-                match self.execute_statement(&insert_statement, &param_refs).await {
-                    Ok(_) => result.imported_records += 1,
-                    Err(e) => {
-                        result.failed_records += 1;
-                        result.warnings.push(format!("Failed to insert record: {}", e));
+                    // The whole batch rolled back, so retry row by row to salvage
+                    // the rows that are actually importable and name the ones that
+                    // are not.
+                    warn!(
+                        "Table '{}': batch {} failed ({}); retrying {} rows individually",
+                        table_name,
+                        batch_index + 1,
+                        batch_error,
+                        valid_rows.len()
+                    );
+                    result.warnings.push(format!(
+                        "Table '{}': batch {} failed and was retried per row: {}",
+                        table_name,
+                        batch_index + 1,
+                        batch_error
+                    ));
+
+                    for row in valid_rows {
+                        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = row
+                            .iter()
+                            .map(|value| value as &(dyn tokio_postgres::types::ToSql + Sync))
+                            .collect();
+                        match self
+                            .execute_prepared(&single_row_statement, &param_types, &params)
+                            .await
+                        {
+                            Ok(rows_affected) => result.imported_records += rows_affected as usize,
+                            Err(row_error) => {
+                                result.failed_records += 1;
+                                result
+                                    .warnings
+                                    .push(format!("Table '{}': failed to insert row: {}", table_name, row_error));
+                            }
+                        }
                     }
                 }
             }
@@ -893,8 +1100,8 @@ impl PostgreSQLImporter {
     /// Execute complete schema creation and data import workflow
     pub async fn execute_full_import(
         &self,
-        ddl_statements: Vec<String>,
-        table_imports: Vec<TableImportSpec>,
+        ddl_statements: &[String],
+        table_imports: &[TableImportSpec],
     ) -> Result<FullImportResult, FireupError> {
         info!("Starting full import workflow with {} tables", table_imports.len());
         
@@ -902,6 +1109,7 @@ impl PostgreSQLImporter {
             schema_creation: None,
             table_imports: Vec::new(),
             validation_results: Vec::new(),
+            total_records_expected: 0,
             total_records_imported: 0,
             total_records_failed: 0,
             warnings: Vec::new(),
@@ -909,7 +1117,7 @@ impl PostgreSQLImporter {
 
         // Step 1: Create schema
         info!("Step 1: Creating database schema");
-        match self.create_schema(&ddl_statements).await {
+        match self.create_schema(ddl_statements).await {
             Ok(schema_result) => {
                 info!("Schema creation completed successfully");
                 full_result.schema_creation = Some(schema_result);
@@ -921,18 +1129,19 @@ impl PostgreSQLImporter {
         }
 
         // Step 2: Import data for each table
-        info!("Step 2: Importing data for {} tables", table_imports.len());
-        for (index, table_spec) in table_imports.into_iter().enumerate() {
-            info!("Importing data for table '{}' ({}/{})", table_spec.table_name, index + 1, full_result.table_imports.len() + 1);
-            
-            // This is a placeholder - in practice, you'd call the appropriate import method
-            // based on the table_spec configuration
-            let table_result = ImportResult {
-                imported_records: 0,
-                failed_records: 0,
-                warnings: vec![format!("Table import for '{}' not yet implemented", table_spec.table_name)],
-            };
-            
+        let table_count = table_imports.len();
+        info!("Step 2: Importing data for {} tables", table_count);
+        for (index, table_spec) in table_imports.iter().enumerate() {
+            info!(
+                "Importing data for table '{}' ({}/{})",
+                table_spec.table_name,
+                index + 1,
+                table_count
+            );
+
+            let table_result = self.import_transformed_data(table_spec).await?;
+
+            full_result.total_records_expected += table_spec.rows.len();
             full_result.total_records_imported += table_result.imported_records;
             full_result.total_records_failed += table_result.failed_records;
             full_result.warnings.extend(table_result.warnings.clone());
@@ -941,7 +1150,8 @@ impl PostgreSQLImporter {
 
         // Step 3: Validate constraints
         info!("Step 3: Validating constraints for all tables");
-        for (table_name, _) in &full_result.table_imports {
+        for table_spec in table_imports.iter().filter(|spec| spec.validation_enabled) {
+            let table_name = &table_spec.table_name;
             match self.validate_constraints(table_name).await {
                 Ok(violations) => {
                     if !violations.is_empty() {
@@ -969,14 +1179,176 @@ impl PostgreSQLImporter {
     }
 }
 
-/// Specification for importing data into a specific table
+/// Specification for importing data into a specific table.
+///
+/// The rows travel with the spec: an earlier version carried only a `data_source`
+/// string and the import step was a no-op that still reported success.
 #[derive(Debug, Clone)]
 pub struct TableImportSpec {
     pub table_name: String,
+    /// Column names, in the same order as every row's values.
     pub columns: Vec<String>,
-    pub data_source: String, // Could be file path, collection name, etc.
+    /// Declared type per column, used to cast the bound text parameters.
+    pub column_types: Vec<PostgreSQLType>,
+    /// Row values as text, `None` meaning SQL NULL.
+    pub rows: Vec<Vec<Option<String>>>,
     pub batch_size: Option<usize>,
+    pub continue_on_error: bool,
     pub validation_enabled: bool,
+}
+
+impl TableImportSpec {
+    /// Build a spec for `table`, pulling each column's value out of every row.
+    ///
+    /// Columns are emitted in table order and a row that does not carry a column
+    /// yields NULL, so a missing `NOT NULL` column fails in the database rather
+    /// than silently shifting values between columns.
+    pub fn from_table_rows(table: &TableDefinition, rows: &[TableRow]) -> Self {
+        let columns: Vec<String> = table.columns.iter().map(|column| column.name.clone()).collect();
+        let column_types: Vec<PostgreSQLType> =
+            table.columns.iter().map(|column| column.column_type.clone()).collect();
+
+        let encoded_rows = rows
+            .iter()
+            .map(|row| {
+                table
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        row.columns
+                            .get(&column.name)
+                            .and_then(|value| encode_param(value, &column.column_type))
+                    })
+                    .collect()
+            })
+            .collect();
+
+        Self {
+            table_name: table.name.clone(),
+            columns,
+            column_types,
+            rows: encoded_rows,
+            batch_size: None,
+            continue_on_error: false,
+            validation_enabled: true,
+        }
+    }
+
+    /// Override the rows-per-statement batch size.
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = Some(batch_size);
+        self
+    }
+
+    /// Keep importing when individual rows are rejected.
+    pub fn with_continue_on_error(mut self, continue_on_error: bool) -> Self {
+        self.continue_on_error = continue_on_error;
+        self
+    }
+
+    /// Rows per INSERT, clamped so a batch cannot exceed PostgreSQL's bind-parameter limit.
+    pub fn effective_batch_size(&self) -> usize {
+        let requested = self.batch_size.unwrap_or(DEFAULT_IMPORT_BATCH_SIZE).max(1);
+        if self.columns.is_empty() {
+            return requested;
+        }
+        requested.min((MAX_BIND_PARAMS / self.columns.len()).max(1))
+    }
+
+    /// Build a multi-row INSERT whose placeholders are cast to the column types.
+    fn insert_statement(&self, column_list: &str, row_count: usize) -> String {
+        let mut placeholder_index = 0;
+        let tuples: Vec<String> = (0..row_count)
+            .map(|_| {
+                let placeholders: Vec<String> = self
+                    .column_types
+                    .iter()
+                    .map(|column_type| {
+                        placeholder_index += 1;
+                        format!("${}::{}", placeholder_index, column_type.to_sql())
+                    })
+                    .collect();
+                format!("({})", placeholders.join(", "))
+            })
+            .collect();
+
+        format!(
+            "INSERT INTO {} ({}) VALUES {}",
+            escape_identifier(&self.table_name),
+            column_list,
+            tuples.join(", ")
+        )
+    }
+}
+
+/// Encode a transformed JSON value as a text parameter for its column type.
+///
+/// `None` means SQL NULL. Everything else is rendered so the `::<type>` cast in
+/// the INSERT statement accepts it.
+pub fn encode_param(value: &Value, column_type: &PostgreSQLType) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+
+    match column_type {
+        // A JSONB cast needs valid JSON, so scalars are serialised too:
+        // `"text"` rather than a bare `text`.
+        PostgreSQLType::Jsonb => Some(value.to_string()),
+        PostgreSQLType::Array(_) => match value {
+            Value::Array(items) => Some(postgres_array_literal(items)),
+            other => Some(postgres_array_literal(std::slice::from_ref(other))),
+        },
+        PostgreSQLType::Timestamp => match value {
+            // Firestore timestamps are frequently epoch numbers; a bare number
+            // does not cast to timestamptz.
+            Value::Number(number) => number.as_i64().map(epoch_to_rfc3339),
+            Value::String(text) => Some(text.clone()),
+            other => Some(other.to_string()),
+        },
+        _ => match value {
+            Value::String(text) => Some(text.clone()),
+            Value::Bool(flag) => Some(flag.to_string()),
+            Value::Number(number) => Some(number.to_string()),
+            // Structured data in a scalar column: keep the JSON text rather than
+            // dropping the value.
+            other => Some(other.to_string()),
+        },
+    }
+}
+
+/// Render epoch seconds (or milliseconds, for values too large to be seconds) as RFC 3339.
+fn epoch_to_rfc3339(epoch: i64) -> String {
+    const MAX_PLAUSIBLE_SECONDS: i64 = 100_000_000_000;
+    let timestamp = if epoch.abs() > MAX_PLAUSIBLE_SECONDS {
+        chrono::DateTime::from_timestamp_millis(epoch)
+    } else {
+        chrono::DateTime::from_timestamp(epoch, 0)
+    };
+
+    match timestamp {
+        Some(timestamp) => timestamp.to_rfc3339(),
+        None => epoch.to_string(),
+    }
+}
+
+/// Build a PostgreSQL array literal (`{"a","b"}`) from JSON array elements.
+fn postgres_array_literal(items: &[Value]) -> String {
+    let elements: Vec<String> = items
+        .iter()
+        .map(|item| match item {
+            Value::Null => "NULL".to_string(),
+            Value::String(text) => quote_array_element(text),
+            Value::Bool(flag) => quote_array_element(&flag.to_string()),
+            Value::Number(number) => quote_array_element(&number.to_string()),
+            other => quote_array_element(&other.to_string()),
+        })
+        .collect();
+
+    format!("{{{}}}", elements.join(","))
+}
+
+fn quote_array_element(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// Result of a complete import workflow
@@ -985,24 +1357,31 @@ pub struct FullImportResult {
     pub schema_creation: Option<ImportResult>,
     pub table_imports: Vec<(String, ImportResult)>,
     pub validation_results: Vec<(String, Vec<String>)>,
+    /// Rows the transformation produced, i.e. what a complete import would write.
+    pub total_records_expected: usize,
     pub total_records_imported: usize,
     pub total_records_failed: usize,
     pub warnings: Vec<String>,
 }
 
 impl FullImportResult {
-    /// Check if the import was successful overall
+    /// Check if the import was successful overall.
+    ///
+    /// Importing nothing when rows were expected is a failure, not a success —
+    /// that case used to be indistinguishable from a completed migration.
     pub fn is_successful(&self) -> bool {
-        self.total_records_failed == 0 && 
-        self.validation_results.iter().all(|(_, violations)| violations.is_empty())
+        self.total_records_failed == 0
+            && self.total_records_imported == self.total_records_expected
+            && self.validation_results.iter().all(|(_, violations)| violations.is_empty())
     }
 
     /// Get a summary of the import results
     pub fn summary(&self) -> String {
         format!(
-            "Import Summary: {} tables processed, {} records imported, {} failed, {} warnings, {} constraint violations",
+            "Import Summary: {} tables processed, {}/{} records imported, {} failed, {} warnings, {} constraint violations",
             self.table_imports.len(),
             self.total_records_imported,
+            self.total_records_expected,
             self.total_records_failed,
             self.warnings.len(),
             self.validation_results.iter().map(|(_, v)| v.len()).sum::<usize>()

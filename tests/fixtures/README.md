@@ -103,11 +103,11 @@ python3 tests/fixtures/verify_datastore_export.py     # independent self-check
 spec rather than from the generator's helpers, and validates every CRC. Run it
 after any change so a fireup failure can never be blamed on the fixture.
 
-The generator also accepts `--crc ieee`, which emits checksums the way
-`LevelDBReader::calculate_crc32` currently computes them (unmasked IEEE CRC-32).
-That variant is **bug-compatible and must not be committed** — write it to a
-scratch directory when you need to isolate downstream behaviour from the
-checksum bug:
+The generator also accepts `--crc ieee`, which emits unmasked IEEE CRC-32
+checksums — what `LevelDBReader` computed before
+[SAK-141](/SAK/issues/SAK-141). fireup now rejects that variant, which is the
+point: it must never be committed as a fixture, and it is only useful as a
+scratch-directory diagnostic for isolating downstream behaviour from framing:
 
 ```bash
 python3 tests/fixtures/generate_datastore_export.py /tmp/diag --crc ieee
@@ -115,8 +115,34 @@ python3 tests/fixtures/generate_datastore_export.py /tmp/diag --crc ieee
 
 ## Tests
 
-`tests/real_export_validation.rs` consumes these fixtures. It contains
-always-green guards that pin the fixtures as spec-correct, plus `#[ignore]`d
-pending acceptance tests that assert the behaviour fireup should have. Drop the
-`#[ignore]` on each as its gap is fixed; run them with
-`cargo test --test real_export_validation -- --ignored`.
+`tests/real_export_validation.rs` consumes these fixtures: guards that pin the
+fixtures as spec-correct with a reader written independently of `src/`, plus
+acceptance tests that read the fixtures through fireup itself. All of them run
+by default — `cargo test --test real_export_validation`.
+
+`tests/ddl_postgres_load_tests.rs` takes the next step and generates DDL from
+these fixtures, then loads it with `psql --variable=ON_ERROR_STOP=1` and reads
+the resulting catalog back, so PostgreSQL itself decides whether the generated
+schema is valid. Asserting on the DDL string could not catch what this does: a
+property named `user` emitted unquoted is a `syntax error at or near "user"`
+that aborts the rest of the script. Each test loads into its own randomly named
+schema and drops it even on failure, so runs do not collide. It needs a
+reachable database and is skipped without one:
+
+```bash
+FIREUP_TEST_POSTGRES_URL='postgresql:///fireup_test?host=/var/run/postgresql' \
+  cargo test --test ddl_postgres_load_tests
+```
+
+The deliberate edge cases above are what give that test its teeth — `user` as a
+reserved-word column, `nickname` for nullability, the blob/geo-point/timestamp
+properties for type fidelity, and the two-element `Orders` keys for the
+ancestor link. Keep them when extending the dataset.
+
+Which decoder handles a payload is decided per record, so both trees are read by
+the same code path:
+
+| Payload | Decoder |
+| --- | --- |
+| legacy `EntityProto` (field 13 `Reference` key) | `src/leveldb_parser/entity_proto.rs`, a hand-written wire decoder (proto2 groups rule out `prost`) |
+| `datastore.v1.Entity` | `src/leveldb_parser/protobuf_entity.rs`, via `prost` |

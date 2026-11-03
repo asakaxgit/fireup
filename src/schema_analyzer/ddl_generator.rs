@@ -53,6 +53,29 @@ impl Default for DDLConfig {
     }
 }
 
+/// Quote an identifier for PostgreSQL.
+///
+/// Every generated identifier goes through this. Unquoted identifiers break the
+/// script outright on a reserved word (a Datastore property called `user` is
+/// legal and common) and silently fold to lower case otherwise, which makes the
+/// emitted name disagree with the name a later lookup or foreign key uses.
+pub fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+/// Quote each identifier in a list and join them for use inside `(...)`.
+fn quote_identifier_list<I, S>(identifiers: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    identifiers
+        .into_iter()
+        .map(|identifier| quote_identifier(identifier.as_ref()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl DDLGenerator {
     /// Create a new DDL generator with default configuration
     pub fn new() -> Self {
@@ -145,8 +168,8 @@ impl DDLGenerator {
             ddl.push_str(",\n    ");
             ddl.push_str(&format!(
                 "CONSTRAINT {} PRIMARY KEY ({})",
-                pk.name,
-                pk.columns.join(", ")
+                quote_identifier(&pk.name),
+                quote_identifier_list(&pk.columns)
             ));
         }
 
@@ -157,7 +180,11 @@ impl DDLGenerator {
 
     /// Generate column definition string
     fn generate_column_definition(&self, column: &ColumnDefinition) -> FireupResult<String> {
-        let mut definition = format!("{} {}", column.name, column.column_type.to_sql());
+        let mut definition = format!(
+            "{} {}",
+            quote_identifier(&column.name),
+            column.column_type.to_sql()
+        );
 
         // Add NOT NULL constraint
         if !column.nullable {
@@ -185,10 +212,10 @@ impl DDLGenerator {
         Ok(format!(
             "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({});",
             table_name,
-            fk.constraint_name,
-            fk.column,
+            quote_identifier(&fk.constraint_name),
+            quote_identifier(&fk.column),
             referenced_table,
-            fk.referenced_column
+            quote_identifier(&fk.referenced_column)
         ))
     }
 
@@ -201,10 +228,10 @@ impl DDLGenerator {
         Ok(format!(
             "CREATE {}INDEX {} ON {} USING {} ({});",
             unique_clause,
-            index.name,
+            quote_identifier(&index.name),
             table_name,
             index_type,
-            index.columns.join(", ")
+            quote_identifier_list(&index.columns)
         ))
     }
 
@@ -221,8 +248,8 @@ impl DDLGenerator {
                 Ok(format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} UNIQUE ({});",
                     table_name,
-                    constraint.name,
-                    constraint.columns.join(", ")
+                    quote_identifier(&constraint.name),
+                    quote_identifier_list(&constraint.columns)
                 ))
             }
             ConstraintType::Check => {
@@ -236,7 +263,7 @@ impl DDLGenerator {
                 Ok(format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({});",
                     table_name,
-                    constraint.name,
+                    quote_identifier(&constraint.name),
                     check_condition
                 ))
             }
@@ -244,8 +271,8 @@ impl DDLGenerator {
                 Ok(format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} PRIMARY KEY ({});",
                     table_name,
-                    constraint.name,
-                    constraint.columns.join(", ")
+                    quote_identifier(&constraint.name),
+                    quote_identifier_list(&constraint.columns)
                 ))
             }
             ConstraintType::ForeignKey => {
@@ -267,10 +294,10 @@ impl DDLGenerator {
                 Ok(format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({});",
                     table_name,
-                    constraint.name,
-                    constraint.columns.join(", "),
+                    quote_identifier(&constraint.name),
+                    quote_identifier_list(&constraint.columns),
                     self.format_table_name(referenced_table),
-                    referenced_column
+                    quote_identifier(referenced_column)
                 ))
             }
         }
@@ -304,12 +331,16 @@ impl DDLGenerator {
         )
     }
 
-    /// Format table name with optional schema prefix
+    /// Format table name with optional schema prefix, quoting both parts
     fn format_table_name(&self, table_name: &str) -> String {
         if let Some(schema) = &self.config.schema_name {
-            format!("{}.{}", schema, table_name)
+            format!(
+                "{}.{}",
+                quote_identifier(schema),
+                quote_identifier(table_name)
+            )
         } else {
-            table_name.to_string()
+            quote_identifier(table_name)
         }
     }
 
@@ -534,12 +565,12 @@ mod tests {
         
         let ddl = generator.generate_table_ddl(&table).unwrap();
         
-        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS users"));
-        assert!(ddl.contains("id UUID NOT NULL"));
-        assert!(ddl.contains("email VARCHAR(255) NOT NULL"));
-        assert!(ddl.contains("name TEXT"));
-        assert!(ddl.contains("created_at TIMESTAMP WITH TIME ZONE NOT NULL"));
-        assert!(ddl.contains("CONSTRAINT pk_users PRIMARY KEY (id)"));
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS \"users\""));
+        assert!(ddl.contains("\"id\" UUID NOT NULL"));
+        assert!(ddl.contains("\"email\" VARCHAR(255) NOT NULL"));
+        assert!(ddl.contains("\"name\" TEXT"));
+        assert!(ddl.contains("\"created_at\" TIMESTAMPTZ NOT NULL"));
+        assert!(ddl.contains("CONSTRAINT \"pk_users\" PRIMARY KEY (\"id\")"));
     }
 
     #[test]
@@ -567,10 +598,10 @@ mod tests {
         
         let ddl = generator.generate_table_ddl(&table).unwrap();
         
-        assert!(ddl.contains("id INTEGER NOT NULL UNIQUE"));
-        assert!(ddl.contains("status VARCHAR(50) DEFAULT 'active'"));
-        assert!(ddl.contains("count INTEGER DEFAULT 0"));
-        assert!(ddl.contains("enabled BOOLEAN DEFAULT TRUE"));
+        assert!(ddl.contains("\"id\" INTEGER NOT NULL UNIQUE"));
+        assert!(ddl.contains("\"status\" VARCHAR(50) DEFAULT 'active'"));
+        assert!(ddl.contains("\"count\" INTEGER DEFAULT 0"));
+        assert!(ddl.contains("\"enabled\" BOOLEAN DEFAULT TRUE"));
     }
 
     #[test]
@@ -586,11 +617,11 @@ mod tests {
         
         let ddl = generator.generate_table_ddl(&table).unwrap();
         
-        assert!(ddl.contains("id UUID NOT NULL"));
-        assert!(ddl.contains("price NUMERIC(10, 2)"));
-        assert!(ddl.contains("data JSONB"));
-        assert!(ddl.contains("tags TEXT[]"));
-        assert!(ddl.contains("scores INTEGER[]"));
+        assert!(ddl.contains("\"id\" UUID NOT NULL"));
+        assert!(ddl.contains("\"price\" NUMERIC(10, 2)"));
+        assert!(ddl.contains("\"data\" JSONB"));
+        assert!(ddl.contains("\"tags\" TEXT[]"));
+        assert!(ddl.contains("\"scores\" INTEGER[]"));
     }
 
     #[test]
@@ -605,10 +636,10 @@ mod tests {
         
         let ddl = generator.generate_foreign_key_ddl("posts", &fk).unwrap();
         
-        assert!(ddl.contains("ALTER TABLE posts"));
-        assert!(ddl.contains("ADD CONSTRAINT fk_posts_user"));
-        assert!(ddl.contains("FOREIGN KEY (user_id)"));
-        assert!(ddl.contains("REFERENCES users (id)"));
+        assert!(ddl.contains("ALTER TABLE \"posts\""));
+        assert!(ddl.contains("ADD CONSTRAINT \"fk_posts_user\""));
+        assert!(ddl.contains("FOREIGN KEY (\"user_id\")"));
+        assert!(ddl.contains("REFERENCES \"users\" (\"id\")"));
     }
 
     #[test]
@@ -624,9 +655,9 @@ mod tests {
         };
         
         let ddl = generator.generate_index_ddl("users", &unique_index).unwrap();
-        assert!(ddl.contains("CREATE UNIQUE INDEX idx_users_email"));
-        assert!(ddl.contains("ON users USING BTREE"));
-        assert!(ddl.contains("(email)"));
+        assert!(ddl.contains("CREATE UNIQUE INDEX \"idx_users_email\""));
+        assert!(ddl.contains("ON \"users\" USING BTREE"));
+        assert!(ddl.contains("(\"email\")"));
 
         // Test composite index
         let composite_index = IndexDefinition {
@@ -637,8 +668,8 @@ mod tests {
         };
         
         let ddl = generator.generate_index_ddl("posts", &composite_index).unwrap();
-        assert!(ddl.contains("CREATE INDEX idx_posts_user_created"));
-        assert!(ddl.contains("(user_id, created_at)"));
+        assert!(ddl.contains("CREATE INDEX \"idx_posts_user_created\""));
+        assert!(ddl.contains("(\"user_id\", \"created_at\")"));
     }
 
     #[test]
@@ -655,9 +686,9 @@ mod tests {
         };
         
         let ddl = generator.generate_constraint_ddl(&unique_constraint).unwrap();
-        assert!(ddl.contains("ALTER TABLE users"));
-        assert!(ddl.contains("ADD CONSTRAINT uq_users_email"));
-        assert!(ddl.contains("UNIQUE (email)"));
+        assert!(ddl.contains("ALTER TABLE \"users\""));
+        assert!(ddl.contains("ADD CONSTRAINT \"uq_users_email\""));
+        assert!(ddl.contains("UNIQUE (\"email\")"));
 
         // Test check constraint
         let mut check_params = HashMap::new();
@@ -671,8 +702,8 @@ mod tests {
         };
         
         let ddl = generator.generate_constraint_ddl(&check_constraint).unwrap();
-        assert!(ddl.contains("ALTER TABLE users"));
-        assert!(ddl.contains("ADD CONSTRAINT chk_users_age"));
+        assert!(ddl.contains("ALTER TABLE \"users\""));
+        assert!(ddl.contains("ADD CONSTRAINT \"chk_users_age\""));
         assert!(ddl.contains("CHECK (age >= 0 AND age <= 150)"));
 
         // Test foreign key constraint
@@ -688,10 +719,10 @@ mod tests {
         };
         
         let ddl = generator.generate_constraint_ddl(&fk_constraint).unwrap();
-        assert!(ddl.contains("ALTER TABLE posts"));
-        assert!(ddl.contains("ADD CONSTRAINT fk_posts_user"));
-        assert!(ddl.contains("FOREIGN KEY (user_id)"));
-        assert!(ddl.contains("REFERENCES users (id)"));
+        assert!(ddl.contains("ALTER TABLE \"posts\""));
+        assert!(ddl.contains("ADD CONSTRAINT \"fk_posts_user\""));
+        assert!(ddl.contains("FOREIGN KEY (\"user_id\")"));
+        assert!(ddl.contains("REFERENCES \"users\" (\"id\")"));
     }
 
     #[test]
@@ -758,7 +789,7 @@ mod tests {
         assert!(!ddl.table_statements[0].contains("IF NOT EXISTS"));
         
         // Should include schema name
-        assert!(ddl.table_statements[0].contains("firestore.users"));
+        assert!(ddl.table_statements[0].contains("\"firestore\".\"users\""));
         
         // Should include drop statements
         assert!(!ddl.drop_statements.is_empty());
@@ -869,12 +900,12 @@ mod tests {
         
         // Test table name formatting
         let formatted = generator.format_table_name("test_table");
-        assert_eq!(formatted, "custom_schema.test_table");
+        assert_eq!(formatted, "\"custom_schema\".\"test_table\"");
         
         // Test without schema name
         let generator_no_schema = DDLGenerator::new();
         let formatted_no_schema = generator_no_schema.format_table_name("test_table");
-        assert_eq!(formatted_no_schema, "test_table");
+        assert_eq!(formatted_no_schema, "\"test_table\"");
     }
 
     #[test]
@@ -892,8 +923,61 @@ mod tests {
         assert_eq!(ddl.drop_statements.len(), 2);
         
         // Should drop in reverse order (posts before users due to foreign key)
-        assert!(ddl.drop_statements[0].contains("DROP TABLE IF EXISTS posts CASCADE"));
-        assert!(ddl.drop_statements[1].contains("DROP TABLE IF EXISTS users CASCADE"));
+        assert!(ddl.drop_statements[0].contains("DROP TABLE IF EXISTS \"posts\" CASCADE"));
+        assert!(ddl.drop_statements[1].contains("DROP TABLE IF EXISTS \"users\" CASCADE"));
+    }
+
+    #[test]
+    fn test_reserved_words_are_quoted() {
+        // `user` is reserved in PostgreSQL. Unquoted, it aborts the script with
+        // `syntax error at or near "user"` and everything after it is skipped.
+        let generator = DDLGenerator::new();
+        let mut table = TableDefinition::new("Orders".to_string());
+        table.add_column(ColumnDefinition::new("user".to_string(), PostgreSQLType::Text));
+        table.add_column(ColumnDefinition::new("order".to_string(), PostgreSQLType::Text));
+        table.add_column(ColumnDefinition::new("table".to_string(), PostgreSQLType::Text));
+
+        let ddl = generator.generate_table_ddl(&table).unwrap();
+
+        assert!(ddl.contains("\"user\" TEXT"), "got: {ddl}");
+        assert!(ddl.contains("\"order\" TEXT"));
+        assert!(ddl.contains("\"table\" TEXT"));
+        assert!(!ddl.contains("    user TEXT"));
+    }
+
+    #[test]
+    fn test_mixed_case_table_name_is_quoted() {
+        // Unquoted `Orders` folds to `orders`, so a later foreign key or lookup
+        // using the emitted name would not find the table.
+        let generator = DDLGenerator::new();
+        let table = TableDefinition::new("Orders".to_string());
+
+        let ddl = generator.generate_table_ddl(&table).unwrap();
+
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS \"Orders\""), "got: {ddl}");
+    }
+
+    #[test]
+    fn test_embedded_double_quote_is_escaped() {
+        let quoted = quote_identifier("we\"ird");
+        assert_eq!(quoted, "\"we\"\"ird\"");
+    }
+
+    #[test]
+    fn test_datastore_type_renderings() {
+        let generator = DDLGenerator::new();
+        let mut table = TableDefinition::new("Users".to_string());
+        table.add_column(ColumnDefinition::new("created_at".to_string(), PostgreSQLType::Timestamp));
+        table.add_column(ColumnDefinition::new("avatar".to_string(), PostgreSQLType::Bytea));
+        table.add_column(ColumnDefinition::new("age".to_string(), PostgreSQLType::BigInt));
+        table.add_column(ColumnDefinition::new("location".to_string(), PostgreSQLType::Point));
+
+        let ddl = generator.generate_table_ddl(&table).unwrap();
+
+        assert!(ddl.contains("\"created_at\" TIMESTAMPTZ"), "got: {ddl}");
+        assert!(ddl.contains("\"avatar\" BYTEA"));
+        assert!(ddl.contains("\"age\" BIGINT"));
+        assert!(ddl.contains("\"location\" POINT"));
     }
 
     #[test]

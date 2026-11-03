@@ -200,8 +200,6 @@ fn users_fixture_exercises_cross_block_fragmentation() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "gap: LevelDBReader::calculate_crc32 uses unmasked IEEE CRC-32 instead of \
-            LevelDB's masked CRC32C, so every record in a real export is rejected"]
 async fn parser_reads_records_from_a_spec_correct_export() {
     init_monitoring();
     let parser = FirestoreDocumentParser::new(
@@ -215,8 +213,6 @@ async fn parser_reads_records_from_a_spec_correct_export() {
 }
 
 #[tokio::test]
-#[ignore = "gap: real exports carry legacy storage_onestore_v3.EntityProto payloads \
-            (proto2 groups), which protobuf_entity.rs cannot decode"]
 async fn parser_decodes_legacy_entity_proto_payloads() {
     init_monitoring();
     let parser = FirestoreDocumentParser::new(
@@ -228,12 +224,9 @@ async fn parser_decodes_legacy_entity_proto_payloads() {
 }
 
 #[tokio::test]
-#[ignore = "gap: LevelDBReader::resolve_backup_path collapses an export tree to a single \
-            output-0 file, so all kinds but one are silently dropped"]
 async fn parser_reads_every_kind_in_an_export_tree() {
     init_monitoring();
     let root = fixtures_dir().join("export-onestore");
-    init_monitoring();
     let parser = FirestoreDocumentParser::new(root.to_string_lossy().to_string());
     let result = parser.parse_documents().await.expect("parse export tree");
     assert_eq!(
@@ -247,8 +240,6 @@ async fn parser_reads_every_kind_in_an_export_tree() {
 }
 
 #[tokio::test]
-#[ignore = "gap: document ids are dropped — the generated primary key is a random UUID \
-            with no column holding the Datastore key name/id"]
 async fn parsed_documents_retain_their_datastore_key() {
     init_monitoring();
     let parser = FirestoreDocumentParser::new(

@@ -68,3 +68,15 @@ path = "tests/deployment_tests.rs"
 [[test]]
 name = "real_export_validation"
 path = "tests/real_export_validation.rs"
+
+[[test]]
+name = "postgres_import_tests"
+path = "tests/postgres_import_tests.rs"
+
+[[test]]
+name = "cli_exit_code_tests"
+path = "tests/cli_exit_code_tests.rs"
+
+[[test]]
+name = "library_api_tests"
+path = "tests/library_api_tests.rs"

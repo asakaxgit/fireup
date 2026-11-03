@@ -1,4 +1,7 @@
 pub mod google {
+    pub mod r#type {
+        include!(concat!(env!("OUT_DIR"), "/google.type.rs"));
+    }
     pub mod datastore {
         pub mod v1 {
             include!(concat!(env!("OUT_DIR"), "/google.datastore.v1.rs"));

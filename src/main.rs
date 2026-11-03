@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 use tracing_subscriber;
 use std::path::PathBuf;
 
@@ -16,7 +16,9 @@ use error::FireupError;
 use leveldb_parser::{LevelDBParser, BackupValidatorImpl, ValidationResult};
 use leveldb_parser::validator::BackupValidator;
 use schema_analyzer::{DocumentStructureAnalyzer, NormalizationEngine, DDLGenerator};
-use data_importer::{PostgreSQLImporter, ConnectionConfig, DocumentTransformer, FullImportResult};
+use data_importer::{
+    parse_connection_url, DocumentTransformer, FullImportResult, PostgreSQLImporter, TableImportSpec,
+};
 use std::fs;
 
 #[derive(Parser)]
@@ -105,7 +107,9 @@ enum Commands {
         #[arg(long)]
         drop_existing: bool,
         
-        /// Continue import on constraint violations (log errors but don't stop)
+        /// Continue import on constraint violations: import the remaining rows
+        /// instead of aborting. The exit code still reports the failures, since a
+        /// partial import is not a completed migration.
         #[arg(long)]
         continue_on_error: bool,
         
@@ -226,9 +230,11 @@ async fn main() -> Result<()> {
                 timeout,
             ).await {
                 Ok(result) => {
-                    info!("Import completed successfully!");
                     info!("Summary: {}", result.summary());
-                    if !result.is_successful() {
+                    if result.is_successful() {
+                        info!("Import completed successfully!");
+                    } else {
+                        eprintln!("Import did not complete successfully: {}", result.summary());
                         std::process::exit(1);
                     }
                 }
@@ -320,23 +326,24 @@ async fn main() -> Result<()> {
 async fn execute_import_pipeline(
     backup_file: &PathBuf,
     postgres_url: &str,
-    _batch_size: usize,
+    batch_size: usize,
     max_connections: usize,
     skip_normalization: bool,
     drop_existing: bool,
-    _continue_on_error: bool,
+    continue_on_error: bool,
     generate_ddl: Option<&PathBuf>,
     timeout: u64,
 ) -> Result<FullImportResult, FireupError> {
     info!("Starting complete import pipeline");
-    
+
     // Step 1: Parse LevelDB backup file
     info!("Step 1: Parsing LevelDB backup file");
     let parser = leveldb_parser::parser::FirestoreDocumentParser::new(backup_file.to_str().unwrap().to_string());
     let parse_result = parser.parse_backup(backup_file.to_str().unwrap()).await?;
     let documents = &parse_result.documents;
     info!("Parsed {} documents from backup file", documents.len());
-    
+    ensure_documents_parsed(backup_file, documents.len())?;
+
     // Step 2: Analyze schema structure
     info!("Step 2: Analyzing document schema structure");
     let analyzer = DocumentStructureAnalyzer::new();
@@ -369,46 +376,160 @@ async fn execute_import_pipeline(
     
     // Step 5: Setup PostgreSQL connection
     info!("Step 5: Setting up PostgreSQL connection");
-    let connection_config = parse_postgres_url(postgres_url, max_connections, timeout)?;
-    
+    let connection_config = parse_connection_url(postgres_url, max_connections, timeout)?;
+    info!(
+        "Connecting to {}:{}/{} as {}",
+        connection_config.host, connection_config.port, connection_config.database, connection_config.user
+    );
+
     let importer = PostgreSQLImporter::new(connection_config).await?;
     info!("PostgreSQL connection established");
-    
-    // Step 6: Create schema in PostgreSQL
-    info!("Step 6: Creating database schema");
+
+    // Step 6: Transform documents into table rows
+    info!("Step 6: Transforming documents into table rows");
+    let mut transformer = DocumentTransformer::new();
+    let transformation_result = transformer.transform_documents(documents, &normalized_schema)?;
+    info!(
+        "Transformed {} documents into {} rows across {} tables",
+        transformation_result.statistics.documents_processed,
+        transformation_result.statistics.total_rows,
+        transformation_result.table_data.len()
+    );
+    for warning in &transformation_result.warnings {
+        warn!("Transformation warning: {}", warning);
+    }
+
+    let table_specs = build_table_import_specs(
+        &normalized_schema,
+        &transformation_result,
+        batch_size,
+        continue_on_error,
+    );
+
+    // Step 7: Drop existing tables (if requested)
     let ddl_generator = DDLGenerator::new();
     let generated_ddl = ddl_generator.generate_ddl(&normalized_schema)?;
     let ddl_statements = generated_ddl.all_statements();
-    
+
     if drop_existing {
-        info!("Dropping existing tables as requested");
-        // Generate drop statements and execute them
-        // This would be implemented in the DDL generator
+        let table_names: Vec<String> = normalized_schema
+            .tables
+            .iter()
+            .map(|table| table.name.clone())
+            .collect();
+        info!("Step 7: Dropping {} existing tables as requested", table_names.len());
+        let drop_result = importer.drop_tables(&table_names).await?;
+        info!("Dropped {} existing tables", drop_result.imported_records);
+    } else {
+        info!("Step 7: Keeping existing tables (--drop-existing not set)");
     }
-    
-    let schema_result = importer.create_schema(&ddl_statements).await?;
-    info!("Database schema created successfully");
-    
-    // Step 7: Transform and import data
-    info!("Step 7: Transforming and importing data");
-    let mut transformer = DocumentTransformer::new();
-    let _transformation_result = transformer.transform_documents(documents, &normalized_schema)?;
-    
-    info!("Data transformation completed");
-    
-    // Step 8: Execute full import with all components
-    // For now, create a simple result since the full import method expects different parameters
-    let full_result = FullImportResult {
-        schema_creation: Some(schema_result),
-        table_imports: vec![],
-        validation_results: vec![],
-        total_records_imported: documents.len(),
-        total_records_failed: 0,
-        warnings: vec![],
-    };
-    
-    info!("Import pipeline completed successfully");
+
+    // Step 8: Create the schema and import every table's rows
+    info!("Step 8: Creating schema and importing data");
+    let full_result = importer.execute_full_import(&ddl_statements, &table_specs).await?;
+
+    for warning in &full_result.warnings {
+        warn!("Import warning: {}", warning);
+    }
+
+    // A zero-row import of a non-empty source is a failed migration, not a
+    // successful one: refuse to report success for it.
+    if full_result.total_records_expected > 0 && full_result.total_records_imported == 0 {
+        return Err(FireupError::data_import(
+            format!(
+                "Imported 0 of {} expected rows — no data reached PostgreSQL",
+                full_result.total_records_expected
+            ),
+            None,
+            None,
+            FireupError::new_context("execute_import_pipeline"),
+        ));
+    }
+
+    if full_result.total_records_failed > 0 && !continue_on_error {
+        return Err(FireupError::data_import(
+            format!(
+                "{} of {} rows failed to import. Re-run with --continue-on-error to import the remainder",
+                full_result.total_records_failed, full_result.total_records_expected
+            ),
+            None,
+            None,
+            FireupError::new_context("execute_import_pipeline"),
+        ));
+    }
+
+    info!("Import pipeline completed: {}", full_result.summary());
     Ok(full_result)
+}
+
+/// Build one import spec per table that the transformation produced rows for.
+fn build_table_import_specs(
+    schema: &types::NormalizedSchema,
+    transformation: &data_importer::TransformationResult,
+    batch_size: usize,
+    continue_on_error: bool,
+) -> Vec<TableImportSpec> {
+    schema
+        .tables
+        .iter()
+        .filter_map(|table| {
+            let rows = transformation.table_data.get(&table.name)?;
+            if rows.is_empty() {
+                info!("Table '{}' has no rows to import", table.name);
+                return None;
+            }
+            Some(
+                TableImportSpec::from_table_rows(table, rows)
+                    .with_batch_size(batch_size)
+                    .with_continue_on_error(continue_on_error),
+            )
+        })
+        .collect()
+}
+
+/// Total size in bytes of a backup path, following one level of export tree.
+fn source_size_bytes(path: &PathBuf) -> u64 {
+    fn walk(path: &std::path::Path, depth: usize) -> u64 {
+        let Ok(metadata) = fs::metadata(path) else { return 0 };
+        if metadata.is_file() {
+            return metadata.len();
+        }
+        if !metadata.is_dir() || depth == 0 {
+            return 0;
+        }
+        let Ok(entries) = fs::read_dir(path) else { return 0 };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| walk(&entry.path(), depth - 1))
+            .sum()
+    }
+
+    walk(path, 8)
+}
+
+/// Fail when a non-empty backup source yielded no documents at all.
+///
+/// Total parse loss used to exit 0 with "completed successfully", which is
+/// indistinguishable from a backup that legitimately holds no documents.
+fn ensure_documents_parsed(backup_file: &PathBuf, document_count: usize) -> Result<(), FireupError> {
+    if document_count > 0 {
+        return Ok(());
+    }
+
+    let source_bytes = source_size_bytes(backup_file);
+    if source_bytes == 0 {
+        warn!("Backup source {:?} is empty; nothing to do", backup_file);
+        return Ok(());
+    }
+
+    Err(FireupError::leveldb_parse(
+        format!(
+            "Parsed 0 documents from {:?} ({} bytes of input). Refusing to continue: the source is not empty, \
+             so this is a parse failure rather than an empty backup",
+            backup_file, source_bytes
+        ),
+        FireupError::new_context("ensure_documents_parsed"),
+    ))
 }
 
 /// Execute the schema analysis pipeline
@@ -429,12 +550,13 @@ async fn execute_analyze_pipeline(
     let parse_result = parser.parse_backup(backup_file.to_str().unwrap()).await?;
     let documents = &parse_result.documents;
     info!("Parsed {} documents from backup file", documents.len());
-    
+    ensure_documents_parsed(backup_file, documents.len())?;
+
     // Step 2: Analyze schema structure
     info!("Step 2: Analyzing document schema structure");
     let analyzer = DocumentStructureAnalyzer::new();
     let analysis = analyzer.analyze_documents(documents).await?;
-    
+
     // Step 3: Generate schema (normalized or basic)
     let schema = if normalize {
         info!("Step 3: Generating normalized schema");
@@ -628,39 +750,6 @@ fn create_basic_schema_from_analysis(analysis: &types::SchemaAnalysis) -> Result
             table_count,
             relationship_count: 0,
         },
-    })
-}
-
-/// Parse PostgreSQL URL and create ConnectionConfig
-fn parse_postgres_url(url: &str, max_connections: usize, timeout: u64) -> Result<ConnectionConfig, FireupError> {
-    // Simple URL parsing - in a real implementation, you'd use a proper URL parser
-    // Format: postgresql://user:password@host:port/database
-    
-    if !url.starts_with("postgresql://") {
-        return Err(FireupError::Configuration {
-            message: "Invalid PostgreSQL URL format. Expected: postgresql://user:password@host:port/database".to_string(),
-            config_key: Some("postgres_url".to_string()),
-            context: error::ErrorContext {
-                operation: "parse_postgres_url".to_string(),
-                metadata: std::collections::HashMap::new(),
-                timestamp: chrono::Utc::now(),
-                call_path: vec!["main::parse_postgres_url".to_string()],
-            },
-            suggestions: vec!["Use format: postgresql://user:password@host:port/database".to_string()],
-        });
-    }
-    
-    // For now, return a default config - in a real implementation, parse the URL properly
-    Ok(ConnectionConfig {
-        host: "localhost".to_string(),
-        port: 5432,
-        database: "fireup_test".to_string(),
-        user: "postgres".to_string(),
-        password: "password".to_string(),
-        max_connections,
-        connection_timeout: std::time::Duration::from_secs(timeout),
-        retry_attempts: 3,
-        retry_delay: std::time::Duration::from_secs(1),
     })
 }
 
