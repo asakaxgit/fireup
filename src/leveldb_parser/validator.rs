@@ -191,8 +191,21 @@ impl BackupValidatorImpl {
         // Step 4: Validate Firestore document format
         self.report_progress("Validating Firestore format", 80, 100);
         let (format_errors, format_warnings) = self.validate_firestore_format().await;
+        let lost_all_documents = format_errors.iter().any(|e| {
+            e.starts_with("Decoded 0 Firestore documents from ")
+        });
         errors.extend(format_errors);
         warnings.extend(format_warnings);
+
+        // Checksums alone can still score 1.0 when every record is undecodable.
+        // Treat total document loss as a parse failure so --detailed / --check-quality
+        // cannot report a perfect integrity score for an empty decode (risk 9).
+        let mut integrity_info = integrity_info;
+        if lost_all_documents {
+            let failed = structure_info.valid_records.max(1);
+            integrity_info.parsing_errors = integrity_info.parsing_errors.saturating_add(failed);
+            integrity_info.overall_integrity_score = 0.0;
+        }
         
         self.report_progress("Validation complete", 100, 100);
         
@@ -453,7 +466,17 @@ impl BackupValidatorImpl {
         match parser.parse_documents().await {
             Ok(parse_result) => {
                 if parse_result.documents.is_empty() {
-                    warnings.push("No Firestore documents found in backup".to_string());
+                    // Readable LevelDB records that decode to zero entities are a
+                    // hard failure for a migration tool: framing/checksum success
+                    // must not report the backup as valid (residual risk 9).
+                    if parse_result.metadata.records_processed > 0 {
+                        errors.push(format!(
+                            "Decoded 0 Firestore documents from {} valid LevelDB records — framing is readable but no Entity/EntityProto payloads were recovered",
+                            parse_result.metadata.records_processed
+                        ));
+                    } else {
+                        warnings.push("No Firestore documents found in backup".to_string());
+                    }
                 } else {
                     debug!("Found {} Firestore documents", parse_result.documents.len());
                 }

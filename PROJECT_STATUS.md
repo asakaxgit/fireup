@@ -1,8 +1,8 @@
 # Fireup Project Status
 
-**Last Updated:** November 2, 2026  
+**Last Updated:** November 3, 2026  
 **Version:** 0.1.0  
-**Status:** ⛔ NOT production ready — fails against a realistic Firestore/Datastore export
+**Status:** ⛔ NOT production ready — fixture path works; live GCP export + scale unproven
 
 ---
 
@@ -23,7 +23,7 @@ which exercised the real on-disk export format.
 ### What is built
 - LevelDB log framing reader, schema analyzer with 1NF/2NF/3NF normalization,
   DDL generator, transformer, PostgreSQL importer, CLI, monitoring
-- 159 passing library unit tests
+- 209+ passing library unit tests
 - Realistic export fixtures plus a format-level validation suite
   (`tests/fixtures/`, `tests/real_export_validation.rs`)
 
@@ -33,8 +33,9 @@ which exercised the real on-disk export format.
   (SAK-141)
 
 ### What does not work yet
-- Carrying the Datastore key into the generated schema (rows are keyed on a
-  random UUID, so they are unjoinable — residual risk 4)
+- Confirmed round-trip against a **live GCP-captured** export (fixtures are
+  format-correct but not project-captured)
+- Large multi-shard performance characterization
 
 ---
 
@@ -158,8 +159,8 @@ CLI, then counts the rows in PostgreSQL: one row per source document in both
 cases. Re-importing with `--drop-existing` leaves the same count rather than
 doubling it.
 
-**Known gap:** rows are keyed on a random UUID rather than the Datastore key
-(residual risk 4), so a complete import still produces unjoinable rows.
+**Identity:** rows use Datastore `key_path` as the primary key (SAK-143), so
+re-import is idempotent against the fixture tree.
 
 **Test Coverage:** library unit tests, plus `tests/postgres_import_tests.rs`
 (requires `FIREUP_TEST_POSTGRES_URL`) and `tests/cli_exit_code_tests.rs`
@@ -469,11 +470,13 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
 
 ### Medium — operability
 
-9. **Failures are reported as success** — **partially resolved (SAK-142).**
-   `analyze` and `import` now exit non-zero when a non-empty source yields 0
+9. ~~**Failures are reported as success**~~ — **resolved (SAK-142 + SAK-137).**
+   `analyze` and `import` exit non-zero when a non-empty source yields 0
    documents, and `import` exits non-zero on a 0-row or partial import.
-   Still open: `validate --check-quality` reports `Integrity score: 1.00` and
-   `is_valid` when 0 documents decoded from valid records.
+   `validate` (including `--check-quality`) now treats readable LevelDB records
+   that decode to zero Firestore documents as invalid and forces the integrity
+   score to `0.0`, so framing success can no longer look like a completed
+   quality check.
 
 10. ~~**Hardcoded credentials / ignored connection string**~~ — **resolved
     (SAK-142).** `parse_postgres_url` validated only the `postgresql://` prefix
@@ -513,12 +516,11 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
 
 ### Not yet assessed
 
-- **`import` against a real export.** The import path itself is now verified
-  end-to-end against a live PostgreSQL by `tests/postgres_import_tests.rs`
-  (set `FIREUP_TEST_POSTGRES_URL` to run it), using a JSON Lines backup the
-  parser can read. What remains unverified is the combination: a managed
-  LevelDB export parsed *and* imported in one run, which needs the SAK-141
-  parser work.
+- **`import` against a managed export.** Covered by
+  `cli_import_managed_export_fixture_into_postgres` in
+  `tests/postgres_import_tests.rs` (set `FIREUP_TEST_POSTGRES_URL` to run it).
+  It imports `tests/fixtures/export-onestore/` and asserts 5 `Users` + 7
+  `Orders` rows. Still not run in default CI without a Postgres URL.
 - **Performance / large exports.** No benchmark has been run against a
   multi-shard export.
 - **A genuine GCP-produced export.** The fixtures are built to the documented
@@ -565,14 +567,14 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
 
 ### ⛔ NOT Ready for Production Use
 
-Do not run this against data anyone depends on. It cannot read a real export,
-and the generated schema keys rows on a random UUID rather than the Datastore
-key, so even a complete import produces unjoinable rows. The `import` path no
-longer reports success without writing rows (SAK-142).
+Do not run this against data anyone depends on. Spec-correct managed-export
+fixtures now round-trip through `validate` / `analyze` / `import` (when a
+Postgres URL is provided), but a **live GCP-captured export** has not been
+confirmed, and large multi-shard performance is unmeasured.
 
 **Strengths:**
 1. **Clean Architecture:** Well-organized, modular codebase
-2. **Unit Test Breadth:** 159 passing library tests
+2. **Unit Test Breadth:** 209+ passing library tests
 3. **Good Documentation:** Complete user and developer guides
 4. **Modern Stack:** Rust + PostgreSQL + Docker
 5. **Error Handling:** Comprehensive error types and context
@@ -580,14 +582,13 @@ longer reports success without writing rows (SAK-142).
 
 **Exit criteria before any production claim:**
 
-1. Residual risks 1-5 fixed, with the `#[ignore]` removed from the pending
-   acceptance tests in `tests/real_export_validation.rs`
+1. Residual risks 1-9 fixed against the checked-in fixtures (done on `main`)
 2. `validate`, `analyze`, and `import` all pass against
    `tests/fixtures/export-onestore/`, recovering all 12 entities across both
    kinds, with row counts asserted in PostgreSQL after `import`
 3. The same three commands pass against an export captured from a live GCP
    project
-4. Non-zero exit on total parse loss (residual risk 9)
+4. Non-zero exit on total parse loss / zero-document decode (residual risk 9)
 
 **Also recommended:**
 
@@ -773,9 +774,9 @@ acceptance tests in `tests/real_export_validation.rs`
   files loads; the other is rejected — residual risk 6)
 
 ### Outstanding Items
-- ⛔ Cannot read a real export (residual risks 1, 2, 5)
-- ⛔ `import` writes no rows and misreports success (residual risk 3)
-- ⛔ Document identity dropped (residual risk 4)
+- ✅ Spec-correct managed-export fixtures read end to end (SAK-141)
+- ✅ `import` writes rows and fails on zero/partial imports (SAK-142)
+- ✅ Document identity preserved via `key_path` (SAK-143)
 - ⚠️ Real GCP-captured export still untested
 - ⚠️ Performance benchmarking pending
 - ⚠️ Production deployment configuration needed
