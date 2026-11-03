@@ -112,6 +112,102 @@ fn import_rejects_a_url_without_a_database() {
     );
 }
 
+#[test]
+fn validate_check_quality_accepts_the_managed_export_fixture() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/export-onestore");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fireup"))
+        .args(["validate", "-b"])
+        .arg(&fixture)
+        .arg("--check-quality")
+        .output()
+        .expect("run fireup validate");
+
+    assert!(
+        output.status.success(),
+        "managed export must validate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Residual risk 9: framed LevelDB records that decode to zero documents must
+/// not exit 0 under `validate --check-quality` (and must not claim integrity 1.0).
+#[test]
+fn validate_check_quality_fails_when_records_decode_to_zero_documents() {
+    let backup = write_undecodable_leveldb_backup();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fireup"))
+        .args(["validate", "-b"])
+        .arg(backup.path())
+        .args(["--check-quality", "--detailed", "--format", "json"])
+        .output()
+        .expect("run fireup validate");
+
+    assert!(
+        !output.status.success(),
+        "0 decoded documents from valid records must exit non-zero, got {:?}",
+        output.status.code()
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(
+        combined.contains("Decoded 0 Firestore documents")
+            || combined.contains("validation failed")
+            || combined.contains("\"is_valid\": false"),
+        "output should explain total document loss, got: {combined}"
+    );
+    assert!(
+        !combined.contains("\"overall_integrity_score\": 1.0")
+            && !combined.contains("\"overall_integrity_score\":1.0"),
+        "integrity score must not stay at 1.0, got: {combined}"
+    );
+}
+
+/// Spec-correct LevelDB framing (masked CRC32C) whose payload is not an entity.
+fn write_undecodable_leveldb_backup() -> tempfile::NamedTempFile {
+    // Keep the CRC32C helper in-process so the test does not shell out to Python.
+    fn crc32c(data: &[u8]) -> u32 {
+        const POLY: u32 = 0x82F6_3B78;
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ POLY
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+    fn mask(crc: u32) -> u32 {
+        (((crc >> 15) | (crc << 17)).wrapping_add(0xA282_EAD8)) & 0xFFFF_FFFF
+    }
+
+    let payload = b"not-an-entity-payload";
+    let record_type: u8 = 1; // FULL
+    let mut type_and_payload = Vec::with_capacity(1 + payload.len());
+    type_and_payload.push(record_type);
+    type_and_payload.extend_from_slice(payload);
+    let checksum = mask(crc32c(&type_and_payload));
+
+    let mut block = Vec::with_capacity(32768);
+    block.extend_from_slice(&checksum.to_le_bytes());
+    block.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+    block.push(record_type);
+    block.extend_from_slice(payload);
+    block.resize(32768, 0);
+
+    let mut file = tempfile::NamedTempFile::new().expect("create backup file");
+    file.write_all(&block).expect("write LevelDB block");
+    file.flush().expect("flush backup file");
+    file
+}
+
 /// `sslmode=require` cannot be honoured by a NoTls pool; connecting in the clear
 /// instead would be a silent downgrade.
 #[test]

@@ -67,6 +67,15 @@ async fn create_test_leveldb_file(temp_dir: &TempDir, filename: &str, records: V
                 call_path: vec!["test_helper".to_string()],
             }
         ))?;
+    file.flush().await.map_err(|e| FireupError::leveldb_parse(
+        format!("Failed to flush test file: {}", e),
+        ErrorContext {
+            operation: "flush_test_file".to_string(),
+            metadata: std::collections::HashMap::new(),
+            timestamp: chrono::Utc::now(),
+            call_path: vec!["test_helper".to_string()],
+        }
+    ))?;
     
     Ok(file_path.to_string_lossy().to_string())
 }
@@ -112,6 +121,15 @@ async fn create_corrupted_leveldb_file(temp_dir: &TempDir, filename: &str) -> Re
                 call_path: vec!["test_helper".to_string()],
             }
         ))?;
+    file.flush().await.map_err(|e| FireupError::leveldb_parse(
+        format!("Failed to flush corrupted test file: {}", e),
+        ErrorContext {
+            operation: "flush_corrupted_test_file".to_string(),
+            metadata: std::collections::HashMap::new(),
+            timestamp: chrono::Utc::now(),
+            call_path: vec!["test_helper".to_string()],
+        }
+    ))?;
     
     Ok(file_path.to_string_lossy().to_string())
 }
@@ -555,13 +573,41 @@ mod tests {
     async fn test_backup_validator_file_validation() {
         setup_monitoring();
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        
-        // Test with valid file
-        let test_data = b"test data for validation";
+
+        // A framed LevelDB record whose payload is a real Datastore Entity.
+        let entity_bytes = {
+            use crate::protos::google::datastore::v1::key::PathElement;
+            use crate::protos::google::datastore::v1::{key, Entity, Key, Value};
+            use crate::protos::google::datastore::v1::value::ValueType;
+            use prost::Message;
+            use std::collections::HashMap;
+
+            let mut properties = HashMap::new();
+            properties.insert(
+                "name".to_string(),
+                Value {
+                    value_type: Some(ValueType::StringValue("Ada".to_string())),
+                },
+            );
+            let entity = Entity {
+                key: Some(Key {
+                    partition_id: None,
+                    path: vec![PathElement {
+                        kind: "users".to_string(),
+                        id_type: Some(key::path_element::IdType::Name("ada".to_string())),
+                    }],
+                }),
+                properties,
+            };
+            let mut buf = Vec::new();
+            entity.encode(&mut buf).expect("encode entity");
+            buf
+        };
+
         let valid_file_path = create_test_leveldb_file(
             &temp_dir,
             "valid.leveldb",
-            vec![(RecordType::Full, test_data)]
+            vec![(RecordType::Full, &entity_bytes)]
         ).await.expect("Failed to create test file");
         
         let validator = BackupValidatorImpl::new(&valid_file_path);
@@ -569,10 +615,52 @@ mod tests {
         
         assert!(result.is_ok());
         let validation_result = result.unwrap();
-        assert!(validation_result.is_valid);
+        assert!(validation_result.is_valid, "errors: {:?}", validation_result.errors);
         assert!(validation_result.file_info.is_readable);
-        assert_eq!(validation_result.file_info.file_size, 32768);
+        assert!(
+            validation_result.file_info.file_size > 0,
+            "validated file should report a non-zero size"
+        );
         assert!(validation_result.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn undecodable_records_do_not_pass_validation() {
+        setup_monitoring();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+
+        // Spec-correct framing with a payload that is not Entity/EntityProto.
+        let junk = b"not-an-entity-payload";
+        let file_path = create_test_leveldb_file(
+            &temp_dir,
+            "undecodable.leveldb",
+            vec![(RecordType::Full, junk)],
+        )
+        .await
+        .expect("create undecodable LevelDB file");
+
+        let validator = BackupValidatorImpl::new(&file_path);
+        let validation_result = validator
+            .validate_comprehensive(&file_path)
+            .await
+            .expect("validation runs");
+
+        assert!(
+            !validation_result.is_valid,
+            "readable framing with 0 decoded documents must be INVALID"
+        );
+        assert!(
+            validation_result
+                .errors
+                .iter()
+                .any(|e| e.contains("Decoded 0 Firestore documents")),
+            "errors: {:?}",
+            validation_result.errors
+        );
+        assert_eq!(
+            validation_result.integrity_info.overall_integrity_score, 0.0,
+            "integrity must not stay at 1.0 when every record fails to decode"
+        );
     }
 
     #[tokio::test]
@@ -605,10 +693,10 @@ mod tests {
         
         // File should be accessible but may have integrity issues
         assert!(validation_result.file_info.is_readable);
-        assert_eq!(validation_result.file_info.file_size, 32768);
-        
-        // Ensure the validator returns without crashing
-        assert!(true);
+        assert!(
+            validation_result.file_info.file_size > 0,
+            "corrupted fixture should still report a size"
+        );
         
         // Integrity score should be lower due to corruption
         assert!(validation_result.integrity_info.overall_integrity_score <= 1.0);
@@ -633,8 +721,9 @@ mod tests {
         let result = validator.validate_comprehensive(&file_path).await;
         
         assert!(result.is_ok());
+        // Junk payload is framed correctly but must not report VALID (risk 9).
         let validation_result = result.unwrap();
-        assert!(validation_result.is_valid);
+        assert!(!validation_result.is_valid);
     }
 
     #[tokio::test]

@@ -642,20 +642,31 @@ async fn execute_validate_pipeline(
             Ok(parse_result) => {
                 let documents = &parse_result.documents;
                 info!("Successfully parsed {} documents", documents.len());
-                
+
                 // Perform additional quality checks
                 let mut quality_errors = Vec::new();
-                
+
+                // Readable records that decode to nothing must not pass quality checks.
+                if documents.is_empty() && parse_result.metadata.records_processed > 0 {
+                    quality_errors.push(format!(
+                        "Decoded 0 Firestore documents from {} valid LevelDB records",
+                        parse_result.metadata.records_processed
+                    ));
+                    result.integrity_info.overall_integrity_score = 0.0;
+                    result.integrity_info.parsing_errors = result
+                        .integrity_info
+                        .parsing_errors
+                        .saturating_add(parse_result.metadata.records_processed);
+                }
+
                 // Check for empty documents
                 let empty_docs = documents.iter().filter(|d| d.data.is_empty()).count();
                 if empty_docs > 0 {
                     quality_errors.push(format!("Found {} empty documents", empty_docs));
                 }
-                
-                // Check for documents with missing required fields
-                // This would be more sophisticated in a real implementation
-                
+
                 if !quality_errors.is_empty() {
+                    result.is_valid = false;
                     result.errors.extend(quality_errors);
                     if result.errors.len() > max_errors {
                         result.errors.truncate(max_errors);

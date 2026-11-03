@@ -280,6 +280,51 @@ async fn continue_on_error_imports_the_remaining_rows() {
     drop_table(&importer, &collection).await;
 }
 
+/// Managed LevelDB export → parse → analyze → import in one CLI run.
+///
+/// SAK-141 closed the read path and SAK-142/143 closed import/DDL; this is the
+/// remaining combination called out under "Not yet assessed" in PROJECT_STATUS.
+#[tokio::test]
+async fn cli_import_managed_export_fixture_into_postgres() {
+    let Some(url) = test_url() else { return };
+    initialize_monitoring(MonitoringConfig::default());
+
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/export-onestore");
+    assert!(
+        fixture.is_dir(),
+        "managed-export fixture missing at {}",
+        fixture.display()
+    );
+
+    // Drop fixture tables if a prior run left them behind.
+    let importer = connect(&url).await;
+    for table in ["Users", "Orders"] {
+        drop_table(&importer, table).await;
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fireup"))
+        .args(["import", "-b"])
+        .arg(&fixture)
+        .args(["-p", &url, "--drop-existing"])
+        .output()
+        .expect("run fireup import against managed export");
+
+    assert!(
+        output.status.success(),
+        "managed-export import failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Fixture has 5 Users + 7 Orders (see tests/fixtures/README.md).
+    assert_eq!(row_count(&importer, "Users").await, 5, "Users rows");
+    assert_eq!(row_count(&importer, "Orders").await, 7, "Orders rows");
+
+    for table in ["Users", "Orders"] {
+        drop_table(&importer, table).await;
+    }
+}
+
 /// A connection string that cannot be honoured must fail, not fall back to some
 /// other target. Before SAK-142 the URL was discarded entirely.
 #[tokio::test]
