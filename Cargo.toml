@@ -45,6 +45,10 @@ sqlparser = "0.39"
 # Monitoring and metrics
 once_cell = "1.19"
 
+# Protocol Buffers (Datastore / Firestore entity wire format)
+prost = "0.12"
+prost-types = "0.12"
+
 [build-dependencies]
 # Protocol Buffer compilation
 protoc-bin-vendored = "3.2"
