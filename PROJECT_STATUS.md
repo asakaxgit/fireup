@@ -413,6 +413,33 @@ see the "Session claims vs account claims" section in `docs/local/README.md`.
 The lesson generalises: a passing test count proves self-consistency, not
 compatibility.
 
+**Phase 3 (SAK-166)** — the Datastore API over the same rows. See
+`docs/local/README.md#datastore-rpcs-phase-3`.
+
+**Phase 4 (SAK-167, November 4 2026)** — the migrator and the local data plane
+documented and demonstrated as one workflow:
+
+- `docs/local/END_TO_END.md` — export → `fireup import` (normalized SQL) →
+  `fireup local seed` (documents) → official SDK reads and writes → SQL over the
+  same PostgreSQL database, with the fidelity gaps stated.
+- `scripts/demo-export-to-sql.sh` plus `demo/read-with-sdk.mjs` and
+  `demo/query.sql` — that document, executable and re-runnable. Verified on the
+  `export-onestore` fixture: 12/12 entities import into `"Users"`/`"Orders"`,
+  the same 12 seed as documents, `@google-cloud/firestore` and
+  `@google-cloud/datastore` read and write them, and SQL sees the SDK's write.
+- `README.md` positioning: Postgres-backed local data plane **plus** export
+  migrator, not a general GCP emulator; complements a full local-cloud suite
+  rather than replacing it; independent implementation of public Google API
+  contracts, not affiliated with Google.
+
+**One documentation correction landed with it.** The seeding note previously
+claimed the export parser erases Firestore value types to plain strings. It does
+not: it emits a tagged map (`__fireup_type__`), which `fireup import` already
+consumes to pick `bytea`/`timestamptz`/`point`/`text`. `fireup local seed`
+ignores the tag, so that — not the parser — is where blobs, timestamps, geo
+points, and key references lose their type. Tracked as fidelity work; no
+behaviour changed in Phase 4.
+
 ---
 
 ## Dependencies & Environment
@@ -449,10 +476,14 @@ chrono = "0.4"                   # Date/time handling
 ### Available Documentation ✅
 
 #### User Documentation
-- **README.md** - Comprehensive project overview, quick start, and usage examples
+- **README.md** - Project overview and positioning, quick start, usage examples
+- **docs/local/END_TO_END.md** - The export → SQL → live API → SQL workflow
+- **docs/local/README.md** - `fireup local`: flags, fidelity matrix, auth surface, storage layout
 - **DEPLOYMENT.md** - Detailed deployment guide for development and production
 - **docs/INTEGRATION_TESTING.md** - Integration testing procedures
 - **tests/DEPLOYMENT_TESTING.md** - Deployment testing documentation
+- **docs/licenses/FIREBASE_GCP_LOCAL.md** - Licence and attribution ledger
+- **tests/fixtures/README.md** - Managed-export fixtures and their binary format
 
 #### Developer Documentation
 - **.kiro/specs/firestore-postgres-migration/requirements.md** - Complete requirements

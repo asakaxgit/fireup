@@ -9,6 +9,10 @@ or PostgreSQL document store (kinds map to collections). Auth accounts live in a
 separate store. The [fidelity matrix](#fidelity-matrix) says exactly what is
 served and what is refused.
 
+For the workflow that joins this to the migrator — a managed export becoming
+normalized SQL tables *and* a live Firestore API on one PostgreSQL database —
+see [`END_TO_END.md`](END_TO_END.md), or run it:
+`scripts/demo-export-to-sql.sh`.
 
 This is an independent implementation of public API contracts. It is **not** the
 Firebase Emulator Suite, is **not** affiliated with Google, and contains no code
@@ -111,10 +115,18 @@ a complete one from the outside, so it is not reported as success.
 
 Two limits worth knowing:
 
-- The shared export parser erases Firestore value types on the way in
-  (`{"timestampValue": …}` becomes a plain JSON string). Seeding therefore
-  infers types from JSON and cannot restore `timestampValue`, `bytesValue`,
-  `geoPointValue` or `referenceValue`. Nothing is guessed from a string's shape.
+- **Seeding does not restore four Firestore value types.** The shared export
+  parser decodes a Datastore blob, timestamp, geo point, or key reference into a
+  *tagged map* — `{"__fireup_type__": "timestamp", "rfc3339": "…"}`, the tags
+  defined in [`src/types.rs`](../../src/types.rs) — because JSON has no native
+  form for them. `fireup import` consumes those tags and maps them onto
+  `bytea`, `timestamptz`, `point`, and `text`. Seeding does not: it infers a
+  Firestore value type from the JSON it is handed, so those four seed as a
+  `mapValue` and an SDK reads a map rather than a
+  `Timestamp`/`Bytes`/`GeoPoint`/`DocumentReference`. Nothing is guessed from a
+  string's shape. The tag is still in the row, so this is a gap in seeding
+  rather than lost information — see
+  [`END_TO_END.md`](END_TO_END.md#the-fidelity-gap-this-workflow-has).
 - Datastore entities in a non-default **namespace** are skipped, not merged:
   two namespaces can hold the same key path, and mapping both onto one document
   name would silently overwrite data.
@@ -503,6 +515,7 @@ Two layers, because they prove different things:
 # Fast: drives the server over real gRPC and real HTTP/1.1.
 cargo test --test local_firestore_tests
 cargo test --test local_datastore_tests
+cargo test --test local_auth_tests
 cargo test --lib local::
 
 # Durable stores. Skip unless a dedicated test database is configured.
@@ -510,26 +523,15 @@ FIREUP_TEST_POSTGRES_URL=postgresql://fireup:pw@127.0.0.1:5433/fireup_dev \
   cargo test --test local_postgres_store_tests --test local_auth_postgres_tests
 
 # Slow but conclusive: drives it with Google's official client libraries.
-cargo test --test local_firestore_tests
-cargo test --test local_datastore_tests
-cargo test --test local_auth_tests
-cargo test --lib local::
-
-# Durable store. Skips unless a dedicated test database is configured.
-FIREUP_TEST_POSTGRES_URL=postgresql://fireup:pw@127.0.0.1:5433/fireup_dev \
-  cargo test --test local_postgres_store_tests
-
-# Slow but conclusive: drives it with Google's official client libraries.
 scripts/smoke-local-firestore.sh
 scripts/smoke-local-datastore.sh
 scripts/smoke-local-auth.sh
 ```
 
-```
-
-Both smoke scripts build the binary, start the server on a free port, run the
-Node test, and stop the server. They need network access the first time, to
-`npm install` into `tests/local-smoke/`.
+Each smoke script builds the binary, starts the server on a free port, runs its
+Node test, and stops the server. They need network access the first time, to
+`npm install` into `tests/local-smoke/` (Firestore and Auth) and
+`tests/local-smoke-datastore/`.
 
 Each store trait has one contract that both of its implementations must satisfy:
 `store::conformance` for documents and `auth::store::conformance` for accounts.
@@ -557,10 +559,6 @@ test suite would not have found either.
 Never point `FIREUP_TEST_POSTGRES_URL` at a database or role you do not own; the
 shared guard in `tests/postgres_test_env.rs` refuses the host Paperclip role and
 database, and the tests skip rather than fall back when no URL is set.
-
-The smoke script builds fireup, starts `fireup local`, runs
-`tests/local-smoke/smoke.mjs` against it with `@google-cloud/firestore`, and
-tears the server down. It needs network access the first time to `npm install`.
 
 The Rust tests can pass while the SDK test fails — the SDK picks its own RPCs
 (`.get()` goes to `BatchGetDocuments`, `.set()` goes to `Commit`, a query goes to

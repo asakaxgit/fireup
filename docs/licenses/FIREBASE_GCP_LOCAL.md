@@ -1,6 +1,6 @@
 # Fireup — Firebase / GCP local & API license ledger
 
-**Status:** current as of Phase 3 (SAK-166) — Datastore API on shared store; Phase L (SAK-168) Auth also landed
+**Status:** current as of Phase 4 (SAK-167) — glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth landed before it
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -44,8 +44,8 @@ and nothing here was obtained by decompiling or analysing a binary.
 | `tonic-build` | 0.11 | MIT | [crates.io](https://crates.io/crates/tonic-build) | build-time service codegen from the public protos | Yes | Same line as `tonic` |
 | `tokio-stream` | 0.1 (`net`) | MIT | [crates.io](https://crates.io/crates/tokio-stream) | `ReceiverStream` for handing multiplexed connections to tonic and for server streaming | Yes | Public OSS |
 | `async-trait` | 0.1 | MIT OR Apache-2.0 | [crates.io](https://crates.io/crates/async-trait) | async methods on the `Store` trait (`src/local/store.rs`) | Yes (crate license) | Public OSS. Added in Phase 1 as a **direct** dependency; it was already in the tree via `tonic`, so no new third-party code enters the build. |
-| `@google-cloud/firestore` (npm, **test-only**) | ^7.11.0 | Apache-2.0 | [npm](https://www.npmjs.com/package/@google-cloud/firestore) | `tests/local-smoke/` SDK smoke test only; never linked or redistributed | Yes | Google's own *open-source* client library, used as a client against our server — the documented, non-RE way to verify API compatibility. Not vendored; installed on demand by `scripts/smoke-local-firestore.sh`. |
-| `@google-cloud/datastore` (npm, **test-only**) | ^9.2.1 | Apache-2.0 | [npm](https://www.npmjs.com/package/@google-cloud/datastore) | `tests/local-smoke-datastore/` SDK smoke test only; never linked or redistributed | Yes | Same rationale as the Firestore smoke client. Installed on demand by `scripts/smoke-local-datastore.sh`. |
+| `@google-cloud/firestore` (npm, **test- and demo-only**) | ^7.11.0 | Apache-2.0 | [npm](https://www.npmjs.com/package/@google-cloud/firestore) | `tests/local-smoke/` SDK smoke test and `demo/` (Phase 4); never linked or redistributed | Yes | Google's own *open-source* client library, used as a client against our server — the documented, non-RE way to verify API compatibility. Not vendored; installed on demand by `scripts/smoke-local-firestore.sh` and `scripts/demo-export-to-sql.sh`. |
+| `@google-cloud/datastore` (npm, **test- and demo-only**) | ^9.2.1 | Apache-2.0 | [npm](https://www.npmjs.com/package/@google-cloud/datastore) | `tests/local-smoke-datastore/` SDK smoke test and `demo/` (Phase 4); never linked or redistributed | Yes | Same rationale as the Firestore smoke client. Installed on demand by `scripts/smoke-local-datastore.sh` and `scripts/demo-export-to-sql.sh`. |
 | `base64` | 0.22 | MIT OR Apache-2.0 | [crates.io](https://crates.io/crates/base64) | base64url JWT segments and base64 password digests in `src/local/auth/` | Yes (crate license) | Public OSS, not Google code. Added in Phase L as a **direct** dependency; it was already in the tree transitively, so no new third-party code enters the build. |
 | `sha2` | 0.11 | MIT OR Apache-2.0 | [crates.io](https://crates.io/crates/sha2) | salted SHA-256 password digests for locally stored accounts (`src/local/auth/user.rs`) | Yes (crate license) | Public OSS (RustCrypto), not Google code. Already in the tree transitively. Chosen over hand-rolling a hash; **not** a production password-storage scheme — see the Phase L notes below. |
 | `firebase-admin` (npm, **test-only**) | ^13.0.0 | Apache-2.0 | [npm](https://www.npmjs.com/package/firebase-admin) · [source](https://github.com/firebase/firebase-admin-node) | `tests/local-smoke/auth-smoke.mjs` only — drives the privileged auth surface over `FIREBASE_AUTH_EMULATOR_HOST`; never linked or redistributed | Yes | Google's own *open-source* Admin SDK, used as a client against our server. Same precedent as `@google-cloud/firestore`: the documented, non-RE way to verify API compatibility, and explicitly permitted by `.cursor/rules/firebase-gcp-compliance.mdc`. Not vendored; installed on demand by `scripts/smoke-local-auth.sh`. |
@@ -193,6 +193,41 @@ export-seed path Fireup already owned.
 - GQL, aggregations, projection queries, cursors, property transforms, and
   nested property masks answer `UNIMPLEMENTED`.
 
+### Phase 4 (SAK-167) notes — glue docs and the end-to-end demo
+
+**No new Google or Firebase artefact, no new proto, no new Rust dependency, and
+no new npm package.** The proto pin is unchanged at googleapis `57aa4dbc`. The
+phase adds documentation (`docs/local/END_TO_END.md`, README positioning) and a
+demo (`scripts/demo-export-to-sql.sh`, `demo/`).
+
+`demo/package.json` declares `@google-cloud/firestore` and
+`@google-cloud/datastore` at the same version ranges the smoke tests already
+use, re-scoped in the rows above. They remain Google's own Apache-2.0
+**client** libraries, installed on demand, used only to drive our server, and
+never vendored, linked, or redistributed. No new third-party code enters the
+build; the demo is not part of the Rust build at all.
+
+#### Positioning claims introduced in this phase
+
+The compliance rule governs what the project may claim, so the new README
+positioning is recorded here rather than left to marketing:
+
+| Claim | Basis |
+|---|---|
+| "Independent implementation of public Google API contracts" | Already the standing claim; repeated verbatim in `README.md`, `docs/local/README.md`, and the `GET /` discovery document |
+| "Not the Firebase Emulator Suite, not affiliated with or endorsed by Google" | Required by the rule; now stated in the top-level `README.md` too, which previously said nothing about the local data plane at all |
+| "Complements floci-gcp rather than replacing it" | A statement about Fireup's own scope — deep on export fidelity and SQL, not wide on the cloud surface. No claim is made about floci-gcp's internals, licence, or behaviour, and nothing of theirs was inspected, vendored, or copied. The port choice (`4589`, beside their `4588`) is a collision-avoidance decision, documented in `docs/local/README.md`. |
+| "Auth tokens are unsigned; no Google key material ships" | Phase L notes above; unchanged |
+
+**Documentation correction made in this phase.** The previous seeding note in
+`docs/local/README.md` said the export parser "erases Firestore value types …
+`{"timestampValue": …}` becomes a plain JSON string". That was wrong about our
+own first-party parser: it emits a *tagged map* (`__fireup_type__`, defined in
+`src/types.rs`) which `fireup import` consumes to pick `bytea`/`timestamptz`/
+`point`/`text`. `fireup local seed` ignores the tag, which is the actual gap.
+Both that file and `src/local/seed.rs` now describe the real behaviour. No code
+behaviour changed.
+
 ## Existing Fireup notes (pre-local-cloud)
 
 | Dependency | Version / pin | SPDX | Upstream | How we use it | Attribution OK? | Decision |
@@ -205,13 +240,13 @@ export-seed path Fireup already owned.
 The PR checklist in `.cursor/rules/firebase-gcp-compliance.mdc`, answered as each
 phase landed.
 
-| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) |
-|---|---|---|---|
-| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` |
-| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) |
-| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated/OOB → `501` | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` |
-| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes |
-| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a |
+| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) |
+|---|---|---|---|---|
+| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected |
+| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` |
+| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated/OOB → `501` | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden |
+| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none |
+| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added |
 
 ## How to add a row
 
