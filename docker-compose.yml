@@ -36,6 +36,53 @@ services:
         reservations:
           memory: 256M
 
+  # `fireup local` — the Firestore-compatible data plane, storing documents in
+  # the Postgres service above so they survive `docker compose restart`.
+  #
+  # One port: gRPC (HTTP/2) and the HTTP/1.1 health + discovery routes share it.
+  fireup-local:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fireup:local
+    container_name: fireup_local
+    command:
+      - local
+      # Containers need a reachable bind address; the loopback default would
+      # only be visible from inside the container.
+      - --host=0.0.0.0
+      - --port=4589
+      - --postgres-url=postgresql://${POSTGRES_USER:-fireup}:${POSTGRES_PASSWORD:-fireup_dev_password}@postgres:5432/${POSTGRES_DB:-fireup_dev}
+      - --project-id=${FIREUP_LOCAL_PROJECT_ID:-fireup-local}
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "${FIREUP_LOCAL_PORT:-4589}:4589"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - fireup_network
+    # Asks the server the same question a client would, over the real port, and
+    # the answer depends on the database being reachable. No curl in the image,
+    # so this uses bash's /dev/tcp.
+    # `bash` explicitly, not CMD-SHELL: /dev/tcp is a bash feature and the
+    # image's /bin/sh is dash.
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/4589 &&
+          printf 'GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          head -n 1 <&3 | grep -q '200'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   postgres_data:
     driver: local

@@ -41,9 +41,9 @@ fn fields<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
 
 /// Start a server on an OS-assigned port and return a connected client.
 async fn start() -> (local::RunningServer, FirestoreClient<Channel>) {
-    let server = local::spawn("127.0.0.1:0".parse().expect("valid bind address"))
-        .await
-        .expect("server binds");
+    let config =
+        local::LocalConfig::in_memory("127.0.0.1:0".parse().expect("valid bind address"));
+    let server = local::spawn(config).await.expect("server binds");
     let client = FirestoreClient::connect(format!("http://{}", server.addr))
         .await
         .expect("client connects to the bound port");
@@ -417,7 +417,7 @@ async fn delete_document_is_idempotent() {
             .unwrap_or_else(|e| panic!("delete attempt {attempt} should succeed: {e}"));
     }
 
-    assert!(server.store.is_empty());
+    assert_eq!(server.store.count().await.expect("count"), 0);
     server.shutdown().await.expect("clean shutdown");
 }
 
@@ -431,7 +431,7 @@ async fn unserved_rpcs_answer_unimplemented_rather_than_hanging() {
             ..Default::default()
         })
         .await
-        .expect_err("RunQuery is out of Phase 0 scope");
+        .expect_err("RunQuery is out of Phase 1 scope");
 
     assert_eq!(status.code(), Code::Unimplemented);
     assert!(
@@ -439,6 +439,85 @@ async fn unserved_rpcs_answer_unimplemented_rather_than_hanging() {
         "the status should say who refused and why: {}",
         status.message()
     );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// Send a raw HTTP/1.1 request to the server's port and return (status line, body).
+async fn http_get(addr: std::net::SocketAddr, path: &str) -> (String, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect to the server port");
+    stream
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n").as_bytes())
+        .await
+        .expect("write request");
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .await
+        .expect("read response");
+
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("malformed response: {response:?}"));
+    let status_line = head.lines().next().expect("status line").to_string();
+    (status_line, body.to_string())
+}
+
+#[tokio::test]
+async fn one_port_serves_both_grpc_and_the_http_surface() {
+    let (server, mut client) = start().await;
+
+    // gRPC first, so the HTTP request below is not just talking to an idle port.
+    client
+        .create_document(CreateDocumentRequest {
+            parent: ROOT.to_string(),
+            collection_id: "users".to_string(),
+            document_id: "alice".to_string(),
+            document: Some(Document {
+                fields: fields([("email", string_value("alice@example.com"))]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("create over gRPC succeeds");
+
+    let (status, body) = http_get(server.addr, "/health").await;
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    let health: serde_json::Value = serde_json::from_str(&body).expect("health body is JSON");
+    assert_eq!(health["status"], "ok");
+    assert_eq!(
+        health["storage"]["documents"], 1,
+        "health must report what the store actually holds: {body}"
+    );
+
+    let (status, body) = http_get(server.addr, "/").await;
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("discovery body is JSON");
+    assert_eq!(discovery["services"][0]["id"], "firestore");
+    assert_eq!(
+        discovery["services"][0]["api"], "google.firestore.v1.Firestore",
+        "discovery must name the API a client can call: {body}"
+    );
+    assert_eq!(discovery["storage"]["backend"], "memory");
+    assert_eq!(discovery["storage"]["durable"], false);
+
+    // The same connection path must still serve gRPC afterwards.
+    client
+        .get_document(GetDocumentRequest {
+            name: format!("{ROOT}/users/alice"),
+            ..Default::default()
+        })
+        .await
+        .expect("gRPC still works after HTTP requests");
+
+    let (status, _) = http_get(server.addr, "/not-a-route").await;
+    assert!(status.starts_with("HTTP/1.1 404"), "{status}");
 
     server.shutdown().await.expect("clean shutdown");
 }
