@@ -1,0 +1,29 @@
+---
+description: No reverse-engineering Firebase/Google proprietary code; keep a correct license ledger for GCP/Firebase-related deps
+alwaysApply: true
+---
+
+# Firebase / GCP compliance (Fireup project rule)
+
+Hard project rule for all Fireup work (migrator and local data plane).
+
+## No reverse-engineering
+
+**Allowed:** public Google API docs; public protobuf/OpenAPI from `googleapis/googleapis`; documented emulator env vars (`FIRESTORE_EMULATOR_HOST`, etc.); open wire formats (gRPC, protobuf); Fireup first-party code.
+
+**Forbidden:** decompile/disassemble/binary-analyze Google Firebase Emulator Suite, Cloud SDK closed components, or other proprietary Google/Firebase binaries; copy proprietary emulator source/assets that are not explicitly open-licensed; reconstruct undocumented closed behavior. If undocumented → defer or mark unsupported in the fidelity matrix.
+
+SDK-compatible means speaking the **published** API surface for official clients — not cloning Google emulator internals.
+
+## License recordkeeping
+
+Keep `docs/licenses/FIREBASE_GCP_LOCAL.md` current on every PR that adds Google/Firebase-related code or protos (crate/path, version, SPDX, upstream URL/commit, use, attribution, decision).
+
+Prefer Apache-2.0 / MIT public definitions. Generate stubs from public `.proto` via prost/tonic — do not vendor proprietary Java/Go emulator code. Do not strip copyright headers. Do not claim “official Firebase emulator” or Google affiliation.
+
+## PR checklist
+
+- [ ] No RE of proprietary binaries
+- [ ] New deps/protos logged in the license ledger
+- [ ] Undocumented behaviors deferred / listed unsupported
+- [ ] Independent-implementation blurb preserved where relevant
