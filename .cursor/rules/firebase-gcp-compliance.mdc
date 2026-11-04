@@ -9,11 +9,19 @@ Hard project rule for all Fireup work (migrator and local data plane).
 
 ## No reverse-engineering
 
-**Allowed:** public Google API docs; public protobuf/OpenAPI from `googleapis/googleapis`; documented emulator env vars (`FIRESTORE_EMULATOR_HOST`, etc.); open wire formats (gRPC, protobuf); Fireup first-party code.
+**Allowed:** public Google API docs; public protobuf/OpenAPI from `googleapis/googleapis`; documented emulator env vars (`FIRESTORE_EMULATOR_HOST`, `FIREBASE_AUTH_EMULATOR_HOST`, etc.) and the documented emulator REST control endpoints; open wire formats (gRPC, protobuf, REST/JSON, JWT); reading Google's own **open-source** (Apache-2.0) client libraries to learn what a client expects; Fireup first-party code.
 
 **Forbidden:** decompile/disassemble/binary-analyze Google Firebase Emulator Suite, Cloud SDK closed components, or other proprietary Google/Firebase binaries; copy proprietary emulator source/assets that are not explicitly open-licensed; reconstruct undocumented closed behavior. If undocumented → defer or mark unsupported in the fidelity matrix.
 
 SDK-compatible means speaking the **published** API surface for official clients — not cloning Google emulator internals.
+
+Where a contract is REST/JSON rather than protobuf there is no stub to generate; implement from the published reference and record *which* public sources were used in the ledger, since no pinned artefact stands as the evidence.
+
+## No production key material
+
+Never generate, vendor, or ship signing keys, certificates, or API keys for a Google service, and never imitate production key material. Local token minting uses the unsigned form that open-source SDKs accept in emulator mode. Say so in the code, the CLI help, and the startup output: an unsigned token means anything that can reach the port can act as any principal.
+
+Local-only credential storage (e.g. passwords) must not be plaintext at rest, and must not be presented as a production-grade scheme if it is not one.
 
 ## License recordkeeping
 
@@ -25,5 +33,9 @@ Prefer Apache-2.0 / MIT public definitions. Generate stubs from public `.proto` 
 
 - [ ] No RE of proprietary binaries
 - [ ] New deps/protos logged in the license ledger
+- [ ] For a REST/JSON surface: the public sources it was written from are named in the ledger
 - [ ] Undocumented behaviors deferred / listed unsupported
+- [ ] No production key material added or imitated
 - [ ] Independent-implementation blurb preserved where relevant
+
+Answer this checklist per phase in the table at the end of `docs/licenses/FIREBASE_GCP_LOCAL.md`, so the record is auditable after the PR is merged.

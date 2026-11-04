@@ -58,6 +58,14 @@ tokio-stream = { version = "0.1", features = ["net"] }
 # declared directly because `src/local/store.rs` uses it.
 async-trait = "0.1"
 
+# JWT segment encoding for `fireup local`'s auth surface (`src/local/auth`).
+# Already in the tree transitively, so declaring it adds no new third-party code.
+base64 = "0.22"
+
+# Salted password digests for locally stored accounts. See the warning on
+# `src/local/auth/user.rs::PasswordHash`: local development only.
+sha2 = "0.11"
+
 [build-dependencies]
 # Protocol Buffer compilation
 protoc-bin-vendored = "3.2"
@@ -102,3 +110,11 @@ path = "tests/local_datastore_tests.rs"
 [[test]]
 name = "local_postgres_store_tests"
 path = "tests/local_postgres_store_tests.rs"
+
+[[test]]
+name = "local_auth_tests"
+path = "tests/local_auth_tests.rs"
+
+[[test]]
+name = "local_auth_postgres_tests"
+path = "tests/local_auth_postgres_tests.rs"

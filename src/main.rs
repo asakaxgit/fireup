@@ -182,12 +182,24 @@ enum Commands {
         max_errors: usize,
     },
 
-    /// Run a local Firestore- and Datastore-compatible server for official client SDKs
-    #[command(long_about = "Serve the public google.firestore.v1 and google.datastore.v1 gRPC APIs on a single local port so official client SDKs can talk to Fireup via the documented FIRESTORE_EMULATOR_HOST and DATASTORE_EMULATOR_HOST environment variables. The same port answers HTTP GET / (service discovery) and GET /health.
+    /// Run a local Firestore-, Datastore-, and Firebase-Auth-compatible server
+    #[command(long_about = "Serve the public google.firestore.v1 and google.datastore.v1 gRPC APIs plus a subset of the public Identity Toolkit (Firebase Auth) REST API on a single local port, so official client SDKs can talk to Fireup via the documented FIRESTORE_EMULATOR_HOST, DATASTORE_EMULATOR_HOST, and FIREBASE_AUTH_EMULATOR_HOST environment variables. The same port answers HTTP GET / (service discovery) and GET /health.
+
+    export FIRESTORE_EMULATOR_HOST=127.0.0.1:4589
+    export DATASTORE_EMULATOR_HOST=127.0.0.1:4589
+    export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:4589
 
 This is an independent implementation of Google's published APIs. It is not the Firebase Emulator Suite and is not affiliated with Google.
 
-Phase 3 serves Firestore CRUD/query/transactions and Datastore Lookup/RunQuery/Commit/BeginTransaction/AllocateIds against the same in-memory or PostgreSQL store. Realtime listeners, GQL, aggregations, and field transforms return UNIMPLEMENTED.")]
+FIRESTORE: document CRUD, StructuredQuery, collection listings, and transactions. Realtime listeners, field transforms, and aggregations return UNIMPLEMENTED.
+
+DATASTORE: Lookup, RunQuery, Commit, BeginTransaction, AllocateIds on the same store as Firestore (kinds map to collections). GQL, aggregations, namespaces, and property transforms return UNIMPLEMENTED.
+
+AUTH: email/password sign-up and sign-in, anonymous sign-in, custom-token sign-in, token refresh, and admin account CRUD. Phone auth, multi-factor enrolment, federated providers, and out-of-band email flows are not served.
+
+Storage is in-memory unless --postgres-url is given, in which case documents and accounts are stored in PostgreSQL and survive a restart.
+
+LOCAL DEVELOPMENT ONLY: the auth surface mints unsigned ID tokens and checks no API key or admin credential, so anything that can reach the port can act as any account. The default bind is loopback; keep it that way.")]
     Local {
         #[command(subcommand)]
         command: Option<LocalCommands>,
@@ -200,8 +212,9 @@ Phase 3 serves Firestore CRUD/query/transactions and Datastore Lookup/RunQuery/C
         #[arg(short, long, default_value_t = local::DEFAULT_PORT, global = true)]
         port: u16,
 
-        /// Store documents in PostgreSQL instead of memory, so they survive a
-        /// restart (format: postgresql://user:password@host:port/database)
+        /// Store documents and auth accounts in PostgreSQL instead of memory,
+        /// so they survive a restart
+        /// (format: postgresql://user:password@host:port/database)
         #[arg(long, value_name = "URL", global = true)]
         postgres_url: Option<String>,
 
@@ -215,11 +228,15 @@ Phase 3 serves Firestore CRUD/query/transactions and Datastore Lookup/RunQuery/C
         #[arg(long, default_value = local::LocalConfig::DEFAULT_DATABASE_ID, global = true)]
         database_id: String,
 
-        /// Services to enable (repeatable)
+        /// Services to enable (repeatable); all three are on by default
         #[arg(
             long = "enable",
             value_enum,
-            default_values_t = [local::Service::Firestore, local::Service::Datastore],
+            default_values_t = [
+                local::Service::Firestore,
+                local::Service::Datastore,
+                local::Service::Auth,
+            ],
             global = true
         )]
         enable: Vec<local::Service>,

@@ -36,10 +36,19 @@ services:
         reservations:
           memory: 256M
 
-  # `fireup local` — the Firestore-compatible data plane, storing documents in
-  # the Postgres service above so they survive `docker compose restart`.
+  # `fireup local` — the Firestore- and Firebase-Auth-compatible data plane,
+  # storing documents and accounts in the Postgres service above so they survive
+  # `docker compose restart`.
   #
-  # One port: gRPC (HTTP/2) and the HTTP/1.1 health + discovery routes share it.
+  # One port carries all of it: Firestore gRPC (HTTP/2), the Identity Toolkit
+  # REST surface, and the HTTP/1.1 health + discovery routes. Point SDKs at it
+  # with both documented variables:
+  #
+  #   export FIRESTORE_EMULATOR_HOST=127.0.0.1:4589
+  #   export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:4589
+  #
+  # Local development only: the auth surface mints unsigned tokens and checks no
+  # credential. Do not publish this port beyond a development machine.
   fireup-local:
     build:
       context: .

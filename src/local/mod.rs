@@ -1,10 +1,12 @@
-//! `fireup local` — a local Firestore- and Datastore-compatible data plane.
+//! `fireup local` — a local Firestore-, Datastore-, and Auth-compatible data plane.
 //!
 //! Fireup serves the **published** `google.firestore.v1` and
-//! `google.datastore.v1` gRPC contracts on a single port so official client
-//! SDKs can point at it with the documented `FIRESTORE_EMULATOR_HOST` and
-//! `DATASTORE_EMULATOR_HOST` environment variables. The same port answers
-//! HTTP/1.1 `GET /` (service discovery) and `GET /health`.
+//! `google.datastore.v1` gRPC contracts plus a subset of the **published**
+//! Identity Toolkit REST contract on a single port, so official client SDKs can
+//! point at it with the documented `FIRESTORE_EMULATOR_HOST`,
+//! `DATASTORE_EMULATOR_HOST`, and `FIREBASE_AUTH_EMULATOR_HOST` environment
+//! variables. The same port answers HTTP/1.1 `GET /` (service discovery) and
+//! `GET /health`.
 //!
 //! This is an independent implementation of public APIs. It is not the Firebase
 //! Emulator Suite, is not affiliated with Google, and contains no code or
@@ -12,12 +14,22 @@
 //! `.cursor/rules/firebase-gcp-compliance.mdc` and
 //! `docs/licenses/FIREBASE_GCP_LOCAL.md`.
 //!
-//! Phase 3 adds Datastore Lookup/RunQuery/Commit/BeginTransaction/AllocateIds
-//! on the same Postgres (or in-memory) store Firestore uses. Realtime
-//! listeners, field transforms, GQL, and aggregation queries are not served;
-//! those RPCs answer `UNIMPLEMENTED` with a message saying so, and
-//! `docs/local/README.md` has the full fidelity matrix.
+//! Current scope:
+//!
+//! * **Firestore** — document CRUD, `StructuredQuery` reads, collection
+//!   listings, and transactional writes against an in-memory **or PostgreSQL**
+//!   store, plus seeding from a managed export. Realtime listeners, field
+//!   transforms, and aggregation queries are not served; those RPCs answer
+//!   `UNIMPLEMENTED` with a message saying so, and `docs/local/README.md` has
+//!   the full fidelity matrix.
+//! * **Datastore** — Lookup/RunQuery/Commit/BeginTransaction/AllocateIds on the
+//!   same store Firestore uses (kinds map to collections). GQL, aggregations,
+//!   namespaces, and property transforms answer `UNIMPLEMENTED`.
+//! * **Auth** — email/password and anonymous sign-in, emulator-style ID tokens,
+//!   token refresh, and admin account CRUD. See [`auth`] for what is and is not
+//!   served.
 
+pub mod auth;
 pub mod config;
 pub mod datastore;
 pub mod entity_map;
@@ -37,6 +49,7 @@ use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
 
+pub use auth::{AuthApi, MemoryUserStore, PostgresUserStore, SharedUserStore, UserStore};
 pub use config::{LocalConfig, Service, DEFAULT_PORT};
 pub use datastore::DatastoreApi;
 pub use firestore::FirestoreApi;
@@ -59,6 +72,9 @@ pub struct RunningServer {
     pub addr: std::net::SocketAddr,
     /// Shared store, so callers (and tests) can inspect state directly.
     pub store: SharedStore,
+    /// Shared account store, for the same reason. Present even when the auth
+    /// service is disabled — it is just unreachable over HTTP then.
+    pub users: SharedUserStore,
     /// The configuration this server was started with.
     pub config: Arc<LocalConfig>,
     grpc: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
@@ -102,19 +118,50 @@ pub async fn build_store(config: &LocalConfig) -> Result<SharedStore> {
     }
 }
 
-/// Bind and start serving in background tasks, using `config`'s store.
+/// Build the account store this configuration asks for.
+///
+/// Follows `--postgres-url` for the same reason the document store does: a
+/// developer who asked for durable documents did not ask for accounts that
+/// vanish on restart. Built even when the auth service is disabled, so enabling
+/// it later finds the accounts that were already there.
+pub async fn build_user_store(config: &LocalConfig) -> Result<SharedUserStore> {
+    match &config.postgres_url {
+        Some(url) => PostgresUserStore::connect_shared(url, config.max_connections)
+            .await
+            .context(
+                "failed to open the PostgreSQL account store; \
+                 fix --postgres-url or omit it to run in memory",
+            ),
+        None => Ok(Arc::new(MemoryUserStore::new())),
+    }
+}
+
+/// Bind and start serving in background tasks, using `config`'s stores.
 ///
 /// Binding happens before returning so a caller (or a test) knows the port is
 /// live and can connect without polling.
 pub async fn spawn(config: LocalConfig) -> Result<RunningServer> {
     config.validate()?;
     let store = build_store(&config).await?;
-    spawn_with_store(config, store).await
+    let users = build_user_store(&config).await?;
+    spawn_with_stores(config, store, users).await
 }
 
-/// Same as [`spawn`], but with a store the caller already built. Used by tests
-/// and by anything that wants to inspect the store it handed over.
+/// Same as [`spawn`], but with a document store the caller already built.
+///
+/// Accounts go to a fresh in-memory store; use [`spawn_with_stores`] to supply
+/// both.
 pub async fn spawn_with_store(config: LocalConfig, store: SharedStore) -> Result<RunningServer> {
+    spawn_with_stores(config, store, Arc::new(MemoryUserStore::new())).await
+}
+
+/// Same as [`spawn`], but with both stores the caller already built. Used by
+/// tests and by anything that wants to inspect the state it handed over.
+pub async fn spawn_with_stores(
+    config: LocalConfig,
+    store: SharedStore,
+    users: SharedUserStore,
+) -> Result<RunningServer> {
     config.validate()?;
 
     let listener = TcpListener::bind(config.addr)
@@ -171,6 +218,11 @@ pub async fn spawn_with_store(config: LocalConfig, store: SharedStore) -> Result
         let state = Arc::new(http::HttpState {
             config: config.clone(),
             store: store.clone(),
+            // A disabled service has no handler at all, so it cannot be reached
+            // by a path that slipped past the routing table.
+            auth: config.enables(Service::Auth).then(|| {
+                Arc::new(AuthApi::new(config.clone(), users.clone()))
+            }),
         });
         let mut shutdown_rx = shutdown_rx.clone();
 
@@ -203,6 +255,7 @@ pub async fn spawn_with_store(config: LocalConfig, store: SharedStore) -> Result
     Ok(RunningServer {
         addr,
         store,
+        users,
         config,
         grpc,
         acceptor,
@@ -275,9 +328,9 @@ pub async fn serve(config: LocalConfig) -> Result<()> {
         "storage: {} ({})",
         server.store.backend(),
         if config.postgres_url.is_some() {
-            "durable — documents survive a restart"
+            "durable — documents and accounts survive a restart"
         } else {
-            "in-memory — documents are lost on exit"
+            "in-memory — documents and accounts are lost on exit"
         }
     );
     for service in &config.services {
@@ -287,6 +340,15 @@ pub async fn serve(config: LocalConfig) -> Result<()> {
             service.protocol(),
             service.client_env_var(),
             server.addr
+        );
+    }
+    if config.enables(Service::Auth) {
+        // Said out loud at startup, not only in the docs: the tokens this
+        // process mints are unsigned and anything that reaches the port can get
+        // one for any account.
+        warn!(
+            "the auth service is for local development only: ID tokens are unsigned and \
+             no API key or admin credential is checked"
         );
     }
     info!(

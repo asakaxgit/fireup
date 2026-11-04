@@ -13,16 +13,21 @@ pub const DEFAULT_PORT: u16 = 4589;
 
 /// A service the local process can expose.
 ///
-/// Phase 1 has one. The enum exists so `--enable` is a closed set from the
-/// start — a typo is a CLI error rather than a service that silently never
-/// starts — and so the discovery document grows a row, not a new shape, when
-/// Datastore lands.
+/// The enum exists so `--enable` is a closed set from the start — a typo is a
+/// CLI error rather than a service that silently never starts — and so the
+/// discovery document grows a row, not a new shape, when a surface lands.
+///
+/// Variant order matters: it is the order services appear in discovery, because
+/// [`LocalConfig::services`] is kept sorted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum Service {
     /// The `google.firestore.v1.Firestore` gRPC API.
     Firestore,
     /// The `google.datastore.v1.Datastore` gRPC API.
     Datastore,
+    /// The public Identity Toolkit REST API (Firebase Auth / Identity
+    /// Platform), served over HTTP/1.1 on the same port.
+    Auth,
 }
 
 impl Service {
@@ -30,14 +35,17 @@ impl Service {
         match self {
             Service::Firestore => "firestore",
             Service::Datastore => "datastore",
+            Service::Auth => "auth",
         }
     }
 
-    /// Fully-qualified gRPC service name served for this service.
+    /// Identifier of the public API surface served for this service: a
+    /// fully-qualified gRPC service name, or an API host for a REST surface.
     pub const fn api(self) -> &'static str {
         match self {
             Service::Firestore => "google.firestore.v1.Firestore",
             Service::Datastore => "google.datastore.v1.Datastore",
+            Service::Auth => "identitytoolkit.googleapis.com",
         }
     }
 
@@ -45,6 +53,7 @@ impl Service {
     pub const fn protocol(self) -> &'static str {
         match self {
             Service::Firestore | Service::Datastore => "grpc",
+            Service::Auth => "rest",
         }
     }
 
@@ -54,6 +63,7 @@ impl Service {
         match self {
             Service::Firestore => "FIRESTORE_EMULATOR_HOST",
             Service::Datastore => "DATASTORE_EMULATOR_HOST",
+            Service::Auth => "FIREBASE_AUTH_EMULATOR_HOST",
         }
     }
 }
@@ -96,7 +106,7 @@ impl LocalConfig {
             database_id: Self::DEFAULT_DATABASE_ID.to_string(),
             postgres_url: None,
             max_connections: Self::DEFAULT_MAX_CONNECTIONS,
-            services: vec![Service::Firestore, Service::Datastore],
+            services: vec![Service::Firestore, Service::Datastore, Service::Auth],
         }
     }
 
@@ -158,7 +168,8 @@ impl LocalConfig {
         }
         if self.services.is_empty() {
             anyhow::bail!(
-                "at least one service must be enabled (--enable firestore, --enable datastore)"
+                "at least one service must be enabled \
+                 (--enable firestore, --enable datastore, --enable auth)"
             );
         }
         if self.max_connections == 0 {
@@ -189,26 +200,42 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_in_memory_with_both_surfaces_enabled() {
+    fn defaults_are_in_memory_with_all_surfaces_enabled() {
         let config = config();
         assert!(config.postgres_url.is_none());
         assert!(config.enables(Service::Firestore));
         assert!(config.enables(Service::Datastore));
+        assert!(config.enables(Service::Auth));
         config.validate().expect("defaults must be valid");
     }
 
     #[test]
     fn every_service_names_the_env_var_its_sdks_read() {
-        for service in [Service::Firestore, Service::Datastore] {
+        // A service whose discovery row cannot tell a developer how to point an
+        // SDK at it is not usable, so each variant has to answer all three.
+        for service in [Service::Firestore, Service::Datastore, Service::Auth] {
             assert!(!service.id().is_empty());
             assert!(!service.api().is_empty());
-            assert_eq!(service.protocol(), "grpc");
             assert!(
                 service.client_env_var().ends_with("_EMULATOR_HOST"),
                 "{service}"
             );
         }
         assert_eq!(Service::Datastore.client_env_var(), "DATASTORE_EMULATOR_HOST");
+        assert_eq!(Service::Auth.client_env_var(), "FIREBASE_AUTH_EMULATOR_HOST");
+        assert_eq!(Service::Auth.protocol(), "rest");
+        assert_eq!(Service::Firestore.protocol(), "grpc");
+        assert_eq!(Service::Datastore.protocol(), "grpc");
+    }
+
+    #[test]
+    fn discovery_order_is_firestore_then_datastore_then_auth() {
+        let mut services = vec![Service::Auth, Service::Datastore, Service::Firestore];
+        services.sort();
+        assert_eq!(
+            services,
+            vec![Service::Firestore, Service::Datastore, Service::Auth]
+        );
     }
 
     #[test]
