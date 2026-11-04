@@ -45,6 +45,7 @@ cannot.
 | `tokens/brand.json` | **Master.** Colour, type scale, spacing, radii. |
 | `tokens/brand.css` | Generated. CSS custom properties, same values. |
 | `explore/` | The rendered directions that were considered, including the rejected ones. |
+| `tune/` | One sheet per tuning axis, for choosing between variants of the chosen direction. |
 | `../site/assets/` | Generated. Every variant, lockup, favicon, app icon and the social card. |
 
 Masters are hand-authored and are the only files to edit. Everything else is
@@ -68,6 +69,27 @@ npm run check      # smoke test the pipeline, verify contrast, rebuild all asset
   misses its WCAG AA threshold. Nothing is eyeballed.
 - `npm run build` regenerates `tokens/brand.css` and all of `site/assets/`.
 - `npm run explore` re-renders the exploration sheets.
+- `npm run tune` re-renders the four tuning sheets in `tune/`.
+
+`explore` and `tune` are deliberately outside `check`: they are the record of a
+decision, not shipped assets, and they should only change when the question
+being asked changes.
+
+## Choosing between variants
+
+`npm run tune` renders the four axes that can move without redrawing the
+direction — the ember colour, the gap between the lifted arm and the stem, the
+height the arm sits at, and the wordmark weight. Each sheet puts three options
+side by side at the sizes they will really be used at, and for the mark it also
+magnifies the **actual 16px raster** 8x with no resampling, so the decision is
+made on the pixels that land rather than on a smooth preview of them.
+
+Two of those sheets changed an opinion, which is the point of rendering them:
+
+- At a 4-unit counter the arm **fuses with the top bar at 16px** — the mark
+  stops being an F at the size it is used at most.
+- A heavier wordmark is *worse* small, not better: at stroke 11 the `e`'s
+  aperture and the `p`'s bowl close up by 96px wide, the stated lockup minimum.
 
 ## Clear space and minimum sizes
 

@@ -7,6 +7,7 @@
     "contrast": "node scripts/contrast.mjs",
     "smoke": "node scripts/smoke.mjs",
     "explore": "node scripts/explore.mjs",
+    "tune": "node scripts/tune.mjs",
     "check": "npm run smoke && npm run contrast && npm run build"
   },
   "type": "module",
