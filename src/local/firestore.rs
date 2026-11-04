@@ -321,18 +321,6 @@ impl FirestoreApi {
         Ok(document)
     }
 
-    /// Read a document, applying the response mask.
-    async fn read(&self, name: &str, mask: &Option<DocumentMask>) -> Result<Document, Status> {
-        let parsed = parse_document_name(name)?;
-        let mut document = self
-            .store
-            .get(&parsed.full())
-            .await?
-            .ok_or_else(|| Status::not_found(format!("no document at {name}")))?;
-        apply_mask(&mut document, mask)?;
-        Ok(document)
-    }
-
 }
 
 #[tonic::async_trait]

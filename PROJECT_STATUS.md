@@ -304,12 +304,34 @@ and `docs/licenses/FIREBASE_GCP_LOCAL.md`.
   not written.
 - `docker compose up -d postgres fireup-local` runs it beside Compose Postgres.
 
-**Verified on 2026-11-04:** `cargo test --lib` (261), `--test
-local_firestore_tests` (12, including a real same-port gRPC + HTTP check),
+**Phase 2 (SAK-165, November 4 2026)** — queries, collection listings, and
+transactions. The 12-RPC v1 surface is now served in full:
+
+- `RunQuery` over a `StructuredQuery`: AND/OR filters, all ten field operators,
+  the four unary tests, `orderBy`, `limit`/`offset`, and `select` projection.
+  The engine (`src/local/query.rs`) runs in the server process against a
+  collection scan, so both stores answer a query identically.
+- `ListDocuments` (including `show_missing` for documents that exist only as the
+  parent of something deeper) and `ListCollectionIds`, both paged by resume
+  token rather than offset.
+- `BeginTransaction`/`Commit`/`Rollback` with **atomic** commits and
+  **optimistic concurrency**: a transaction's read set is re-checked inside the
+  same store transaction as its writes, so a document that changed since it was
+  read aborts the commit (`ABORTED`) instead of being overwritten.
+- `BatchWrite`, deliberately non-atomic per the API, with one status per write.
+- Every write path — single-document RPCs included — now goes through one
+  atomic `Store::commit`, which removed the check-then-write race in
+  `CreateDocument` and the non-atomic `Commit` of Phase 0/1.
+- Full fidelity matrix published in `docs/local/README.md`.
+
+**Verified on 2026-11-04:** `cargo test --lib local::` (71), `--test
+local_firestore_tests` (25, including a real same-port gRPC + HTTP check),
 `--test local_postgres_store_tests` (7, against a throwaway cluster: documents
 and every Firestore value type come back unchanged after a server restart), and
-`scripts/smoke-local-firestore.sh` 11/11 with Google's official
-`@google-cloud/firestore` client against the PostgreSQL store.
+`scripts/smoke-local-firestore.sh` **27/27 against both stores** with Google's
+official `@google-cloud/firestore` client — queries, `listDocuments()`,
+`listCollections()`, `runTransaction()` (including a forced-contention retry
+that the SDK itself has to retry), and `bulkWriter()`.
 
 **Not verified here:** the `fireup-local` Docker image build (no Docker socket
 access in the agent environment). The Dockerfile was fixed to copy `build.rs`
@@ -317,8 +339,10 @@ and `proto/`, without which the image could not have compiled the generated
 stubs at all.
 
 **Still unserved** (answer `UNIMPLEMENTED` with a message naming the gap):
-queries, transactions, realtime listeners, field transforms, nested field-path
-masks, auth and security rules. `Commit` is not atomic.
+realtime listeners (`Listen`, streaming `Write`), aggregation queries,
+`PartitionQuery`, collection group queries, query cursors, field transforms,
+nested field paths, point-in-time reads, auth and security rules. The fidelity
+matrix in `docs/local/README.md` is the authoritative list.
 
 ---
 

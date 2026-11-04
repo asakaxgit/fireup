@@ -140,19 +140,19 @@ impl Comparison {
 /// A presence/`NaN` test, which takes no value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Presence {
-    IsNull,
-    IsNotNull,
-    IsNan,
-    IsNotNan,
+    Null,
+    NotNull,
+    Nan,
+    NotNan,
 }
 
 impl Presence {
     fn parse(op: ProtoUnaryOperator) -> Result<Self, Status> {
         match op {
-            ProtoUnaryOperator::IsNull => Ok(Presence::IsNull),
-            ProtoUnaryOperator::IsNotNull => Ok(Presence::IsNotNull),
-            ProtoUnaryOperator::IsNan => Ok(Presence::IsNan),
-            ProtoUnaryOperator::IsNotNan => Ok(Presence::IsNotNan),
+            ProtoUnaryOperator::IsNull => Ok(Presence::Null),
+            ProtoUnaryOperator::IsNotNull => Ok(Presence::NotNull),
+            ProtoUnaryOperator::IsNan => Ok(Presence::Nan),
+            ProtoUnaryOperator::IsNotNan => Ok(Presence::NotNan),
             ProtoUnaryOperator::Unspecified => Err(Status::invalid_argument(
                 "a unary filter has no operator set",
             )),
@@ -221,10 +221,10 @@ impl Predicate {
             }
             FilterType::UnaryFilter(unary) => {
                 let op = Presence::parse(unary.op())?;
-                let field = match &unary.operand_type {
-                    Some(OperandType::Field(reference)) => Some(reference.clone()),
-                    None => None,
-                };
+                let field = unary
+                    .operand_type
+                    .as_ref()
+                    .map(|OperandType::Field(reference)| reference.clone());
                 Ok(Predicate::Test {
                     path: Path::parse(&field)?,
                     op,
@@ -250,10 +250,10 @@ impl Predicate {
             Predicate::Test { path, op } => match path.resolve(document) {
                 None => false,
                 Some(actual) => match op {
-                    Presence::IsNull => is_null(actual.as_ref()),
-                    Presence::IsNotNull => !is_null(actual.as_ref()),
-                    Presence::IsNan => is_nan(actual.as_ref()),
-                    Presence::IsNotNan => !is_nan(actual.as_ref()),
+                    Presence::Null => is_null(actual.as_ref()),
+                    Presence::NotNull => !is_null(actual.as_ref()),
+                    Presence::Nan => is_nan(actual.as_ref()),
+                    Presence::NotNan => !is_nan(actual.as_ref()),
                 },
             },
         }
