@@ -18,6 +18,68 @@ const MAX_BIND_PARAMS: usize = 65535;
 /// Default number of rows per multi-row INSERT.
 pub const DEFAULT_IMPORT_BATCH_SIZE: usize = 1000;
 
+/// How much of a failing statement to quote back in an error message.
+const STATEMENT_PREVIEW_CHARS: usize = 400;
+
+/// Render a `tokio_postgres` error with the message the server actually sent.
+///
+/// `tokio_postgres::Error` displays as the bare string `db error`: every
+/// detail — `syntax error at or near "user"`, the SQLSTATE, the position — hangs
+/// off the error's source instead. Without this, an import failure said nothing
+/// about why the statement was rejected.
+pub fn describe_db_error(error: &tokio_postgres::Error) -> String {
+    if let Some(db_error) = error.as_db_error() {
+        let mut description = format!(
+            "{}: {} (SQLSTATE {})",
+            db_error.severity(),
+            db_error.message(),
+            db_error.code().code()
+        );
+        if let Some(detail) = db_error.detail() {
+            description.push_str(&format!("; DETAIL: {}", detail));
+        }
+        if let Some(hint) = db_error.hint() {
+            description.push_str(&format!("; HINT: {}", hint));
+        }
+        return description;
+    }
+
+    // Not a server-side rejection (connection loss, TLS, encoding): the cause is
+    // in the source chain, which Display also omits.
+    let mut description = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        description.push_str(&format!(": {}", cause));
+        source = cause.source();
+    }
+    description
+}
+
+/// Quote a failing statement back at the caller, truncated so a multi-row
+/// INSERT does not bury the message it is attached to.
+pub(crate) fn statement_preview(statement: &str) -> String {
+    let flattened = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flattened.chars().count() <= STATEMENT_PREVIEW_CHARS {
+        return flattened;
+    }
+    let head: String = flattened.chars().take(STATEMENT_PREVIEW_CHARS).collect();
+    format!("{}… [truncated]", head)
+}
+
+/// Whether re-running a statement could plausibly succeed.
+///
+/// A statement the server rejected outright (syntax error, undefined column,
+/// constraint violation) fails identically on every attempt, so retrying it only
+/// delays the report. Serialization failures and deadlocks are the exception.
+fn is_retryable_db_error(error: &tokio_postgres::Error) -> bool {
+    match error.as_db_error() {
+        // Class 40 — transaction rollback: the retry is the documented recovery.
+        Some(db_error) => db_error.code().code().starts_with("40"),
+        // Connection-level failures are what the retry loop exists for.
+        None => true,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ImportResult {
     pub imported_records: usize,
@@ -209,16 +271,33 @@ impl PostgreSQLImporter {
             match client.query(query, params).await {
                 Ok(rows) => return Ok(rows),
                 Err(e) => {
+                    if !is_retryable_db_error(&e) {
+                        return Err(FireupError::database_connection(
+                            format!(
+                                "Query execution failed: {} [statement: {}]",
+                                describe_db_error(&e),
+                                statement_preview(query)
+                            ),
+                            None,
+                            FireupError::new_context("execute_query")
+                        ));
+                    }
+
                     if retry_count >= self.config.retry_attempts {
                         return Err(FireupError::database_connection(
-                            format!("Query execution failed after {} attempts: {}", self.config.retry_attempts, e),
+                            format!(
+                                "Query execution failed after {} attempts: {} [statement: {}]",
+                                self.config.retry_attempts,
+                                describe_db_error(&e),
+                                statement_preview(query)
+                            ),
                             None,
                             FireupError::new_context("execute_query_retry")
                         ));
                     }
-                    
+
                     retry_count += 1;
-                    warn!("Query execution failed (attempt {}): {}", retry_count, e);
+                    warn!("Query execution failed (attempt {}): {}", retry_count, describe_db_error(&e));
                     tokio::time::sleep(self.config.retry_delay).await;
                 }
             }
@@ -235,16 +314,33 @@ impl PostgreSQLImporter {
             match client.execute(statement, params).await {
                 Ok(rows_affected) => return Ok(rows_affected),
                 Err(e) => {
+                    if !is_retryable_db_error(&e) {
+                        return Err(FireupError::database_connection(
+                            format!(
+                                "Statement execution failed: {} [statement: {}]",
+                                describe_db_error(&e),
+                                statement_preview(statement)
+                            ),
+                            None,
+                            FireupError::new_context("execute_statement")
+                        ));
+                    }
+
                     if retry_count >= self.config.retry_attempts {
                         return Err(FireupError::database_connection(
-                            format!("Statement execution failed after {} attempts: {}", self.config.retry_attempts, e),
+                            format!(
+                                "Statement execution failed after {} attempts: {} [statement: {}]",
+                                self.config.retry_attempts,
+                                describe_db_error(&e),
+                                statement_preview(statement)
+                            ),
                             None,
                             FireupError::new_context("execute_statement_retry")
                         ));
                     }
-                    
+
                     retry_count += 1;
-                    warn!("Statement execution failed (attempt {}): {}", retry_count, e);
+                    warn!("Statement execution failed (attempt {}): {}", retry_count, describe_db_error(&e));
                     tokio::time::sleep(self.config.retry_delay).await;
                 }
             }
@@ -266,7 +362,11 @@ impl PostgreSQLImporter {
 
         let prepared = client.prepare_typed(statement, param_types).await.map_err(|e| {
             FireupError::data_import(
-                format!("Failed to prepare statement: {}", e),
+                format!(
+                    "Failed to prepare statement: {} [statement: {}]",
+                    describe_db_error(&e),
+                    statement_preview(statement)
+                ),
                 None,
                 None,
                 FireupError::new_context("prepare_typed_statement"),
@@ -275,7 +375,11 @@ impl PostgreSQLImporter {
 
         client.execute(&prepared, params).await.map_err(|e| {
             FireupError::data_import(
-                format!("Statement execution failed: {}", e),
+                format!(
+                    "Statement execution failed: {} [statement: {}]",
+                    describe_db_error(&e),
+                    statement_preview(statement)
+                ),
                 None,
                 None,
                 FireupError::new_context("execute_prepared_statement"),
@@ -591,7 +695,7 @@ impl PostgreSQLImporter {
         };
 
         let mut client = self.get_connection().await?;
-        let transaction = client.transaction().await
+        let mut transaction = client.transaction().await
             .map_err(|e| FireupError::Transaction {
                 message: format!("Failed to start schema creation transaction: {}", e),
                 operation: "schema_creation".to_string(),
@@ -601,8 +705,37 @@ impl PostgreSQLImporter {
 
         for (index, ddl_statement) in ddl_statements.iter().enumerate() {
             info!("Executing DDL statement {} of {}", index + 1, ddl_statements.len());
-            
-            match transaction.execute(ddl_statement, &[]).await {
+
+            // Each statement runs inside its own savepoint. PostgreSQL aborts the
+            // whole transaction on any error, so without one the "object already
+            // exists - continue" path below would leave every later statement
+            // failing with "current transaction is aborted" while the commit
+            // quietly degraded into a rollback.
+            let savepoint = transaction
+                .savepoint(&format!("fireup_ddl_{}", index + 1))
+                .await
+                .map_err(|e| FireupError::Transaction {
+                    message: format!("Failed to open savepoint for DDL statement {}: {}", index + 1, describe_db_error(&e)),
+                    operation: "schema_creation".to_string(),
+                    context: FireupError::new_context("start_ddl_savepoint"),
+                    suggestions: vec!["Check database connection".to_string()],
+                })?;
+
+            let execution = savepoint.execute(ddl_statement, &[]).await;
+            let release = match &execution {
+                Ok(_) => savepoint.commit().await,
+                Err(_) => savepoint.rollback().await,
+            };
+            if let Err(e) = release {
+                return Err(FireupError::Transaction {
+                    message: format!("Failed to close savepoint for DDL statement {}: {}", index + 1, describe_db_error(&e)),
+                    operation: "schema_creation".to_string(),
+                    context: FireupError::new_context("close_ddl_savepoint"),
+                    suggestions: vec!["Check database connection".to_string()],
+                });
+            }
+
+            match execution {
                 Ok(_) => {
                     result.imported_records += 1;
                     info!("Successfully executed DDL statement {}", index + 1);
@@ -625,13 +758,19 @@ impl PostgreSQLImporter {
                 }
                 Err(e) => {
                     result.failed_records += 1;
-                    let warning = format!("Failed to execute DDL statement {}: {}", index + 1, e);
+                    let described = describe_db_error(&e);
+                    let warning = format!(
+                        "Failed to execute DDL statement {}: {} [statement: {}]",
+                        index + 1,
+                        described,
+                        statement_preview(ddl_statement)
+                    );
                     warn!("{}", warning);
                     result.warnings.push(warning);
-                    
+
                     // For schema creation, we might want to continue with other statements
                     // rather than failing completely, depending on the error type
-                    if e.to_string().contains("already exists") {
+                    if described.contains("already exists") {
                         result.warnings.push("Object already exists - continuing with next statement".to_string());
                     } else {
                         // For serious errors, rollback and fail
@@ -639,7 +778,12 @@ impl PostgreSQLImporter {
                             warn!("Failed to rollback schema creation transaction: {}", rollback_err);
                         }
                         return Err(FireupError::data_import(
-                            format!("Schema creation failed at statement {}: {}", index + 1, e),
+                            format!(
+                                "Schema creation failed at statement {}: {} [statement: {}]",
+                                index + 1,
+                                described,
+                                statement_preview(ddl_statement)
+                            ),
                             None,
                             None,
                             FireupError::new_context("execute_ddl_statement")
@@ -941,15 +1085,15 @@ impl PostgreSQLImporter {
         
         let mut validation_errors = Vec::new();
         
-        // Check for constraint violations
-        let constraint_check_query = format!(
-            "SELECT conname, pg_get_constraintdef(oid) as definition 
-             FROM pg_constraint 
-             WHERE conrelid = '{}'::regclass",
-            table_name
-        );
-        
-        match self.execute_query(&constraint_check_query, &[]).await {
+        // Check for constraint violations. The `regclass` cast parses its input
+        // as an identifier, so a mixed-case table has to arrive quoted.
+        let constraint_check_query =
+            "SELECT conname, pg_get_constraintdef(oid) as definition
+             FROM pg_constraint
+             WHERE conrelid = $1::text::regclass";
+        let quoted_table = escape_identifier(table_name);
+
+        match self.execute_query(constraint_check_query, &[&quoted_table]).await {
             Ok(rows) => {
                 for row in rows {
                     let constraint_name: String = row.get(0);
@@ -993,17 +1137,17 @@ impl PostgreSQLImporter {
     /// Validate foreign key constraints
     async fn validate_foreign_key_constraint(&self, table_name: &str, constraint_name: &str) -> Result<Vec<String>, FireupError> {
         let query = format!(
-            "SELECT COUNT(*) as violation_count 
-             FROM {} 
+            "SELECT COUNT(*) as violation_count
+             FROM {}
              WHERE NOT EXISTS (
                  SELECT 1 FROM information_schema.table_constraints tc
                  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
-                 WHERE tc.constraint_name = '{}' AND tc.table_name = '{}'
+                 WHERE tc.constraint_name = $1 AND tc.table_name = $2
              )",
-            table_name, constraint_name, table_name
+            escape_identifier(table_name)
         );
 
-        match self.execute_query(&query, &[]).await {
+        match self.execute_query(&query, &[&constraint_name, &table_name]).await {
             Ok(rows) => {
                 if let Some(row) = rows.first() {
                     let violation_count: i64 = row.get(0);
@@ -1032,7 +1176,7 @@ impl PostgreSQLImporter {
         // and create appropriate validation queries
         let query = format!(
             "SELECT COUNT(*) as total_rows FROM {}",
-            table_name
+            escape_identifier(table_name)
         );
 
         match self.execute_query(&query, &[]).await {
@@ -1049,23 +1193,21 @@ impl PostgreSQLImporter {
 
     /// Validate NOT NULL constraints
     async fn validate_not_null_constraints(&self, table_name: &str) -> Result<Vec<String>, FireupError> {
-        let query = format!(
-            "SELECT column_name 
-             FROM information_schema.columns 
-             WHERE table_name = '{}' AND is_nullable = 'NO'",
-            table_name
-        );
+        let query = "SELECT column_name
+             FROM information_schema.columns
+             WHERE table_name = $1 AND is_nullable = 'NO'";
 
         let mut violations = Vec::new();
 
-        match self.execute_query(&query, &[]).await {
+        match self.execute_query(query, &[&table_name]).await {
             Ok(rows) => {
                 for row in rows {
                     let column_name: String = row.get(0);
-                    
+
                     let null_check_query = format!(
                         "SELECT COUNT(*) as null_count FROM {} WHERE {} IS NULL",
-                        table_name, column_name
+                        escape_identifier(table_name),
+                        escape_identifier(&column_name)
                     );
                     
                     match self.execute_query(&null_check_query, &[]).await {

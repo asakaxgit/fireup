@@ -8,6 +8,10 @@
 #
 # Usage: scripts/smoke-local-firestore.sh [port]
 #
+# Set FIREUP_SMOKE_POSTGRES_URL to run the same SDK smoke test against the
+# PostgreSQL store instead of the in-memory one — the Phase 1 version of this
+# check. Point it only at a database you own; see PROJECT_STATUS.md.
+#
 # Needs network access the first time, to npm-install @google-cloud/firestore.
 
 set -euo pipefail
@@ -37,8 +41,16 @@ fi
 echo "==> building fireup"
 cargo build --bin fireup --manifest-path "$repo_root/Cargo.toml"
 
+server_args=(local --port "$port")
+if [[ -n "${FIREUP_SMOKE_POSTGRES_URL:-}" ]]; then
+  echo "==> storage: PostgreSQL (durable)"
+  server_args+=(--postgres-url "$FIREUP_SMOKE_POSTGRES_URL")
+else
+  echo "==> storage: in-memory (set FIREUP_SMOKE_POSTGRES_URL to test the durable store)"
+fi
+
 echo "==> starting fireup local on 127.0.0.1:$port"
-"$repo_root/target/debug/fireup" local --port "$port" >"$log" 2>&1 &
+"$repo_root/target/debug/fireup" "${server_args[@]}" >"$log" 2>&1 &
 server_pid=$!
 
 # Wait for the port to accept connections rather than sleeping a guess.

@@ -28,6 +28,13 @@ use fireup::schema_analyzer::{DDLGenerator, DocumentStructureAnalyzer, Normaliza
 
 const SKIP_NOTICE: &str = "skipping: set FIREUP_TEST_POSTGRES_URL to run the PostgreSQL import tests";
 
+/// Every table the managed-export fixture normalizes into.
+///
+/// The fixture's kind names are fixed, so these tables cannot be suffixed per
+/// run; leaving the lookup table behind made a second run fail on its index
+/// (`relation "idx_Orders_Users_lookup_Orders_key_path" already exists`).
+const FIXTURE_TABLES: [&str; 3] = ["Users", "Orders", "Orders_Users_lookup"];
+
 fn test_url() -> Option<String> {
     match std::env::var("FIREUP_TEST_POSTGRES_URL") {
         Ok(url) if !url.trim().is_empty() => Some(url),
@@ -299,7 +306,7 @@ async fn cli_import_managed_export_fixture_into_postgres() {
 
     // Drop fixture tables if a prior run left them behind.
     let importer = connect(&url).await;
-    for table in ["Users", "Orders"] {
+    for table in FIXTURE_TABLES {
         drop_table(&importer, table).await;
     }
 
@@ -320,9 +327,85 @@ async fn cli_import_managed_export_fixture_into_postgres() {
     assert_eq!(row_count(&importer, "Users").await, 5, "Users rows");
     assert_eq!(row_count(&importer, "Orders").await, 7, "Orders rows");
 
-    for table in ["Users", "Orders"] {
+    for table in FIXTURE_TABLES {
         drop_table(&importer, table).await;
     }
+}
+
+/// Reserved words and mixed-case identifiers must survive the whole pipeline.
+///
+/// SAK-170: the DDL quoted every identifier but the INSERT builder did not, so a
+/// Firestore field called `user` produced `syntax error at or near "user"` and a
+/// kind called `Orders` produced an INSERT against the folded `orders`, which
+/// the `"Orders"` table creation had never created.
+#[tokio::test]
+async fn cli_import_handles_reserved_words_and_mixed_case_identifiers() {
+    let Some(url) = test_url() else { return };
+    initialize_monitoring(MonitoringConfig::default());
+
+    const DOCUMENT_COUNT: usize = 6;
+    // Mixed case on purpose: unquoted, PostgreSQL folds this to lower case.
+    let collection = format!(
+        "Orders_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
+
+    let mut backup = tempfile::NamedTempFile::new().expect("create backup file");
+    for index in 0..DOCUMENT_COUNT {
+        // Every field name here is a PostgreSQL reserved word, plus one
+        // mixed-case field name.
+        writeln!(
+            backup,
+            r#"{{"name":"projects/p/databases/(default)/documents/{collection}/doc{index}","fields":{{"user":{{"stringValue":"u{index}"}},"order":{{"integerValue":"{index}"}},"group":{{"stringValue":"g{index}"}},"default":{{"booleanValue":{}}},"select":{{"stringValue":"s{index}"}},"table":{{"stringValue":"t{index}"}},"TotalCents":{{"integerValue":"{}"}}}}}}"#,
+            index % 2 == 0,
+            index * 100
+        )
+        .expect("write document");
+    }
+    backup.flush().expect("flush backup file");
+
+    let importer = connect(&url).await;
+    drop_table(&importer, &collection).await;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fireup"))
+        .args(["import", "-b"])
+        .arg(backup.path())
+        .args(["-p", &url, "--drop-existing"])
+        .output()
+        .expect("run fireup import");
+
+    assert!(
+        output.status.success(),
+        "import with reserved-word columns failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        row_count(&importer, &collection).await as usize,
+        DOCUMENT_COUNT,
+        "every document must land in the mixed-case table"
+    );
+
+    // The reserved-word and mixed-case columns must hold the values, not NULL:
+    // a column that silently went missing would still satisfy the row count.
+    let rows = importer
+        .execute_query(
+            &format!(
+                "SELECT COUNT(*) FROM \"{collection}\" \
+                 WHERE \"user\" IS NOT NULL AND \"order\" IS NOT NULL \
+                   AND \"group\" IS NOT NULL AND \"select\" IS NOT NULL \
+                   AND \"table\" IS NOT NULL AND \"TotalCents\" IS NOT NULL"
+            ),
+            &[],
+        )
+        .await
+        .expect("query reserved-word columns");
+    let populated: i64 = rows.first().expect("one count row").get(0);
+    assert_eq!(
+        populated as usize, DOCUMENT_COUNT,
+        "reserved-word and mixed-case columns must carry their values"
+    );
+
+    drop_table(&importer, &collection).await;
 }
 
 /// A connection string that cannot be honoured must fail, not fall back to some

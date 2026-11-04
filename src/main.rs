@@ -183,19 +183,56 @@ enum Commands {
     },
 
     /// Run a local Firestore-compatible server for official client SDKs
-    #[command(long_about = "Serve the public google.firestore.v1 gRPC API on a single local port so official Firestore client SDKs can talk to Fireup via the documented FIRESTORE_EMULATOR_HOST environment variable.
+    #[command(long_about = "Serve the public google.firestore.v1 gRPC API on a single local port so official Firestore client SDKs can talk to Fireup via the documented FIRESTORE_EMULATOR_HOST environment variable. The same port answers HTTP GET / (service discovery) and GET /health.
 
 This is an independent implementation of Google's published Firestore API. It is not the Firebase Emulator Suite and is not affiliated with Google.
 
-Phase 0 serves document CRUD (GetDocument, CreateDocument, UpdateDocument, DeleteDocument, BatchGetDocuments, Commit) against an in-memory store. Data is NOT persisted across restarts. Queries, transactions, and realtime listeners return UNIMPLEMENTED.")]
+Phase 1 serves document CRUD (GetDocument, CreateDocument, UpdateDocument, DeleteDocument, BatchGetDocuments, Commit). Storage is in-memory unless --postgres-url is given, in which case documents are stored in PostgreSQL and survive a restart. Queries, transactions, and realtime listeners return UNIMPLEMENTED.")]
     Local {
+        #[command(subcommand)]
+        command: Option<LocalCommands>,
+
         /// Address to bind (default: loopback only)
-        #[arg(long, default_value = "127.0.0.1")]
+        #[arg(long, default_value = "127.0.0.1", global = true)]
         host: String,
 
         /// Port to listen on
-        #[arg(short, long, default_value_t = local::DEFAULT_PORT)]
+        #[arg(short, long, default_value_t = local::DEFAULT_PORT, global = true)]
         port: u16,
+
+        /// Store documents in PostgreSQL instead of memory, so they survive a
+        /// restart (format: postgresql://user:password@host:port/database)
+        #[arg(long, value_name = "URL", global = true)]
+        postgres_url: Option<String>,
+
+        /// Project id this data plane answers for
+        #[arg(long, default_value = local::LocalConfig::DEFAULT_PROJECT_ID, global = true)]
+        project_id: String,
+
+        /// Database id; Firestore's default database is literally "(default)"
+        #[arg(long, default_value = local::LocalConfig::DEFAULT_DATABASE_ID, global = true)]
+        database_id: String,
+
+        /// Services to enable (repeatable)
+        #[arg(long = "enable", value_enum, default_value = "firestore", global = true)]
+        enable: Vec<local::Service>,
+
+        /// PostgreSQL connection pool size
+        #[arg(long, default_value_t = local::LocalConfig::DEFAULT_MAX_CONNECTIONS, global = true)]
+        max_connections: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum LocalCommands {
+    /// Load a managed Firestore/Datastore export into the local store
+    #[command(long_about = "Parse a managed export with the same parser `fireup import` uses and write every document into the local data plane's store.
+
+Seeding upserts, so running it twice is the same as running it once. Pass --postgres-url to seed a durable store; without it the documents go into an in-memory store that disappears when the command exits, which is only useful as a dry run.")]
+    Seed {
+        /// Path to the export file or directory
+        #[arg(short, long, value_name = "FILE")]
+        backup_file: PathBuf,
     },
 }
 
@@ -336,18 +373,94 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Local { host, port } => {
+        Commands::Local {
+            command,
+            host,
+            port,
+            postgres_url,
+            project_id,
+            database_id,
+            enable,
+            max_connections,
+        } => {
             let addr: std::net::SocketAddr = format!("{host}:{port}")
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid bind address {host}:{port}: {e}"))?;
 
-            if let Err(e) = local::serve(addr).await {
+            let mut config = local::LocalConfig::in_memory(addr)
+                .with_project_id(project_id)
+                .with_database_id(database_id);
+            config.postgres_url = postgres_url;
+            config.max_connections = max_connections;
+            // clap keeps the default alongside repeated values, so de-duplicate
+            // rather than enabling the same service twice.
+            config.services = {
+                let mut services = enable;
+                services.sort();
+                services.dedup();
+                services
+            };
+
+            let outcome = match command {
+                None => local::serve(config).await,
+                Some(LocalCommands::Seed { backup_file }) => {
+                    execute_local_seed(config, &backup_file).await
+                }
+            };
+
+            if let Err(e) = outcome {
                 eprintln!("fireup local failed: {e:#}");
                 std::process::exit(1);
             }
         }
     }
     
+    Ok(())
+}
+
+/// Seed the local data plane's store from a managed export.
+///
+/// A seed that could not write every parsed document is a failure: the caller
+/// asked for the export to be in the store, and a partially seeded store looks
+/// identical to a complete one from the outside.
+async fn execute_local_seed(
+    config: local::LocalConfig,
+    backup_file: &PathBuf,
+) -> Result<()> {
+    config.validate()?;
+    let root = config.documents_root();
+    info!("Seeding {} from {:?}", root, backup_file);
+
+    if config.postgres_url.is_none() {
+        warn!(
+            "no --postgres-url given: seeding an in-memory store that is discarded when this \
+             command exits (dry run)"
+        );
+    }
+
+    let store = local::build_store(&config).await?;
+    let report = local::seed::seed_from_export(&store, &root, backup_file).await?;
+
+    info!("Seed complete: {}", report.summary());
+    info!("Store now holds {} documents", store.count().await?);
+
+    if !report.is_complete() {
+        for skip in &report.skipped {
+            eprintln!("  skipped {}: {}", skip.source, skip.reason);
+        }
+        anyhow::bail!(
+            "{} of {} documents were not seeded; the store does not hold the whole export",
+            report.skipped.len(),
+            report.parsed
+        );
+    }
+
+    // An export that parsed to nothing is already caught by the parser guard in
+    // `ensure_documents_parsed`; here it means an empty source.
+    if report.parsed == 0 {
+        warn!("the export held no documents; nothing was seeded");
+    }
+
     Ok(())
 }
 

@@ -54,6 +54,10 @@ prost-types = "0.12"
 tonic = "0.11"
 tokio-stream = { version = "0.1", features = ["net"] }
 
+# Async trait methods for the `Store` trait. Already in the tree via tonic;
+# declared directly because `src/local/store.rs` uses it.
+async-trait = "0.1"
+
 [build-dependencies]
 # Protocol Buffer compilation
 protoc-bin-vendored = "3.2"
@@ -90,3 +94,7 @@ path = "tests/library_api_tests.rs"
 [[test]]
 name = "local_firestore_tests"
 path = "tests/local_firestore_tests.rs"
+
+[[test]]
+name = "local_postgres_store_tests"
+path = "tests/local_postgres_store_tests.rs"

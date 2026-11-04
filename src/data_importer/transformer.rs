@@ -1,4 +1,5 @@
 use crate::error::FireupError;
+use crate::schema_analyzer::ddl_generator::{quote_identifier, quote_identifier_list};
 use crate::types::{
     datastore_type_tag, FirestoreDocument, ForeignKeyDefinition, NormalizedSchema, TableDefinition,
     ColumnDefinition,
@@ -800,7 +801,7 @@ impl DocumentTransformer {
         }
 
         let column_names: Vec<String> = table.columns.iter().map(|c| c.name.clone()).collect();
-        let columns_clause = column_names.join(", ");
+        let columns_clause = quote_identifier_list(&column_names);
 
         let mut values_clauses = Vec::new();
         for row in rows {
@@ -817,7 +818,7 @@ impl DocumentTransformer {
 
         format!(
             "INSERT INTO {} ({}) VALUES\n{};",
-            table.name,
+            quote_identifier(&table.name),
             columns_clause,
             values_clauses.join(",\n")
         )
@@ -937,7 +938,7 @@ mod tests {
 
         assert!(!result.sql_statements.is_empty());
         let sql = &result.sql_statements[0];
-        assert!(sql.contains("INSERT INTO users"));
+        assert!(sql.contains("INSERT INTO \"users\""));
         assert!(sql.contains("John Doe"));
     }
 

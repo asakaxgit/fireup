@@ -64,7 +64,7 @@ pub fn quote_identifier(identifier: &str) -> String {
 }
 
 /// Quote each identifier in a list and join them for use inside `(...)`.
-fn quote_identifier_list<I, S>(identifiers: I) -> String
+pub fn quote_identifier_list<I, S>(identifiers: I) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
