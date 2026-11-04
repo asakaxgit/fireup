@@ -393,11 +393,25 @@ a throwaway cluster: an account and its password digest survive a server
 restart, uniqueness is enforced by the database, five anonymous accounts
 coexist, and no row lands in the documents table). Full `cargo test` green.
 
-**Not verified here:** an official Firebase Auth SDK driving the surface
-end-to-end. `tests/local-smoke/` covers Firestore with
-`@google-cloud/firestore`; the equivalent `firebase-admin` / `firebase` smoke
-test is the obvious next step and is the only thing that can prove real-client
-compatibility rather than contract compliance.
+**Verified with the official SDKs (SAK-171):** `scripts/smoke-local-auth.sh`
+31/31, against both the in-memory and the PostgreSQL account store. It drives
+the surface with `firebase-admin` 13 and the `firebase` client SDK 11 over
+`FIREBASE_AUTH_EMULATOR_HOST` — `createUser`, `getUser`, `getUserByEmail`,
+`updateUser`, `setCustomUserClaims`, paged `listUsers`, `deleteUser`,
+`createCustomToken` → `signInWithCustomToken`, `signInWithEmailAndPassword`,
+`signInAnonymously`, `verifyIdToken` accepting the unsigned emulator token, and
+a forced refresh extending the session. The deliberate gaps (batch account
+writes, out-of-band email flows, session cookies) are asserted to fail cleanly
+rather than left untested.
+
+That test found two real divergences that the Rust suite could not, because the
+Rust suite was written against the same reading of the contract as the code:
+custom-token sign-in **overwrote the account's stored custom claims**, and it
+reported the account's original `sign_in_provider` instead of `custom`. Both are
+fixed, with regression tests, by separating session state from account state —
+see the "Session claims vs account claims" section in `docs/local/README.md`.
+The lesson generalises: a passing test count proves self-consistency, not
+compatibility.
 
 ---
 

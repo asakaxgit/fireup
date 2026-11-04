@@ -279,6 +279,15 @@ work.
 | `GET /emulator/v1/projects/{p}/config` | the local config an SDK may probe |
 | `DELETE /emulator/v1/projects/{p}/accounts` | clear every account |
 
+Verified against the official SDKs, not just against our own idea of the
+contract: `scripts/smoke-local-auth.sh` drives this surface with
+`firebase-admin` and the `firebase` client SDK over
+`FIREBASE_AUTH_EMULATOR_HOST`. In Admin SDK terms, that covers `createUser`,
+`getUser`, `getUserByEmail`, `updateUser`, `setCustomUserClaims`, `listUsers`
+(paged), `deleteUser`, `createCustomToken`, and `verifyIdToken`; and on the
+client, `signInWithEmailAndPassword`, `signInWithCustomToken`,
+`signInAnonymously`, and token refresh. See [Tests](#tests).
+
 ```bash
 # Sign up, then sign in.
 curl -s localhost:4589/v1/accounts:signUp \
@@ -309,7 +318,20 @@ These answer `501` with a message naming the gap, not a vague `404`:
 - **Federated / OAuth providers** — `signInWithIdp`, `createAuthUri`.
 - **Out-of-band email flows** — `sendOobCode`, `resetPassword`. There is no
   mail transport here, and a link that goes nowhere is worse than a clear error.
+  In Admin SDK terms this is `generateEmailVerificationLink`,
+  `generatePasswordResetLink`, and friends.
+- **Batch account writes** — `accounts:batchDelete` and `accounts:batchCreate`,
+  so the Admin SDK's `deleteUsers()` and `importUsers()` are refused. Delete and
+  create one at a time instead. Not a hard problem, just not done; the refusal
+  names the gap and leaves every account untouched.
+- **Session cookies** — `createSessionCookie` / `verifySessionCookie`. These are
+  a separate token format from ID tokens, and nothing here needs them yet.
 - **Production key material.** Nothing generates or ships a signing key.
+
+`scripts/smoke-local-auth.sh` asserts that the out-of-band, batch-write, and
+session-cookie gaps *fail cleanly* — a mapped SDK error rather than a 500, a
+hang, or a half-applied write — so a gap stays a gap rather than becoming a
+surprise. If one of them is implemented later, that check fails and says so.
 
 ### Tokens
 
@@ -329,6 +351,23 @@ opaque by contract, so there is nothing to imitate). Revocation works through
 `validSince`: changing an email or password, or an admin setting `validSince`,
 invalidates refresh tokens issued earlier, and `/v1/token` then answers
 `TOKEN_EXPIRED`.
+
+#### Session claims vs account claims
+
+Two things that look alike are deliberately kept apart:
+
+- **Account claims** — what `setCustomUserClaims` (`accounts:update`) stores on
+  the account. They appear in every ID token the account gets, and only an admin
+  call changes them.
+- **Session claims** — the `claims` an Admin SDK puts in a custom token via
+  `createCustomToken(uid, claims)`. They apply to the session that token opens,
+  layered over the account's claims, and are **not** written to the account.
+
+So signing in with a custom token does not edit the account, and
+`firebase.sign_in_provider` reports how *that session* authenticated (`custom`)
+rather than how the account was originally created. Both facts ride on the
+refresh token, so a refresh re-issues the same session instead of silently
+weakening it an hour in.
 
 ### Accounts are not documents
 
@@ -452,11 +491,18 @@ cargo test --lib local::
 FIREUP_TEST_POSTGRES_URL=postgresql://fireup:pw@127.0.0.1:5433/fireup_dev \
   cargo test --test local_postgres_store_tests --test local_auth_postgres_tests
 
-# Slow but conclusive: drives it with Google's official client library.
-scripts/smoke-local-firestore.sh
+# Slow but conclusive: drives it with Google's official client libraries.
+scripts/smoke-local-firestore.sh   # @google-cloud/firestore
+scripts/smoke-local-auth.sh        # firebase-admin + the firebase client SDK
 FIREUP_SMOKE_POSTGRES_URL=postgresql://fireup:pw@127.0.0.1:5433/fireup_dev \
   scripts/smoke-local-firestore.sh   # …against the durable store
+FIREUP_SMOKE_POSTGRES_URL=postgresql://fireup:pw@127.0.0.1:5433/fireup_dev \
+  scripts/smoke-local-auth.sh        # …same, for accounts
 ```
+
+Both smoke scripts build the binary, start the server on a free port, run the
+Node test, and stop the server. They need network access the first time, to
+`npm install` into `tests/local-smoke/`.
 
 Each store trait has one contract that both of its implementations must satisfy:
 `store::conformance` for documents and `auth::store::conformance` for accounts.
@@ -471,6 +517,15 @@ and accounts (and their password digests) come back unchanged.
 client crate, because the thing under test includes Fireup's own request
 parsing: `Content-Length` handling, a body split across packets, a body that
 never arrives, and a chunked body that must be refused.
+
+The smoke tests are the layer that catches what our own tests cannot, because
+they are not written against our idea of the contract. `tests/local-smoke/`
+hands the official SDKs nothing but an emulator host and lets them choose every
+URL, header, body shape, and error mapping. Two real divergences in the auth
+surface were found exactly this way and are now fixed and regression-tested:
+custom-token sign-in overwrote the account's stored custom claims, and it
+reported the account's provider instead of `custom`. A passing count in our own
+test suite would not have found either.
 
 Never point `FIREUP_TEST_POSTGRES_URL` at a database or role you do not own; the
 shared guard in `tests/postgres_test_env.rs` refuses the host Paperclip role and

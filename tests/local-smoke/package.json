@@ -3,11 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Smoke test that drives `fireup local` with Google's official Firestore client library.",
+  "description": "Smoke tests that drive `fireup local` with Google's official, open-source client libraries.",
   "scripts": {
-    "smoke": "node smoke.mjs"
+    "smoke": "node smoke.mjs",
+    "smoke:auth": "node auth-smoke.mjs"
   },
   "dependencies": {
-    "@google-cloud/firestore": "^7.11.0"
+    "@google-cloud/firestore": "^7.11.0",
+    "firebase": "^11.0.0",
+    "firebase-admin": "^13.0.0"
   }
 }
