@@ -1,10 +1,15 @@
 # Fireup brand guide
 
-**Status: proposed.** The mark, wordmark and palette in this directory are a
-first direction for SAK-173. They are in use on the marketing site in `site/`,
-but they are **not approved**. Identity direction is the CEO's sign-off; until
-that happens, treat everything here as a working proposal, and do not put it on
-anything that leaves the company.
+**Status: proposed, changes requested.** The mark, wordmark and palette in this
+directory are a first direction for SAK-173. They are in use on the marketing
+site in `site/`, but they are **not approved** — the CEO has asked for changes
+to the identity, and those are still to be specified. Identity direction is the
+CEO's sign-off.
+
+This directory is in the public repository so the direction can be reviewed in a
+pull request. That is not approval. Until the mark is signed off, do not use it
+as the company's mark anywhere outside this repo — no published site, no
+external announcement, no profile or avatar.
 
 ---
 
