@@ -499,6 +499,15 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
    silently folded to lower case and disagreed with the names foreign keys used.
    Every generated identifier now goes through `ddl_generator::quote_identifier`
    (embedded quotes doubled), so reserved words load and `Users` stays `Users`.
+   **SAK-170** closed the other half: only the DDL side quoted, so `fireup
+   import` still emitted `INSERT INTO Orders (…, user)` and failed against the
+   `"Orders"` table the DDL had just created. The import path (`sql_generator`,
+   the `TableImportSpec` INSERTs, and the constraint-validation queries) now
+   quotes through the same function, and a failing statement is reported with
+   the server's own message and the statement text instead of a bare
+   `db error`. DDL statements also run under per-statement savepoints, so the
+   "object already exists — continuing" path no longer leaves the transaction
+   aborted (`cli_import_handles_reserved_words_and_mixed_case_identifiers`).
 
 7. ~~**`NOT NULL` emitted for sparse fields**~~ — **resolved (SAK-143)**
    `nickname` is null in 4 of 5 fixture users yet was generated `TEXT NOT NULL`,

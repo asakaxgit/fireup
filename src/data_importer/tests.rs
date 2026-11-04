@@ -449,13 +449,13 @@ mod sql_generator_tests {
 
         let statement = generator.generate_create_table_statement(&table).unwrap();
 
-        assert!(statement.sql.contains("CREATE TABLE IF NOT EXISTS test_table"));
-        assert!(statement.sql.contains("id UUID NOT NULL"));
-        assert!(statement.sql.contains("name VARCHAR(255)"));
-        assert!(statement.sql.contains("age INTEGER"));
-        assert!(statement.sql.contains("active BOOLEAN"));
-        assert!(statement.sql.contains("metadata JSONB"));
-        assert!(statement.sql.contains("PRIMARY KEY (id)"));
+        assert!(statement.sql.contains("CREATE TABLE IF NOT EXISTS \"test_table\""));
+        assert!(statement.sql.contains("\"id\" UUID NOT NULL"));
+        assert!(statement.sql.contains("\"name\" VARCHAR(255)"));
+        assert!(statement.sql.contains("\"age\" INTEGER"));
+        assert!(statement.sql.contains("\"active\" BOOLEAN"));
+        assert!(statement.sql.contains("\"metadata\" JSONB"));
+        assert!(statement.sql.contains("PRIMARY KEY (\"id\")"));
         assert_eq!(statement.statement_type, StatementType::CreateTable);
     }
 
@@ -469,7 +469,7 @@ mod sql_generator_tests {
 
         let statement = generator.generate_literal_insert(&table, &column_names, &rows, &mut warnings).unwrap();
 
-        assert!(statement.sql.contains("INSERT INTO test_table"));
+        assert!(statement.sql.contains("INSERT INTO \"test_table\""));
         assert!(statement.sql.contains("John Doe"));
         assert!(statement.sql.contains("Jane Smith"));
         assert!(statement.sql.contains("true"));
@@ -488,7 +488,7 @@ mod sql_generator_tests {
 
         let statement = generator.generate_parameterized_insert(&table, &column_names, &rows, &mut warnings).unwrap();
 
-        assert!(statement.sql.contains("INSERT INTO test_table"));
+        assert!(statement.sql.contains("INSERT INTO \"test_table\""));
         assert!(statement.sql.contains("$1"));
         assert!(statement.sql.contains("$2"));
         assert!(!statement.parameters.is_empty());
@@ -545,8 +545,8 @@ mod sql_generator_tests {
         };
         let generator = SQLGenerator::with_config(config);
         let statement = generator.generate_literal_insert(&table, &column_names, &rows, &mut warnings).unwrap();
-        assert!(statement.sql.contains("ON CONFLICT (id) DO UPDATE SET"));
-        assert!(statement.sql.contains("name = EXCLUDED.name"));
+        assert!(statement.sql.contains("ON CONFLICT (\"id\") DO UPDATE SET"));
+        assert!(statement.sql.contains("\"name\" = EXCLUDED.\"name\""));
     }
 
     #[test]
@@ -598,10 +598,10 @@ mod sql_generator_tests {
 
         assert_eq!(statements.len(), 1);
         let statement = &statements[0];
-        assert!(statement.sql.contains("ALTER TABLE test_table"));
-        assert!(statement.sql.contains("ADD CONSTRAINT fk_test_parent"));
-        assert!(statement.sql.contains("FOREIGN KEY (parent_id)"));
-        assert!(statement.sql.contains("REFERENCES parent_table (id)"));
+        assert!(statement.sql.contains("ALTER TABLE \"test_table\""));
+        assert!(statement.sql.contains("ADD CONSTRAINT \"fk_test_parent\""));
+        assert!(statement.sql.contains("FOREIGN KEY (\"parent_id\")"));
+        assert!(statement.sql.contains("REFERENCES \"parent_table\" (\"id\")"));
         assert_eq!(statement.statement_type, StatementType::AlterTable);
     }
 
@@ -629,11 +629,11 @@ mod sql_generator_tests {
         assert_eq!(statements.len(), 2);
         
         let regular_index = &statements[0];
-        assert!(regular_index.sql.contains("CREATE INDEX IF NOT EXISTS idx_test_name"));
-        assert!(regular_index.sql.contains("ON test_table USING BTREE (name)"));
+        assert!(regular_index.sql.contains("CREATE INDEX IF NOT EXISTS \"idx_test_name\""));
+        assert!(regular_index.sql.contains("ON \"test_table\" USING BTREE (\"name\")"));
         
         let unique_index = &statements[1];
-        assert!(unique_index.sql.contains("CREATE UNIQUE INDEX IF NOT EXISTS idx_test_email_unique"));
+        assert!(unique_index.sql.contains("CREATE UNIQUE INDEX IF NOT EXISTS \"idx_test_email_unique\""));
     }
 
     #[test]
@@ -644,7 +644,7 @@ mod sql_generator_tests {
 
         let statement = generator.generate_copy_statement(&table, csv_path).unwrap();
 
-        assert!(statement.sql.contains("COPY test_table"));
+        assert!(statement.sql.contains("COPY \"test_table\""));
         assert!(statement.sql.contains("FROM '/tmp/test_data.csv'"));
         assert!(statement.sql.contains("WITH (FORMAT csv, HEADER true"));
         assert_eq!(statement.statement_type, StatementType::Insert);
@@ -697,7 +697,24 @@ mod sql_generator_tests {
 #[cfg(test)]
 mod postgresql_importer_tests {
     use super::*;
+    use crate::data_importer::importer::statement_preview;
     use std::time::Duration;
+
+    /// A failing statement is quoted back in the error, so it has to stay short
+    /// enough to read: a multi-row INSERT is tens of kilobytes of placeholders.
+    #[test]
+    fn statement_preview_collapses_whitespace_and_truncates() {
+        assert_eq!(
+            statement_preview("INSERT INTO \"Orders\"\n  (\"user\")\n  VALUES ($1)"),
+            "INSERT INTO \"Orders\" (\"user\") VALUES ($1)"
+        );
+
+        let long = format!("INSERT INTO \"Orders\" VALUES {}", "($1), ".repeat(500));
+        let preview = statement_preview(&long);
+        assert!(preview.ends_with("… [truncated]"), "{}", preview);
+        assert!(preview.chars().count() < long.chars().count());
+        assert!(preview.starts_with("INSERT INTO \"Orders\" VALUES"), "{}", preview);
+    }
 
     fn create_test_connection_config() -> ConnectionConfig {
         ConnectionConfig {
@@ -1418,9 +1435,13 @@ mod utils_tests {
         assert!(!sql_generator::utils::is_valid_identifier("special@chars"));
     }
 
+    /// Every identifier is quoted, including the ones that look safe: a bare
+    /// `user` is a reserved word and a bare `Orders` folds to `orders`.
     #[test]
     fn test_escape_identifier() {
-        assert_eq!(sql_generator::utils::escape_identifier("valid_name"), "valid_name");
+        assert_eq!(sql_generator::utils::escape_identifier("valid_name"), "\"valid_name\"");
+        assert_eq!(sql_generator::utils::escape_identifier("user"), "\"user\"");
+        assert_eq!(sql_generator::utils::escape_identifier("Orders"), "\"Orders\"");
         assert_eq!(sql_generator::utils::escape_identifier("invalid-name"), "\"invalid-name\"");
         assert_eq!(sql_generator::utils::escape_identifier("invalid name"), "\"invalid name\"");
         assert_eq!(sql_generator::utils::escape_identifier("123invalid"), "\"123invalid\"");

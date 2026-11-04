@@ -1,4 +1,5 @@
 use crate::error::FireupError;
+use crate::schema_analyzer::ddl_generator::{quote_identifier, quote_identifier_list};
 use crate::types::{TableDefinition, NormalizedSchema};
 use crate::data_importer::transformer::{TableRow, TransformationResult};
 use serde_json::Value;
@@ -208,13 +209,13 @@ impl SQLGenerator {
 
     /// Generate CREATE TABLE statement for a table definition
     pub fn generate_create_table_statement(&self, table: &TableDefinition) -> Result<SQLStatement, FireupError> {
-        let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", table.name);
-        
+        let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", quote_identifier(&table.name));
+
         let mut column_definitions = Vec::new();
-        
+
         // Add column definitions
         for column in &table.columns {
-            let mut column_def = format!("  {} {}", column.name, column.column_type.to_sql());
+            let mut column_def = format!("  {} {}", quote_identifier(&column.name), column.column_type.to_sql());
             
             if !column.nullable {
                 column_def.push_str(" NOT NULL");
@@ -231,8 +232,8 @@ impl SQLGenerator {
         if let Some(ref pk) = table.primary_key {
             let pk_constraint = format!(
                 "  CONSTRAINT {} PRIMARY KEY ({})",
-                pk.name,
-                pk.columns.join(", ")
+                quote_identifier(&pk.name),
+                quote_identifier_list(&pk.columns)
             );
             column_definitions.push(pk_constraint);
         }
@@ -330,6 +331,48 @@ impl SQLGenerator {
         Ok(statements)
     }
 
+    /// Build the `INSERT INTO … (cols) [ON CONFLICT …]` prefix shared by the
+    /// parameterized and literal INSERT builders, with every identifier quoted.
+    fn insert_header(&self, table: &TableDefinition, column_names: &[String]) -> String {
+        let mut sql = format!(
+            "INSERT INTO {} ({})",
+            quote_identifier(&table.name),
+            quote_identifier_list(column_names)
+        );
+
+        if !self.config.handle_conflicts {
+            return sql;
+        }
+
+        match self.config.conflict_strategy {
+            ConflictStrategy::Ignore => {
+                sql.push_str(" ON CONFLICT DO NOTHING");
+            }
+            ConflictStrategy::Update => {
+                if let Some(ref pk) = table.primary_key {
+                    sql.push_str(&format!(
+                        " ON CONFLICT ({}) DO UPDATE SET ",
+                        quote_identifier_list(&pk.columns)
+                    ));
+                    let updates: Vec<String> = column_names
+                        .iter()
+                        .filter(|col| !pk.columns.contains(col))
+                        .map(|col| {
+                            let quoted = quote_identifier(col);
+                            format!("{} = EXCLUDED.{}", quoted, quoted)
+                        })
+                        .collect();
+                    sql.push_str(&updates.join(", "));
+                }
+            }
+            ConflictStrategy::Fail => {
+                // No conflict handling - use default PostgreSQL behavior
+            }
+        }
+
+        sql
+    }
+
     /// Generate parameterized INSERT statement
     pub fn generate_parameterized_insert(
         &mut self,
@@ -338,32 +381,10 @@ impl SQLGenerator {
         rows: &[TableRow],
         _warnings: &mut Vec<String>,
     ) -> Result<SQLStatement, FireupError> {
-        let mut sql = format!("INSERT INTO {} ({})", table.name, column_names.join(", "));
-        
-        // Add conflict handling if configured
-        if self.config.handle_conflicts {
-            match self.config.conflict_strategy {
-                ConflictStrategy::Ignore => {
-                    sql.push_str(" ON CONFLICT DO NOTHING");
-                }
-                ConflictStrategy::Update => {
-                    if let Some(ref pk) = table.primary_key {
-                        sql.push_str(&format!(" ON CONFLICT ({}) DO UPDATE SET ", pk.columns.join(", ")));
-                        let updates: Vec<String> = column_names.iter()
-                            .filter(|col| !pk.columns.contains(col))
-                            .map(|col| format!("{} = EXCLUDED.{}", col, col))
-                            .collect();
-                        sql.push_str(&updates.join(", "));
-                    }
-                }
-                ConflictStrategy::Fail => {
-                    // No conflict handling - use default PostgreSQL behavior
-                }
-            }
-        }
-        
+        let mut sql = self.insert_header(table, column_names);
+
         sql.push_str(" VALUES ");
-        
+
         let mut parameters = Vec::new();
         let mut value_clauses = Vec::new();
         
@@ -401,32 +422,10 @@ impl SQLGenerator {
         rows: &[TableRow],
         _warnings: &mut Vec<String>,
     ) -> Result<SQLStatement, FireupError> {
-        let mut sql = format!("INSERT INTO {} ({})", table.name, column_names.join(", "));
-        
-        // Add conflict handling if configured
-        if self.config.handle_conflicts {
-            match self.config.conflict_strategy {
-                ConflictStrategy::Ignore => {
-                    sql.push_str(" ON CONFLICT DO NOTHING");
-                }
-                ConflictStrategy::Update => {
-                    if let Some(ref pk) = table.primary_key {
-                        sql.push_str(&format!(" ON CONFLICT ({}) DO UPDATE SET ", pk.columns.join(", ")));
-                        let updates: Vec<String> = column_names.iter()
-                            .filter(|col| !pk.columns.contains(col))
-                            .map(|col| format!("{} = EXCLUDED.{}", col, col))
-                            .collect();
-                        sql.push_str(&updates.join(", "));
-                    }
-                }
-                ConflictStrategy::Fail => {
-                    // No conflict handling
-                }
-            }
-        }
-        
+        let mut sql = self.insert_header(table, column_names);
+
         sql.push_str(" VALUES ");
-        
+
         let mut value_clauses = Vec::new();
         for row in rows {
             let mut values = Vec::new();
@@ -463,10 +462,10 @@ impl SQLGenerator {
             let sql = format!(
                 "CREATE {}INDEX IF NOT EXISTS {} ON {} USING {} ({});",
                 unique_clause,
-                index.name,
-                table.name,
+                quote_identifier(&index.name),
+                quote_identifier(&table.name),
                 index_type,
-                index.columns.join(", ")
+                quote_identifier_list(&index.columns)
             );
             
             statements.push(SQLStatement {
@@ -489,11 +488,11 @@ impl SQLGenerator {
             for fk in &table.foreign_keys {
                 let sql = format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({});",
-                    table.name,
-                    fk.constraint_name,
-                    fk.column,
-                    fk.referenced_table,
-                    fk.referenced_column
+                    quote_identifier(&table.name),
+                    quote_identifier(&fk.constraint_name),
+                    quote_identifier(&fk.column),
+                    quote_identifier(&fk.referenced_table),
+                    quote_identifier(&fk.referenced_column)
                 );
                 
                 statements.push(SQLStatement {
@@ -558,8 +557,8 @@ impl SQLGenerator {
         
         let sql = format!(
             "COPY {} ({}) FROM '{}' WITH (FORMAT csv, HEADER true, DELIMITER ',', QUOTE '\"', ESCAPE '\"');",
-            table.name,
-            column_names.join(", "),
+            quote_identifier(&table.name),
+            quote_identifier_list(&column_names),
             csv_file_path
         );
 
@@ -594,13 +593,14 @@ pub mod utils {
     use super::*;
 
     /// Escape SQL identifier (table name, column name, etc.)
+    ///
+    /// Always quotes, like the DDL side. Leaving "simple looking" identifiers
+    /// bare broke two cases the DDL already handled: a reserved word such as a
+    /// Firestore field called `user` is a syntax error, and a mixed-case kind
+    /// such as `Orders` folds to `orders`, which no longer matches the
+    /// `"Orders"` table the DDL created.
     pub fn escape_identifier(identifier: &str) -> String {
-        if identifier.chars().all(|c| c.is_alphanumeric() || c == '_') 
-            && !identifier.chars().next().unwrap_or('0').is_ascii_digit() {
-            identifier.to_string()
-        } else {
-            format!("\"{}\"", identifier.replace('"', "\"\""))
-        }
+        quote_identifier(identifier)
     }
 
     /// Validate SQL identifier
@@ -687,10 +687,10 @@ mod tests {
 
         let statement = generator.generate_create_table_statement(&table).unwrap();
 
-        assert!(statement.sql.contains("CREATE TABLE IF NOT EXISTS test_table"));
-        assert!(statement.sql.contains("id UUID NOT NULL"));
-        assert!(statement.sql.contains("name VARCHAR(255)"));
-        assert!(statement.sql.contains("PRIMARY KEY (id)"));
+        assert!(statement.sql.contains("CREATE TABLE IF NOT EXISTS \"test_table\""));
+        assert!(statement.sql.contains("\"id\" UUID NOT NULL"));
+        assert!(statement.sql.contains("\"name\" VARCHAR(255)"));
+        assert!(statement.sql.contains("PRIMARY KEY (\"id\")"));
     }
 
     #[test]
@@ -703,7 +703,7 @@ mod tests {
 
         let statement = generator.generate_literal_insert(&table, &column_names, &rows, &mut warnings).unwrap();
 
-        assert!(statement.sql.contains("INSERT INTO test_table"));
+        assert!(statement.sql.contains("INSERT INTO \"test_table\""));
         assert!(statement.sql.contains("John Doe"));
         assert!(statement.sql.contains("Jane Smith"));
         assert_eq!(statement.row_count, 2);
@@ -719,7 +719,7 @@ mod tests {
 
         let statement = generator.generate_parameterized_insert(&table, &column_names, &rows, &mut warnings).unwrap();
 
-        assert!(statement.sql.contains("INSERT INTO test_table"));
+        assert!(statement.sql.contains("INSERT INTO \"test_table\""));
         assert!(statement.sql.contains("$1"));
         assert!(!statement.parameters.is_empty());
         assert_eq!(statement.row_count, 2);
@@ -752,6 +752,75 @@ mod tests {
         let statement = generator.generate_literal_insert(&table, &column_names, &rows, &mut warnings).unwrap();
 
         assert!(statement.sql.contains("ON CONFLICT DO NOTHING"));
+    }
+
+    /// A Firestore kind named `Orders` with a field named `user` is legal, and
+    /// both broke the generated SQL: unquoted `Orders` folds to `orders` and
+    /// unquoted `user` is a reserved word. Every identifier must be quoted.
+    #[test]
+    fn reserved_word_and_mixed_case_identifiers_are_quoted() {
+        let mut table = TableDefinition::new("Orders".to_string());
+        table.add_column(ColumnDefinition::new("key_path".to_string(), PostgreSQLType::Text).not_null());
+        table.add_column(ColumnDefinition::new("user".to_string(), PostgreSQLType::Text));
+        table.add_column(ColumnDefinition::new("Total".to_string(), PostgreSQLType::Integer));
+        table.set_primary_key(PrimaryKeyDefinition {
+            name: "Orders_pkey".to_string(),
+            columns: vec!["key_path".to_string()],
+        });
+        table.indexes.push(IndexDefinition {
+            name: "idx_Orders_user".to_string(),
+            columns: vec!["user".to_string()],
+            index_type: Some("BTREE".to_string()),
+            unique: false,
+        });
+
+        let generator = SQLGenerator::new();
+        let create = generator.generate_create_table_statement(&table).unwrap();
+        assert!(create.sql.contains("CREATE TABLE IF NOT EXISTS \"Orders\""), "{}", create.sql);
+        assert!(create.sql.contains("\"user\" TEXT"), "{}", create.sql);
+        assert!(create.sql.contains("CONSTRAINT \"Orders_pkey\" PRIMARY KEY (\"key_path\")"), "{}", create.sql);
+
+        let index = generator.generate_index_statements(&table).unwrap();
+        assert!(
+            index[0].sql.contains("\"idx_Orders_user\" ON \"Orders\" USING BTREE (\"user\")"),
+            "{}",
+            index[0].sql
+        );
+
+        let rows = vec![TableRow {
+            columns: [
+                ("key_path".to_string(), json!("Orders/o1")),
+                ("user".to_string(), json!("Users/u1")),
+                ("Total".to_string(), json!(10)),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            primary_key: json!("Orders/o1"),
+            foreign_keys: HashMap::new(),
+        }];
+        let column_names: Vec<String> = table.columns.iter().map(|c| c.name.clone()).collect();
+        let mut warnings = Vec::new();
+
+        let mut generator = SQLGenerator::new();
+        for sql in [
+            generator
+                .generate_parameterized_insert(&table, &column_names, &rows, &mut warnings)
+                .unwrap()
+                .sql,
+            generator
+                .generate_literal_insert(&table, &column_names, &rows, &mut warnings)
+                .unwrap()
+                .sql,
+        ] {
+            assert!(
+                sql.starts_with("INSERT INTO \"Orders\" (\"key_path\", \"user\", \"Total\")"),
+                "{}",
+                sql
+            );
+            // The ON CONFLICT clause names columns too.
+            assert!(sql.contains("ON CONFLICT (\"key_path\") DO UPDATE SET \"user\" = EXCLUDED.\"user\""), "{}", sql);
+        }
     }
 
     #[test]
