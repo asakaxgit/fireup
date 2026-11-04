@@ -21,6 +21,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 smoke_dir="$repo_root/tests/local-smoke"
+# Honour CARGO_TARGET_DIR, or the binary we build is not the one we start.
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 port="${1:-4589}"
 # Honour CARGO_TARGET_DIR so this works from a git worktree, where the default
 # target directory is not $repo_root/target.

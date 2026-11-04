@@ -182,12 +182,21 @@ enum Commands {
         max_errors: usize,
     },
 
-    /// Run a local Firestore-compatible server for official client SDKs
-    #[command(long_about = "Serve the public google.firestore.v1 gRPC API on a single local port so official Firestore client SDKs can talk to Fireup via the documented FIRESTORE_EMULATOR_HOST environment variable. The same port answers HTTP GET / (service discovery) and GET /health.
+    /// Run a local Firestore- and Firebase-Auth-compatible server for official client SDKs
+    #[command(long_about = "Serve the public google.firestore.v1 gRPC API and a subset of the public Identity Toolkit (Firebase Auth) REST API on a single local port, so official client SDKs can talk to Fireup via the documented FIRESTORE_EMULATOR_HOST and FIREBASE_AUTH_EMULATOR_HOST environment variables. The same port answers HTTP GET / (service discovery) and GET /health.
 
-This is an independent implementation of Google's published Firestore API. It is not the Firebase Emulator Suite and is not affiliated with Google.
+    export FIRESTORE_EMULATOR_HOST=127.0.0.1:4589
+    export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:4589
 
-Phase 1 serves document CRUD (GetDocument, CreateDocument, UpdateDocument, DeleteDocument, BatchGetDocuments, Commit). Storage is in-memory unless --postgres-url is given, in which case documents are stored in PostgreSQL and survive a restart. Queries, transactions, and realtime listeners return UNIMPLEMENTED.")]
+This is an independent implementation of Google's published APIs. It is not the Firebase Emulator Suite and is not affiliated with Google.
+
+FIRESTORE: document CRUD (GetDocument, CreateDocument, UpdateDocument, DeleteDocument, BatchGetDocuments, Commit). Queries, transactions, and realtime listeners return UNIMPLEMENTED.
+
+AUTH: email/password sign-up and sign-in, anonymous sign-in, custom-token sign-in, token refresh, and admin account CRUD. Phone auth, multi-factor enrolment, federated providers, and out-of-band email flows are not served.
+
+Storage is in-memory unless --postgres-url is given, in which case documents and accounts are stored in PostgreSQL and survive a restart.
+
+LOCAL DEVELOPMENT ONLY: the auth surface mints unsigned ID tokens and checks no API key or admin credential, so anything that can reach the port can act as any account. The default bind is loopback; keep it that way.")]
     Local {
         #[command(subcommand)]
         command: Option<LocalCommands>,
@@ -200,8 +209,9 @@ Phase 1 serves document CRUD (GetDocument, CreateDocument, UpdateDocument, Delet
         #[arg(short, long, default_value_t = local::DEFAULT_PORT, global = true)]
         port: u16,
 
-        /// Store documents in PostgreSQL instead of memory, so they survive a
-        /// restart (format: postgresql://user:password@host:port/database)
+        /// Store documents and auth accounts in PostgreSQL instead of memory,
+        /// so they survive a restart
+        /// (format: postgresql://user:password@host:port/database)
         #[arg(long, value_name = "URL", global = true)]
         postgres_url: Option<String>,
 
@@ -213,8 +223,8 @@ Phase 1 serves document CRUD (GetDocument, CreateDocument, UpdateDocument, Delet
         #[arg(long, default_value = local::LocalConfig::DEFAULT_DATABASE_ID, global = true)]
         database_id: String,
 
-        /// Services to enable (repeatable)
-        #[arg(long = "enable", value_enum, default_value = "firestore", global = true)]
+        /// Services to enable (repeatable); both are on by default
+        #[arg(long = "enable", value_enum, default_values = ["firestore", "auth"], global = true)]
         enable: Vec<local::Service>,
 
         /// PostgreSQL connection pool size
