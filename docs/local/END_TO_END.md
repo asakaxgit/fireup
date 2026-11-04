@@ -49,7 +49,7 @@ Everything below is what that script does, and what each step is evidence of.
 |---|---|---|
 | Shape | Normalized relational tables, one per kind | One row per document, fields as `jsonb` |
 | Read with | `psql`, an ORM, a BI tool, anything that speaks SQL | An official Firestore/Datastore SDK, unchanged |
-| Types | Mapped to real PostgreSQL types: `timestamptz`, `bytea`, `point`, `numeric` | The public Firestore value shape, with the gap below |
+| Types | Mapped to real PostgreSQL types: `timestamptz`, `bytea`, `point`, `numeric` | The public Firestore value shape, including the four Datastore types [below](#what-seeding-does-with-datastore-value-types) |
 | Good for | Reporting, the actual migration, schema review, constraints | Running existing application code locally, tests, a staged migration |
 
 You usually want both, and at the same time: that is the point of pointing them
@@ -132,6 +132,9 @@ projects/fireup-demo/databases/(default)/documents/Users/ada/Orders/1001
 
 which an SDK reads as the subcollection `Users/ada/Orders`. Nothing flattens.
 
+Value types survive too, including the four Datastore types JSON cannot express
+— see [below](#what-seeding-does-with-datastore-value-types).
+
 Use the same `--project-id` here, in step 4, and in your SDK. They have to
 agree: the server answers for one project, and a resource name contains it.
 
@@ -210,39 +213,44 @@ step 5 and the normalized tables from step 2, side by side in one database.
 
 ---
 
-## The fidelity gap this workflow has
+## What seeding does with Datastore value types
 
-**Seeding does not restore Firestore value types.** It is the one thing to know
-before pointing real application code at a seeded store.
+Four Datastore types have no native JSON form, so the export parser decodes them
+into a *tagged map* — `{"__fireup_type__": "timestamp", "rfc3339": "…"}` —
+rather than erasing them. Both planes read those tags: `fireup import` maps them
+onto `bytea`, `timestamptz`, `point`, and `text`, and **`fireup local seed`
+restores the matching Firestore value type**, so no client needs to know that
+`__fireup_type__` exists.
 
-The export parser decodes a Datastore blob, timestamp, geo point, or key
-reference into a *tagged map* — `{"__fireup_type__": "timestamp", "rfc3339":
-"…"}` — because JSON has no native form for them. `fireup import` consumes
-those tags and maps them onto `bytea`, `timestamptz`, `point`, and `text`, so
-the SQL plane gets real types. **`fireup local seed` does not**: it infers a
-Firestore value type from the JSON it is handed, so a tagged map seeds as a
-`mapValue`.
-
-What an SDK therefore sees for one of those fields:
-
-| Export property | Expected | What a seeded read gives you |
+| Export property | Seeded value type | What an SDK reads |
 |---|---|---|
-| timestamp | `Timestamp` / `Date` | map `{ __fireup_type__: 'timestamp', rfc3339 }` |
-| blob | `Buffer` / `Bytes` | map `{ __fireup_type__: 'blob', base64 }` |
-| geo point | `GeoPoint` | map `{ __fireup_type__: 'geo_point', latitude, longitude }` |
-| key reference | `DocumentReference` | map `{ __fireup_type__: 'key', key_path }` |
+| timestamp | `timestampValue` | `Timestamp` |
+| blob | `bytesValue` | `Buffer` / `Bytes` |
+| geo point | `geoPointValue` | `GeoPoint` |
+| key reference | `referenceValue` | `DocumentReference` |
 
-Strings, numbers, booleans, nulls, arrays, and ordinary nested maps seed with
-full fidelity. Only those four are affected.
+Strings, numbers, booleans, nulls, arrays, and ordinary nested maps seed from
+their JSON shape, as before. `demo/read-with-sdk.mjs` asserts all four through
+the official client library, and `demo/query.sql` shows the same four in the
+stored `jsonb`.
 
-This is a gap in seeding, not a loss of information: the tag is still in the
-row, and the migrator already reads it. Closing it means teaching `seed.rs` the
-same tags `src/types.rs` defines — tracked as fidelity work rather than papered
-over by guessing types from a string's shape, because a document holding the
-literal text of a date is not the same as one holding a timestamp.
+Two details that are deliberate rather than incidental:
 
-Two more seeding limits, both deliberate refusals rather than silent results:
+- **Only the tag decides the type.** A document holding the literal text of a
+  date is not the same as one holding a timestamp, so nothing is inferred from a
+  string's shape. A map that merely happens to carry a `__fireup_type__` key
+  whose value Fireup does not know stays an ordinary `mapValue`.
+- **A key reference becomes a resource name.** The tag carries a Datastore key
+  path (`Users/ada`); a `referenceValue` is a full
+  `projects/…/databases/…/documents/…` name. Seeding resolves it through the
+  same key-to-document-path mapping it uses for a document's own name, so a
+  reference points at exactly the document that key seeded as.
 
+Three seeding limits, all deliberate refusals rather than silent results:
+
+- **A tagged value whose payload cannot be restored fails its document.**
+  Unparseable base64, a key path that is not a sequence of kind/id pairs, or a
+  reference into a non-default namespace is reported, not seeded as a map.
 - **Non-default namespaces are skipped, not merged.** Two namespaces can hold
   the same key path, and mapping both onto one document name would overwrite
   data.

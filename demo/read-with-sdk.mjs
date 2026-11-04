@@ -12,8 +12,9 @@
 // DATASTORE_EMULATOR_HOST are already exported.
 
 import { Datastore, PropertyFilter } from '@google-cloud/datastore'
-import { Firestore } from '@google-cloud/firestore'
+import { DocumentReference, Firestore, GeoPoint, Timestamp } from '@google-cloud/firestore'
 import { strict as assert } from 'node:assert'
+import { Buffer } from 'node:buffer'
 
 const projectId = process.env.FIREUP_DEMO_PROJECT_ID ?? 'fireup-demo'
 
@@ -86,19 +87,40 @@ const main = async () => {
   assert.ok(writtenEntity, 'the Firestore write should be visible through the Datastore API')
   show('the Firestore write', `reachable as Datastore key Users/ada > Orders/${WRITTEN_ID}`)
 
-  // The documented fidelity gap, stated rather than hidden. `fireup local seed`
-  // goes through the migrator's export parser, which represents a timestamp,
-  // blob, geo point, or key reference as a tagged map instead of the matching
-  // Firestore value type. An SDK therefore reads a map here, not a Date.
-  step('Known fidelity gap, as seen by the SDK')
-  const createdAt = ada.get('created_at')
-  show('created_at type', createdAt?.constructor?.name ?? typeof createdAt)
-  show('created_at value', JSON.stringify(createdAt))
-  assert.equal(
-    createdAt?.__fireup_type__,
-    'timestamp',
-    'seed is expected to leave a tagged map here; if this now reads as a Date, update docs/local/END_TO_END.md',
-  )
+  // The four Datastore types JSON has no native form for. The migrator's export
+  // parser hands them to `fireup local seed` as tagged maps; seeding reads those
+  // tags, so what arrives here is the real Firestore value type and no client
+  // needs to know that `__fireup_type__` exists.
+  step('Datastore value types, as seen by the SDK')
+
+  const grace = await db.doc('Users/grace').get()
+  assert.ok(grace.exists, 'Users/grace should have been seeded from the export')
+
+  const typeName = (value) => value?.constructor?.name ?? typeof value
+
+  const createdAt = grace.get('created_at')
+  show('created_at', `${typeName(createdAt)} ${createdAt.toDate().toISOString()}`)
+  assert.ok(createdAt instanceof Timestamp, `created_at should be a Timestamp, got ${typeName(createdAt)}`)
+
+  const avatar = grace.get('avatar')
+  show('avatar', `${typeName(avatar)} of ${avatar.length} bytes`)
+  assert.ok(Buffer.isBuffer(avatar), `avatar should be bytes, got ${typeName(avatar)}`)
+
+  const location = grace.get('location')
+  show('location', `${typeName(location)} ${location.latitude}, ${location.longitude}`)
+  assert.ok(location instanceof GeoPoint, `location should be a GeoPoint, got ${typeName(location)}`)
+
+  // A key reference comes back as a reference to a document in this database,
+  // so it can be followed without reconstructing a path by hand.
+  const manager = grace.get('manager')
+  show('manager', `${typeName(manager)} → ${manager.path}`)
+  assert.ok(manager instanceof DocumentReference, `manager should be a reference, got ${typeName(manager)}`)
+  const managed = await manager.get()
+  assert.ok(managed.exists, 'the reference should resolve to a seeded document')
+  show('  followed', JSON.stringify(managed.get('display_name')))
+
+  // An ordinary nested object is still an ordinary map.
+  show('address', `${typeName(grace.get('address'))} with city ${JSON.stringify(grace.get('address').city)}`)
 }
 
 await main()

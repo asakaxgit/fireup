@@ -436,9 +436,29 @@ documented and demonstrated as one workflow:
 claimed the export parser erases Firestore value types to plain strings. It does
 not: it emits a tagged map (`__fireup_type__`), which `fireup import` already
 consumes to pick `bytea`/`timestamptz`/`point`/`text`. `fireup local seed`
-ignores the tag, so that — not the parser — is where blobs, timestamps, geo
-points, and key references lose their type. Tracked as fidelity work; no
-behaviour changed in Phase 4.
+ignored the tag, so that — not the parser — was where blobs, timestamps, geo
+points, and key references lost their type. No behaviour changed in Phase 4; the
+gap itself was closed next.
+
+**SAK-174 (November 4 2026)** — seeding restores Datastore value types. The gap
+Phase 4 documented is closed: `src/local/seed.rs` reads the same
+`__fireup_type__` tags `fireup import` reads and produces `timestampValue`,
+`bytesValue`, `geoPointValue`, and `referenceValue` instead of a `mapValue`.
+
+- Dispatch is on the tag only, never on a string's shape, so a document holding
+  the literal text of a date still holds a string. A map with an unknown tag
+  value stays a `mapValue`; an unrestorable payload (bad base64, a key path that
+  is not kind/id pairs, a reference into a non-default namespace) fails its
+  document rather than seeding as something else.
+- A key reference becomes a full resource name through the same key-path mapping
+  seeding uses for a document's own name, so the reference resolves to the
+  document that key seeded as.
+- Verified by `tests/local_firestore_tests.rs`
+  (`a_seeded_export_reads_back_as_real_firestore_value_types`), which seeds the
+  `export-onestore` fixture and reads all four types back over gRPC, and by
+  `scripts/demo-export-to-sql.sh`, where `@google-cloud/firestore` now reads a
+  `Timestamp`, a `Buffer`, a `GeoPoint`, and a followable `DocumentReference`.
+- Non-default namespaces remain skipped; that is unchanged and deliberate.
 
 ---
 

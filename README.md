@@ -320,9 +320,10 @@ The application uses structured logging with the `tracing` crate:
 
 4. **An SDK read returns a map where you expected a timestamp, blob, geo point,
    or document reference**
-   - Expected, and documented: `fireup local seed` does not restore those four
-     Firestore value types. See
-     [docs/local/END_TO_END.md](docs/local/END_TO_END.md#the-fidelity-gap-this-workflow-has).
+   - `fireup local seed` restores those four from the export parser's
+     `__fireup_type__` tags, so a map means the tag was not one Fireup knows —
+     check the stored row and re-seed with a current build. See
+     [docs/local/END_TO_END.md](docs/local/END_TO_END.md#what-seeding-does-with-datastore-value-types).
 
 5. **An SDK call fails with `UNIMPLEMENTED`**
    - Also expected: an unsupported feature is an explicit error rather than a
