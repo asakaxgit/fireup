@@ -1,15 +1,81 @@
-# Fireup - Firestore to PostgreSQL Migration Tool
+# Fireup — a PostgreSQL-backed migrator and local data plane for Firestore/Datastore
 
-Fireup is a migration tool that provides dual compatibility with both PostgreSQL and Firestore, enabling seamless migration of Firestore backup data to PostgreSQL while supporting Standard SQL queries for data access and manipulation.
+Fireup takes a managed Firestore/Datastore export and gives you **both** halves
+of a migration at once, on one PostgreSQL database:
+
+- **The migrator** (`fireup import`) — parse the export, analyse and normalize
+  the schema, and import it into real PostgreSQL tables you can query with
+  Standard SQL.
+- **The local data plane** (`fireup local`) — serve the published
+  `google.firestore.v1` and `google.datastore.v1` gRPC APIs plus a subset of the
+  published Identity Toolkit REST API on a single local port, over that same
+  PostgreSQL store, so official Firebase/Google Cloud SDKs keep working against
+  it unchanged.
+
+That combination is the point. Application code that is not ready to stop being
+a Firestore client talks to `fireup local`; the reporting, the constraints, and
+the migration itself happen in SQL — same data, same connection string, no
+second copy to keep in sync.
+
+```bash
+docker compose up -d postgres
+scripts/demo-export-to-sql.sh     # export → SQL tables → live API → SQL again
+```
+
+That script is the whole workflow end to end. The narrated version, including
+where the fidelity gaps are, is **[docs/local/END_TO_END.md](docs/local/END_TO_END.md)**.
+
+## What Fireup is, and is not
+
+Fireup is a **Postgres-backed local data plane plus an export migrator** — not a
+general-purpose GCP emulator suite. It deliberately goes deep on export
+fidelity, durable PostgreSQL storage, and SQL access, and deliberately does not
+go wide: no GCS, Pub/Sub, Cloud Run, KMS, or the rest of the cloud surface.
+
+If you need that breadth, a full local-cloud suite such as **floci-gcp** is the
+right tool for it. The two **complement** each other rather than compete: a
+local-cloud suite is not a migration tool, and Fireup is not an emulator suite.
+Fireup's default port is `4589` specifically so it can run beside floci-gcp
+(`4588`) and Google's Firebase emulators (`8080`/`4000`) without an argument
+about ports.
+
+> **Independent implementation.** `fireup local` implements **public** Google API
+> contracts from public documentation and the public
+> [googleapis](https://github.com/googleapis/googleapis) protobuf definitions.
+> It is **not** the Firebase Emulator Suite, is **not** affiliated with or
+> endorsed by Google, and contains no code or behaviour derived from proprietary
+> Google binaries. Its auth tokens are unsigned and it ships no Google key
+> material; it is for local development only. See
+> [`docs/licenses/FIREBASE_GCP_LOCAL.md`](docs/licenses/FIREBASE_GCP_LOCAL.md)
+> for the licence and attribution ledger.
 
 ## Features
 
-- Parse Firestore LevelDB backup files
-- Automatic schema analysis and normalization
-- Direct PostgreSQL import with optimized schema
-- Standard SQL query support
+### Migrator
+
+- Parse managed Firestore/Datastore export trees (LevelDB log framing, legacy
+  `EntityProto` and `google.datastore.v1.Entity` payloads)
+- Automatic schema analysis and normalization (1NF/2NF/3NF)
+- Direct PostgreSQL import with generated, reviewable DDL
+- Standard SQL query support, with real PostgreSQL types
 - Comprehensive logging and error handling
 - Docker-based development environment
+
+### Local data plane
+
+- `google.firestore.v1.Firestore`: document CRUD, structured queries,
+  transactions, batch writes — 12 of the 17 RPCs, with the rest an explicit
+  `UNIMPLEMENTED`
+- `google.datastore.v1.Datastore`: `Lookup`, `RunQuery`, `Commit`,
+  transactions, id allocation — over the *same* rows, since kinds map to
+  collections
+- Identity Toolkit (Firebase Auth) email/password, custom-token, and anonymous
+  sign-in plus the Admin SDK account surface
+- One port for all of it, gRPC and HTTP/1.1 on the same listener
+- In-memory, or durable in PostgreSQL and legible to SQL
+- Seed it straight from an export: `fireup local seed`
+- Every unsupported feature is an explicit error, never a wrong answer — see the
+  [fidelity matrix](docs/local/README.md#fidelity-matrix)
 
 ## Quick Start
 
@@ -49,9 +115,11 @@ cargo run -- --help
 
 ### Available Commands
 
-- `fireup import` - Import Firestore backup data to PostgreSQL
-- `fireup analyze` - Analyze schema from backup file and generate DDL
 - `fireup validate` - Validate backup file integrity
+- `fireup analyze` - Analyze schema from backup file and generate DDL
+- `fireup import` - Import Firestore backup data to PostgreSQL
+- `fireup local` - Serve the Firestore/Datastore/Auth APIs on one local port
+- `fireup local seed` - Load an export into the local data plane's store
 
 ### Example Usage
 
@@ -63,8 +131,36 @@ cargo run -- validate --backup-file /path/to/backup.leveldb
 cargo run -- analyze --backup-file /path/to/backup.leveldb --output schema.sql
 
 # Import data to PostgreSQL
-cargo run -- import --backup-file /path/to/backup.leveldb --postgres-url postgresql://fireup:fireup_dev_password@localhost:5432/fireup_dev
+# (5433 is the host port docker-compose publishes; see docker-compose.yml)
+cargo run -- import --backup-file /path/to/backup.leveldb --postgres-url postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev
 ```
+
+### Serving the same data to Firestore SDKs
+
+```bash
+# Load the export into the local data plane's store, in the same database.
+cargo run -- local seed --backup-file /path/to/export \
+  --postgres-url postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev \
+  --project-id my-project
+
+# Serve it. One port: gRPC and HTTP/1.1.
+cargo run -- local \
+  --postgres-url postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev \
+  --project-id my-project
+```
+
+Then point any official SDK at it with the documented environment variables —
+no code change, no Fireup-specific shim:
+
+```bash
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:4589
+export DATASTORE_EMULATOR_HOST=127.0.0.1:4589
+export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:4589
+curl http://127.0.0.1:4589/health
+```
+
+Flags, the auth surface, storage layout, and the full fidelity matrix are in
+**[docs/local/README.md](docs/local/README.md)**.
 
 ## PostgreSQL Client Connection
 
@@ -118,10 +214,24 @@ src/
 │   ├── normalizer.rs    # Database normalization
 │   ├── ddl_generator.rs # DDL generation
 │   └── ...
-└── data_importer/       # PostgreSQL import functionality
-    ├── importer.rs      # Main import logic
-    ├── transformer.rs   # Data transformation
-    └── ...
+├── data_importer/       # PostgreSQL import functionality
+│   ├── importer.rs      # Main import logic
+│   ├── transformer.rs   # Data transformation
+│   └── ...
+├── protos/              # Stubs generated from the public googleapis protos
+└── local/               # The local data plane (`fireup local`)
+    ├── mod.rs           # Server wiring and protocol multiplexing
+    ├── firestore.rs     # google.firestore.v1.Firestore
+    ├── datastore.rs     # google.datastore.v1.Datastore
+    ├── auth/            # Identity Toolkit (Firebase Auth)
+    ├── store.rs         # The Store trait, MemoryStore, conformance suite
+    ├── postgres_store.rs# The durable Store implementation
+    ├── seed.rs          # export → store
+    └── ...              # See docs/local/README.md#layout
+
+demo/                    # The end-to-end demo's SDK and SQL halves
+docs/local/              # Local data plane documentation
+proto/google/            # Vendored public googleapis .proto files (Apache-2.0)
 ```
 
 ### Environment Variables
@@ -153,7 +263,19 @@ cargo test -- --nocapture
 
 # Run specific test module
 cargo test leveldb_parser
+
+# The local data plane, over real gRPC and real HTTP/1.1
+cargo test --test local_firestore_tests --test local_datastore_tests --test local_auth_tests
+
+# The same surface driven by Google's official client SDKs, which is the layer
+# that catches what tests written from our own reading of the spec cannot
+scripts/smoke-local-firestore.sh
+scripts/smoke-local-datastore.sh
+scripts/smoke-local-auth.sh
 ```
+
+Durable-store tests skip unless you point them at a dedicated database you own;
+see [docs/local/README.md#tests](docs/local/README.md#tests).
 
 ### Docker Commands
 
@@ -196,6 +318,37 @@ The application uses structured logging with the `tracing` crate:
    - Reduce `FIREUP_MAX_BATCH_SIZE` in environment
    - Increase Docker memory limits in `docker-compose.yml`
 
+4. **An SDK read returns a map where you expected a timestamp, blob, geo point,
+   or document reference**
+   - Expected, and documented: `fireup local seed` does not restore those four
+     Firestore value types. See
+     [docs/local/END_TO_END.md](docs/local/END_TO_END.md#the-fidelity-gap-this-workflow-has).
+
+5. **An SDK call fails with `UNIMPLEMENTED`**
+   - Also expected: an unsupported feature is an explicit error rather than a
+     wrong answer, and the message names the gap. Check the
+     [fidelity matrix](docs/local/README.md#fidelity-matrix) before treating it
+     as a bug.
+
+## Documentation
+
+| Document | What is in it |
+|---|---|
+| [docs/local/END_TO_END.md](docs/local/END_TO_END.md) | The end-to-end workflow: export → SQL tables → live API → SQL, and its fidelity gaps |
+| [docs/local/README.md](docs/local/README.md) | `fireup local`: flags, fidelity matrix, auth surface, storage layout, tests |
+| [PROJECT_STATUS.md](PROJECT_STATUS.md) | What is proven, what is not, and the residual risks |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Deploying the migrator |
+| [docs/INTEGRATION_TESTING.md](docs/INTEGRATION_TESTING.md) | The integration test suite |
+| [docs/licenses/FIREBASE_GCP_LOCAL.md](docs/licenses/FIREBASE_GCP_LOCAL.md) | Licence and attribution ledger for everything Google/Firebase-related |
+| [tests/fixtures/README.md](tests/fixtures/README.md) | The managed-export fixtures and their binary format |
+
 ## License
 
-MIT License
+MIT License.
+
+Third-party material is recorded in
+[docs/licenses/FIREBASE_GCP_LOCAL.md](docs/licenses/FIREBASE_GCP_LOCAL.md) — most
+notably the `.proto` definitions under `proto/google/`, vendored unmodified from
+[googleapis](https://github.com/googleapis/googleapis) (Apache-2.0) at a pinned
+commit. Fireup is an independent implementation of public Google API contracts
+and is not affiliated with or endorsed by Google.

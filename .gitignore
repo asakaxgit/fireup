@@ -33,6 +33,7 @@ Thumbs.db
 # Generated files
 schema.sql
 *.ddl
+demo/generated-schema.sql
 
 # TypeScript/Node.js
 node_modules/

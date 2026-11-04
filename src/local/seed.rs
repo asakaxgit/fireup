@@ -4,23 +4,33 @@
 //! The export is read by the same parser `fireup import` uses
 //! ([`FirestoreDocumentParser`]), so there is one implementation of the export
 //! format in the project. Seeding then maps each parsed document onto a
-//! Firestore resource name and writes it through the [`Store`] trait, which
-//! means `--postgres-url` seeds a durable store and omitting it seeds an
-//! in-memory one (useful only in-process, e.g. in tests).
+//! Firestore resource name and writes it through the
+//! [`Store`][crate::local::store::Store] trait, which means `--postgres-url`
+//! seeds a durable store and omitting it seeds an in-memory one (useful only
+//! in-process, e.g. in tests).
 //!
 //! Writes go through `put`, which upserts, so seeding the same export twice
 //! leaves the store in the same state as seeding it once.
 //!
 //! ## Known fidelity limit
 //!
-//! The shared export parser erases Firestore's value types on the way in: it
-//! unwraps `{"timestampValue": "…"}` to a plain JSON string, `bytesValue` to
-//! its base64 string, and so on. Seeding therefore infers types from JSON
-//! (string/number/bool/null/array/object) and cannot restore `timestampValue`,
-//! `bytesValue`, `geoPointValue` or `referenceValue`. Those fields seed as the
-//! strings or maps the parser produced. This is recorded as a divergence rather
-//! than papered over by guessing from a string's shape — a document holding the
-//! literal text of a date is not the same as one holding a timestamp.
+//! Seeding infers a Firestore value type from the JSON the shared export parser
+//! produced (string/number/bool/null/array/object), so it does **not** restore
+//! `timestampValue`, `bytesValue`, `geoPointValue` or `referenceValue`.
+//!
+//! The information is not lost on the way in. The parser decodes a Datastore
+//! blob, timestamp, geo point, or key reference into a *tagged map* — see
+//! [`crate::types::DATASTORE_TYPE_TAG`] and its companions — because JSON has no
+//! native form for them. `fireup import` reads those tags and maps them onto
+//! `bytea`, `timestamptz`, `point`, and `text`. This module does not, so such a
+//! field seeds as a `mapValue` and an SDK reads a map rather than a
+//! `Timestamp`/`Bytes`/`GeoPoint`/reference.
+//!
+//! So the gap is here, not in the parser, and closing it means honouring the
+//! same tags rather than guessing from a string's shape — a document holding the
+//! literal text of a date is not the same as one holding a timestamp. Until
+//! then it is published as a divergence in `docs/local/README.md` and
+//! demonstrated by `scripts/demo-export-to-sql.sh`.
 
 use std::collections::HashMap;
 use std::path::Path;
