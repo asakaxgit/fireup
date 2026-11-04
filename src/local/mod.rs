@@ -11,18 +11,22 @@
 //! `.cursor/rules/firebase-gcp-compliance.mdc` and
 //! `docs/licenses/FIREBASE_GCP_LOCAL.md`.
 //!
-//! Phase 1 scope is document CRUD against an in-memory **or PostgreSQL** store,
-//! plus seeding from a managed export. Queries, transactions, and realtime
-//! listeners are not served yet; those RPCs answer `UNIMPLEMENTED` with a
-//! message saying so.
+//! Phase 2 scope is document CRUD, `StructuredQuery` reads, collection
+//! listings, and transactional writes, against an in-memory **or PostgreSQL**
+//! store, plus seeding from a managed export. Realtime listeners, field
+//! transforms, and aggregation queries are not served; those RPCs answer
+//! `UNIMPLEMENTED` with a message saying so, and `docs/local/README.md` has the
+//! full fidelity matrix.
 
 pub mod config;
 pub mod firestore;
 pub mod http;
 pub mod names;
 pub mod postgres_store;
+pub mod query;
 pub mod seed;
 pub mod store;
+pub mod transactions;
 pub mod value_json;
 
 use std::sync::Arc;
