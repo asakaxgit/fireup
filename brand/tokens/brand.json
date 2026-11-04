@@ -2,7 +2,7 @@
   "$comment": "Fireup brand tokens — single source of truth. tokens/brand.css is generated from this file by `npm run tokens`. Do not edit the CSS by hand.",
   "name": "Fireup",
   "version": "0.1.0",
-  "status": "proposed — round 3 (fire), redrawn to the CEO's note; sign-off still open (SAK-173)",
+  "status": "proposed — round 4 (F as a trigger lighter), redrawn to the CEO's note; sign-off still open (SAK-173)",
   "color": {
     "ink": "#0B1220",
     "ink-raised": "#141E31",

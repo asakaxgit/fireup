@@ -385,10 +385,10 @@ code {
 }
 
 @media (max-width: 40rem) {
-  /* The lockup's box now includes the flame's overshoot, so the clear-space
-     rule bites at the top of the bar: one bar of the mark is 14.1 of the
-     lockup's 83.9 units, which is 7.1px at a 42px logo. 2xs (8px) cleared that
-     on paper but read as crowding against the viewport edge; s (16px) does not. */
+  /* The lockup's box includes the flame's overshoot, so the clear-space rule
+     bites at the top of the bar: one bar of the mark is 13.4 of the lockup's
+     82.0 units, which is 6.9px at a 42px logo. 2xs (8px) cleared that on paper
+     but read as crowding against the viewport edge; s (16px) does not. */
   .bar-inner { padding-block: var(--fu-space-s); }
   .brand img { height: 42px; }
   .nav { gap: var(--fu-space-s); }

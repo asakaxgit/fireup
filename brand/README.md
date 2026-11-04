@@ -1,10 +1,10 @@
 # Fireup brand guide
 
 **Status: proposed, redrawn to the CEO's note, still not approved.** The mark in
-this directory is round 3 for SAK-173: the CEO reviewed round 2 and asked for
-fire, and for the wordmark to stay at the lighter weight. Both are done. It is
-in use on the marketing site in `site/`, but **approval has not been given** —
-identity direction is the CEO's sign-off and it is still open.
+this directory is round 4 for SAK-173: the CEO's note was *"treat F as a lighter
+gun and blow fire from right top side"*, and that is what is drawn. It is in use
+on the marketing site in `site/`, but **approval has not been given** — identity
+direction is the CEO's sign-off and it is still open.
 
 This directory is in the public repository so the direction can be reviewed in a
 pull request. That is not approval. Until the mark is signed off, do not use it
@@ -15,31 +15,43 @@ external announcement, no profile or avatar.
 
 ## The mark
 
-An **F** whose top bar is alight. The bar runs out from the stem and its far end
-rises into a tongue: the fire is a terminal of the letterform, not an object
-balanced on top of it. Fireup is what you run to bring a local stack up, so the
-mark is the moment it catches.
+The **F read as a trigger lighter**. The stem is the grip, the middle arm is
+where the finger sits, the top bar is the body, and it runs out into a
+half-weight muzzle with the fire blowing up and to the right off it. Fireup is
+what you run to bring a local stack up, so the mark is the moment it fires.
 
 It is a monogram first. That is what lets it still say the name at 16px, where a
-picture cannot.
+picture cannot — the counter stays open on the right, so nothing about the
+lighter stops it being an F.
 
 ### How it got here
 
-The direction is the CEO's: an earlier mark — an F with its middle arm lifted
-clear of the stem — was reviewed and the note back was *"use fire"*. Three fire
-concepts were drawn and rendered before this one was cut, and the rendering
-changed the answer twice. All of it is in `scripts/fire.mjs` and `fire/`:
+The direction is the CEO's, in two steps: round 2's lifted-arm F came back as
+*"use fire"*, and round 3's burning top bar came back as *"treat F as a lighter
+gun and blow fire from right top side"*. Round 4 is four sheets, each one
+answering the defect the one before it rendered — `scripts/lighter.mjs` and
+`lighter/`:
 
-- **Fire built from stacked rows** reads as a stepped pyramid, not as fire, and
-  at 16px the 6-unit bars land on 1.5 pixels and smear to grey.
-- **A free-standing flame on a plinth** renders as a **water droplet**, at every
-  size, on both backgrounds.
-- **A flame on the F's middle arm** curls back under the top bar and encloses a
-  bowl, so the mark reads as a **P**. Three tip heights, all three a P. That is
-  why the fire ended up on the top bar: an F's counter has to stay open on the
-  right.
-- **The tongue rises before it leans.** Flaring it sideways first makes the mark
-  right-heavy and turns the flame into a swoosh.
+- **4a, how literal.** A flared foot on the stem reads as a **lamp base**, not a
+  grip. The most literal drawing — long thin nozzle, trigger wedge, flared
+  grip — is the only one that reads as the object, and what it reads as is a
+  **gun**, which is the one read to avoid.
+- **4b, the jet.** Fire blown flat along the barrel is a **swoosh**; at 45° it
+  is a **leaf**. Only a jet with a belly and a second, shorter tongue reads as
+  fire, and the notch between the two is what does it.
+- **4c, the muzzle.** A muzzle two units narrower than the 12-weight bar is
+  invisible at 512px, let alone small. Three units of daylight between muzzle
+  and flame makes the fire start to float free, which is the silhouette being
+  avoided.
+- **4d, the cues.** A muzzle at **half** the bar's weight reads from 32px up and
+  costs the letter nothing. The middle arm cut as a trigger wedge does *not*
+  read as a trigger — it reads as a **fast-forward triangle**, and at 16px it
+  fills the counter. One coarse cue, not two.
+
+Round 3's findings still hold and are why the fire is where it is:
+fire built from stacked rows is a **pyramid**, a free-standing flame on a plinth
+is a **water droplet**, and a flame on the F's middle arm closes a bowl and
+makes the mark a **P**. Those are in `scripts/fire.mjs` and `fire/`.
 
 ### The trademark position, stated plainly
 
@@ -82,6 +94,7 @@ and is not mine to give — see the open flags at the bottom of this file.
 | `explore/` | Round 1–2. The rendered directions that were considered, including the rejected ones. |
 | `tune/` | One sheet per tuning axis of the round-2 mark, for choosing between variants by pointing at one. |
 | `fire/` | Round 3. The fire concepts, where the fire goes, and the shape of the tongue. |
+| `lighter/` | Round 4. The lighter reading: how literal, the jet, the muzzle, and which cues survive. |
 | `preview/` | What actually ships, at the sizes it ships at. Rendered from `site/assets/`, not from the masters. |
 | `../site/assets/` | Generated. Every variant, lockup, favicon, app icon and the social card. |
 
@@ -108,9 +121,10 @@ npm run check      # smoke test the pipeline, verify contrast, rebuild all asset
 - `npm run explore` re-renders the round 1–2 exploration sheets.
 - `npm run tune` re-renders the four tuning sheets in `tune/`.
 - `npm run fire` re-renders the round 3 sheets in `fire/`.
+- `npm run lighter` re-renders the round 4 sheets in `lighter/`.
 - `npm run preview` re-renders `preview/` from the built assets.
 
-`explore`, `tune` and `fire` are deliberately outside `check`: they are the
+`explore`, `tune`, `fire` and `lighter` are deliberately outside `check`: they are the
 record of a decision, not shipped assets, and they should only change when the
 question being asked changes. `preview` is outside it because looking at the
 result is a human step, not a gate.
@@ -123,7 +137,7 @@ resampling — rendered at 16, read back out of the renderer, redrawn as one
 square per pixel. A magnified preview that disagrees with the real output is
 worse than no preview.
 
-That has now reversed a stated opinion five times, which is the whole point:
+That has now reversed a stated opinion nine times, which is the whole point:
 
 - At a 4-unit counter the arm **fused with the top bar at 16px** — the mark
   stopped being an F at the size it is used at most.
@@ -133,6 +147,12 @@ That has now reversed a stated opinion five times, which is the whole point:
 - Fire built from rows is a **pyramid**; a flame on a plinth is a **droplet**; a
   flame on the F's middle arm is a **P**. All three were written up as good
   ideas before they were rendered.
+- A trigger wedge on the middle arm reads as a **fast-forward triangle**, and a
+  flared foot on the stem reads as a **lamp base**. Both were drawn to make the
+  lighter legible and both made it less so.
+- The first round-4 flame ran past the 64-unit viewBox and the renderer **cut
+  its outer lobe flat**. Nothing below 512px showed it, which is why the app
+  icon is now on the preview sheet at 1:1.
 
 ## Clear space and minimum sizes
 
@@ -159,9 +179,12 @@ Each of these breaks something specific, not just taste:
   one distinguishable from it. This is the one misuse rule with a legal edge.
 - **Do not** stretch, shear, rotate, outline, or add a shadow or bevel. The mark
   is two rectangles and one path; there is nothing to decorate.
-- **Do not** detach the flame from the top bar, or use it on its own as an icon.
+- **Do not** detach the flame from the muzzle, or use it on its own as an icon.
   Separated, it is a generic flame silhouette and loses both the idea and the
   distance from the marks named above.
+- **Do not** narrow the muzzle further, or lengthen it. At six units it is half
+  the bar and reads; thinner, it lands on a pixel and a half at small sizes and
+  comes out as a grey sliver that looks like an artifact.
 - **Do not** let the middle arm grow to the width of the top bar. The counter
   closing on the right is what turned earlier drawings into a P.
 - **Do not** set the wordmark in a font. It is drawn. Typing "fireup" in Inter

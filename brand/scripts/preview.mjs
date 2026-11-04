@@ -88,8 +88,8 @@ sheets.push(['identity-dark', identitySheet('dark')], ['identity-light', identit
 // Each favicon is its own drawing rather than the mark scaled down, so this is
 // the only place the three drawings can be compared against each other.
 const FAVICONS = [
-  ['favicon-16', 16, 'drawn for 16 — tongue steps once'],
-  ['favicon-32', 32, 'drawn for 32 — room for three steps, so it tapers'],
+  ['favicon-16', 16, 'drawn for 16 — one tongue, muzzle on one pixel row'],
+  ['favicon-32', 32, 'drawn for 32 — four steps, so the fire tapers'],
 ]
 
 const faviconSheet = () => {
@@ -118,6 +118,33 @@ const faviconSheet = () => {
 }
 
 sheets.push(['favicons', faviconSheet()])
+
+// --- 3. the app icon, at the size the last two defects only showed up at ----
+// Round 3's flame read as a horn and round 4's outer lobe was clipped flat by
+// the viewBox; neither was visible below 512px. The shipped PNG is decoded back
+// into squares rather than re-rendered from the master, so this cannot flatter
+// the pipeline.
+const appIconSheet = () => {
+  const size = 512
+  const svg = readFileSync(join(root, 'logo', 'mark.svg'), 'utf8')
+  const field = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="${INK}"/>${innerOf(svg)}</svg>`
+  const width = PAD * 2 + size + 320
+  const height = PAD * 2 + size + 34
+  // 1:1, not scaled down to fit the sheet: at 0.5 the unit squares land on half
+  // pixels, resvg antialiases every seam, and the whole icon goes grey. A
+  // preview that misreports the colour is worse than no preview.
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+  <rect width="${width}" height="${height}" fill="${INK}"/>
+  ${label(PAD, PAD + 6, 'The 64-unit mark on an ink field, at 512 — real pixels, 1:1')}
+  <g transform="translate(${PAD} ${PAD + 24})">${pixelMap(field, size, 1)}</g>
+  ${caption(PAD + size + 28, PAD + 60, 'The two defects that got through review —')}
+  ${caption(PAD + size + 28, PAD + 78, 'a flame that read as a horn, and an outer')}
+  ${caption(PAD + size + 28, PAD + 96, 'lobe clipped flat by the viewBox — were')}
+  ${caption(PAD + size + 28, PAD + 114, 'both invisible below this size.')}
+</svg>`
+}
+
+sheets.push(['app-icon', appIconSheet()])
 
 const out = join(root, 'preview')
 mkdirSync(out, { recursive: true })

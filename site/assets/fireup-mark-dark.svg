@@ -1,27 +1,34 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Fireup"
-     data-cap-top="18" data-cap-bottom="60">
-  <!-- Fireup mark: an F whose top bar is alight. The bar runs out from the stem
-       and its far end rises into a tongue — the fire is a terminal of the
-       letterform, not an object balanced on top of it.
+     data-cap-top="16" data-cap-bottom="60">
+  <!-- Fireup mark: the F read as a trigger lighter. The stem is the grip, the
+       middle arm is where the finger sits, the top bar is the body, and it runs
+       out into a half-weight muzzle with the fire blowing up and to the right
+       off it. Fireup is what you run to bring a stack up, so the mark is the
+       moment it fires.
 
-       Why it is drawn this way, from brand/scripts/fire.mjs:
-         * A flame on the *middle* arm curls back under the top bar and encloses
-           a bowl. Rendered at three tip heights, all three read as a P.
-         * A free-standing flame silhouette rendered as a water droplet, and is
-           also the shape Firebase's and Tinder's marks already occupy.
-         * The tongue rises before it leans. Flaring it sideways first makes the
-           mark right-heavy and turns the flame into a swoosh.
-         * The tip leans *right*, with the apex outboard of the bulge below it.
-           Leaning it left gives the tongue a hook, and at app-icon size the
-           mark stops being fire and becomes a horn.
-       Putting the fire on the top bar keeps the counter open on the right, so
-       the mark is still an F at 16px, which is where it is used most.
+       Why it is drawn this way, from brand/scripts/lighter.mjs:
+         * The muzzle is half the bar's weight. At 10 units against the bar's 12
+           the step is invisible at 512px, let alone small — the object only
+           reads if the cue is coarse.
+         * The middle arm stays a straight bar. Cut as a trigger wedge it reads
+           as a fast-forward triangle, not a trigger, and it fills the counter
+           at 16px.
+         * The fire has a belly and a second shorter tongue. A single tapered
+           jet along the barrel reads as a swoosh and a 45-degree blade reads as
+           a leaf; the notch between two tongues is what makes it fire.
+         * Nothing floats. The flame's base sits on the muzzle, because a
+           free-standing flame silhouette is Firebase's mark and Tinder's.
+       The counter stays open on the right, so this is still an F at 16px, which
+       is where it is used most.
 
-       Geometry on a 64-unit grid. Bar weight 12 everywhere; the counter is 6,
-       half a bar. data-cap-top/bottom mark the F's own cap line — the flame
-       overshoots above it, the way a diacritic does, and the lockup aligns to
-       the cap rather than to the flame. -->
-  <rect x="12" y="18" width="12" height="42" fill="#FFFFFF"/>
-  <rect x="12" y="36" width="24" height="12" fill="#FFFFFF"/>
-  <path d="M12 18 H38 C44 18 47 11 50 2 C54 13 51 30 38 30 H12 Z" fill="#FF5A2B"/>
+       Geometry on a 64-unit grid. Bar weight 12, muzzle 6, counter 6.
+       data-cap-top/bottom mark the F's own cap line — the flame overshoots
+       above it the way a diacritic does, and the lockup aligns to the cap.
+       Everything stays inside x<=60: in the first drawing the flame ran past 64
+       and the renderer clipped its outer lobe flat. -->
+  <rect x="6"  y="16" width="12" height="44" fill="#FFFFFF"/>
+  <rect x="6"  y="16" width="20" height="12" fill="#FFFFFF"/>
+  <rect x="26" y="19" width="14" height="6"  fill="#FFFFFF"/>
+  <rect x="6"  y="34" width="22" height="12" fill="#FFFFFF"/>
+  <path d="M40 18 C45 16 48 13 50 9 C52 5 53 3 54 1 C55 7 55 12 54 16 C57 14 59 12 60 10 C59 17 56 23 51 26 C47 28 43 28 40 27 Z" fill="#FF5A2B"/>
 </svg>
