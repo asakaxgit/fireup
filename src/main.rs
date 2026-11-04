@@ -12,6 +12,10 @@ mod schema_analyzer;
 mod data_importer;
 mod monitoring;
 
+// The local data plane is consumed from the library crate rather than
+// re-declared here, so there is exactly one copy of it in the build.
+use fireup::local;
+
 use error::FireupError;
 use leveldb_parser::{LevelDBParser, BackupValidatorImpl, ValidationResult};
 use leveldb_parser::validator::BackupValidator;
@@ -177,6 +181,22 @@ enum Commands {
         #[arg(long, default_value = "100")]
         max_errors: usize,
     },
+
+    /// Run a local Firestore-compatible server for official client SDKs
+    #[command(long_about = "Serve the public google.firestore.v1 gRPC API on a single local port so official Firestore client SDKs can talk to Fireup via the documented FIRESTORE_EMULATOR_HOST environment variable.
+
+This is an independent implementation of Google's published Firestore API. It is not the Firebase Emulator Suite and is not affiliated with Google.
+
+Phase 0 serves document CRUD (GetDocument, CreateDocument, UpdateDocument, DeleteDocument, BatchGetDocuments, Commit) against an in-memory store. Data is NOT persisted across restarts. Queries, transactions, and realtime listeners return UNIMPLEMENTED.")]
+    Local {
+        /// Address to bind (default: loopback only)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Port to listen on
+        #[arg(short, long, default_value_t = local::DEFAULT_PORT)]
+        port: u16,
+    },
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -316,7 +336,16 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Local { host, port } => {
+            let addr: std::net::SocketAddr = format!("{host}:{port}")
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid bind address {host}:{port}: {e}"))?;
 
+            if let Err(e) = local::serve(addr).await {
+                eprintln!("fireup local failed: {e:#}");
+                std::process::exit(1);
+            }
+        }
     }
     
     Ok(())

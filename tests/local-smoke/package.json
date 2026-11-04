@@ -1,0 +1,13 @@
+{
+  "name": "fireup-local-smoke",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Smoke test that drives `fireup local` with Google's official Firestore client library.",
+  "scripts": {
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^7.11.0"
+  }
+}
