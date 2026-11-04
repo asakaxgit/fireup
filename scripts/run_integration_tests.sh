@@ -158,6 +158,14 @@ run_integration_tests() {
         print_error "Integration tests failed"
         return 1
     fi
+
+    # The local data plane's durable store needs the same database.
+    if cargo test --test local_postgres_store_tests -- --nocapture; then
+        print_success "fireup local PostgreSQL store tests passed"
+    else
+        print_error "fireup local PostgreSQL store tests failed"
+        return 1
+    fi
 }
 
 # Function to run CLI tests
