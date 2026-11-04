@@ -15,10 +15,11 @@ use fireup::protos::google::firestore::v1::{
     structured_query::filter::FilterType, structured_query::CollectionSelector,
     structured_query::Direction, structured_query::FieldFilter, structured_query::FieldReference,
     structured_query::Filter, structured_query::Order, value::ValueType, write::Operation,
-    BatchGetDocumentsRequest, CommitRequest, CreateDocumentRequest, DeleteDocumentRequest,
+    BatchGetDocumentsRequest, BatchWriteRequest, BeginTransactionRequest, CommitRequest,
+    CreateDocumentRequest, DeleteDocumentRequest,
     Document, DocumentMask, GetDocumentRequest, ListCollectionIdsRequest, ListDocumentsRequest,
-    ListDocumentsResponse, PartitionQueryRequest, Precondition, RunAggregationQueryRequest,
-    RunQueryRequest, StructuredQuery, Value, Write,
+    ListDocumentsResponse, PartitionQueryRequest, Precondition, RollbackRequest,
+    RunAggregationQueryRequest, RunQueryRequest, StructuredQuery, Value, Write,
 };
 use tonic::transport::Channel;
 use tonic::Code;
@@ -807,6 +808,280 @@ async fn list_collection_ids_sees_root_and_nested_collections() {
         .into_inner();
     assert_eq!(nested.collection_ids, vec!["posts"]);
 
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn commit_applies_the_whole_batch_or_none_of_it() {
+    let (server, mut client) = start().await;
+
+    let status = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: vec![
+                Write {
+                    operation: Some(Operation::Update(person("alice", "Tokyo", 31))),
+                    ..Default::default()
+                },
+                Write {
+                    operation: Some(Operation::Update(person("ghost", "Nowhere", 0))),
+                    // Nothing was ever written here, so this cannot hold.
+                    current_document: Some(Precondition {
+                        condition_type: Some(ConditionType::Exists(true)),
+                    }),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect_err("the batch must fail");
+
+    assert_eq!(status.code(), Code::NotFound);
+    assert_eq!(
+        server.store.count().await.expect("count"),
+        0,
+        "a failed batch must not leave its first write applied"
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// Begin a transaction and return its token.
+async fn begin(client: &mut FirestoreClient<Channel>) -> Vec<u8> {
+    client
+        .begin_transaction(BeginTransactionRequest {
+            database: DATABASE.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("BeginTransaction succeeds")
+        .into_inner()
+        .transaction
+}
+
+/// Read one document inside `transaction`, so it joins the read set.
+async fn get_in_transaction(
+    client: &mut FirestoreClient<Channel>,
+    name: &str,
+    transaction: &[u8],
+) -> Result<Document, tonic::Status> {
+    use fireup::protos::google::firestore::v1::get_document_request::ConsistencySelector;
+    client
+        .get_document(GetDocumentRequest {
+            name: name.to_string(),
+            consistency_selector: Some(ConsistencySelector::Transaction(transaction.to_vec())),
+            ..Default::default()
+        })
+        .await
+        .map(|response| response.into_inner())
+}
+
+#[tokio::test]
+async fn a_transaction_reads_then_commits_its_writes() {
+    let (server, mut client) = start().await;
+    seed(&mut client, vec![person("alice", "Tokyo", 31)]).await;
+
+    let transaction = begin(&mut client).await;
+    let read = get_in_transaction(&mut client, &format!("{ROOT}/people/alice"), &transaction)
+        .await
+        .expect("a transactional read succeeds");
+    assert_eq!(read.fields["age"], integer_value(31));
+
+    client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            transaction: transaction.clone(),
+            writes: vec![Write {
+                operation: Some(Operation::Update(person("alice", "Tokyo", 32))),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("the transaction commits");
+
+    let after = client
+        .get_document(GetDocumentRequest {
+            name: format!("{ROOT}/people/alice"),
+            ..Default::default()
+        })
+        .await
+        .expect("get after commit")
+        .into_inner();
+    assert_eq!(after.fields["age"], integer_value(32));
+
+    // The token is spent, so replaying the same commit must not write again.
+    let replay = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            transaction,
+            writes: Vec::new(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a transaction token works once");
+    assert_eq!(replay.code(), Code::InvalidArgument);
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_transaction_is_aborted_when_a_document_it_read_changed() {
+    let (server, mut client) = start().await;
+    seed(&mut client, vec![person("alice", "Tokyo", 31)]).await;
+    let name = format!("{ROOT}/people/alice");
+
+    let transaction = begin(&mut client).await;
+    get_in_transaction(&mut client, &name, &transaction)
+        .await
+        .expect("the transactional read succeeds");
+
+    // Somebody else writes the document the transaction is working from.
+    seed(&mut client, vec![person("alice", "Osaka", 99)]).await;
+
+    let status = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            transaction,
+            writes: vec![Write {
+                operation: Some(Operation::Update(person("alice", "Tokyo", 32))),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("the transaction must not commit on stale data");
+
+    assert_eq!(
+        status.code(),
+        Code::Aborted,
+        "ABORTED is what makes an SDK retry the transaction: {}",
+        status.message()
+    );
+
+    let after = client
+        .get_document(GetDocumentRequest {
+            name,
+            ..Default::default()
+        })
+        .await
+        .expect("get after the aborted commit")
+        .into_inner();
+    assert_eq!(
+        after.fields["age"],
+        integer_value(99),
+        "the aborted transaction must not have overwritten the other writer"
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_transaction_that_created_a_document_aborts_if_someone_else_creates_it_first() {
+    let (server, mut client) = start().await;
+    let name = format!("{ROOT}/people/alice");
+
+    let transaction = begin(&mut client).await;
+    // Read as absent — the fact this transaction is about to act on.
+    let missing = get_in_transaction(&mut client, &name, &transaction)
+        .await
+        .expect_err("alice does not exist yet");
+    assert_eq!(missing.code(), Code::NotFound);
+
+    seed(&mut client, vec![person("alice", "Osaka", 99)]).await;
+
+    let status = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            transaction,
+            writes: vec![Write {
+                operation: Some(Operation::Update(person("alice", "Tokyo", 31))),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("the document appeared after it was read as absent");
+
+    assert_eq!(status.code(), Code::Aborted);
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn rollback_spends_the_token_without_writing_anything() {
+    let (server, mut client) = start().await;
+    let transaction = begin(&mut client).await;
+
+    client
+        .rollback(RollbackRequest {
+            database: DATABASE.to_string(),
+            transaction: transaction.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("Rollback succeeds");
+
+    let status = client
+        .rollback(RollbackRequest {
+            database: DATABASE.to_string(),
+            transaction,
+            ..Default::default()
+        })
+        .await
+        .expect_err("the token is already spent");
+    assert_eq!(status.code(), Code::InvalidArgument);
+
+    assert_eq!(server.store.count().await.expect("count"), 0);
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn batch_write_reports_a_status_for_every_write() {
+    let (server, mut client) = start().await;
+
+    let response = client
+        .batch_write(BatchWriteRequest {
+            database: DATABASE.to_string(),
+            writes: vec![
+                Write {
+                    operation: Some(Operation::Update(person("alice", "Tokyo", 31))),
+                    ..Default::default()
+                },
+                Write {
+                    operation: Some(Operation::Update(person("ghost", "Nowhere", 0))),
+                    current_document: Some(Precondition {
+                        condition_type: Some(ConditionType::Exists(true)),
+                    }),
+                    ..Default::default()
+                },
+                Write {
+                    operation: Some(Operation::Update(person("bob", "Kyoto", 41))),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect("BatchWrite itself succeeds even when a write fails")
+        .into_inner();
+
+    assert_eq!(response.status.len(), 3);
+    assert_eq!(response.write_results.len(), 3);
+    assert_eq!(response.status[0].code, Code::Ok as i32);
+    assert_eq!(
+        response.status[1].code,
+        Code::NotFound as i32,
+        "the failing write reports its own status: {:?}",
+        response.status[1]
+    );
+    assert_eq!(response.status[2].code, Code::Ok as i32);
+
+    // Unlike Commit, a failed write does not take the others with it.
+    assert_eq!(
+        server.store.count().await.expect("count"),
+        2,
+        "BatchWrite is not atomic: the two good writes stay"
+    );
     server.shutdown().await.expect("clean shutdown");
 }
 

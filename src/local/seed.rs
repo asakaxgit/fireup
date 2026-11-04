@@ -108,10 +108,14 @@ pub async fn seed_from_export(
         let name = document.name.clone();
         match store.put(document, create_time).await {
             Ok(WriteOutcome::Created) => report.created += 1,
-            // A seed only ever puts, so `Deleted` cannot happen; counting it
-            // as an update keeps the match exhaustive without inventing a
-            // fourth counter for an impossible outcome.
-            Ok(WriteOutcome::Updated | WriteOutcome::Deleted { .. }) => report.updated += 1,
+            // A seed only ever puts, so the delete and verify outcomes cannot
+            // happen; counting them as updates keeps the match exhaustive
+            // without inventing counters for impossible outcomes.
+            Ok(
+                WriteOutcome::Updated
+                | WriteOutcome::Deleted { .. }
+                | WriteOutcome::Verified,
+            ) => report.updated += 1,
             Err(error) => {
                 // One unstorable document must not abort the rest of the seed;
                 // it is reported instead, and the caller treats a non-empty

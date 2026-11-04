@@ -26,6 +26,7 @@ pub mod postgres_store;
 pub mod query;
 pub mod seed;
 pub mod store;
+pub mod transactions;
 pub mod value_json;
 
 use std::sync::Arc;

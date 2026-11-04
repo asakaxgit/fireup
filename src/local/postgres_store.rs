@@ -321,7 +321,13 @@ impl Store for PostgresStore {
             // Reads inside the transaction, so a second write to the same
             // document in this batch sees the first one's effect.
             let stored = read_document(&transaction, &name).await?;
-            store::check_precondition(&name, stored.as_ref(), write.precondition.as_ref())?;
+            store::check_write(&write, stored.as_ref())?;
+            if matches!(write.mutation, store::Mutation::Verify { .. }) {
+                // A verification only had to pass its precondition; the row is
+                // deliberately left untouched so it does not look written.
+                outcomes.push(WriteOutcome::Verified);
+                continue;
+            }
 
             let (next, outcome) = store::mutate(write.mutation, stored, &now);
             match next {

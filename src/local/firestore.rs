@@ -27,6 +27,8 @@
 //! Firebase Emulator Suite code or behaviour was reverse-engineered; see
 //! `.cursor/rules/firebase-gcp-compliance.mdc`.
 
+use std::sync::Arc;
+
 use prost_types::Timestamp;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -34,8 +36,10 @@ use tracing::debug;
 
 use crate::local::names::{parse_document_name, parse_parent_name};
 use crate::local::query::Query;
-use crate::local::store::{now_timestamp, SharedStore};
+use crate::local::store::{self, now_timestamp, Mutation, PendingWrite, SharedStore};
+use crate::local::transactions::Transactions;
 use crate::protos::google::firestore::v1::run_query_request::QueryType;
+use crate::protos::google::rpc::Status as RpcStatus;
 use crate::protos::google::firestore::v1::{
     firestore_server::Firestore, precondition::ConditionType, write::Operation,
     BatchGetDocumentsRequest, BatchGetDocumentsResponse, BatchWriteRequest, BatchWriteResponse,
@@ -192,54 +196,129 @@ fn masked_fields(
         .collect())
 }
 
-/// Check a write precondition against current store state.
-async fn check_precondition(
-    store: &SharedStore,
-    name: &str,
-    precondition: &Option<Precondition>,
-) -> Result<(), Status> {
-    let Some(condition) = precondition.as_ref().and_then(|p| p.condition_type.as_ref()) else {
-        return Ok(());
+/// Translate a request's `Precondition` into the store's.
+///
+/// The store checks it inside the same transaction as the write, which is why
+/// there is no check-then-write pair anywhere in this file: two concurrent
+/// `create()` calls on one name would both pass a check done up here.
+fn precondition(request: &Option<Precondition>) -> Result<Option<store::Precondition>, Status> {
+    let Some(condition) = request.as_ref().and_then(|p| p.condition_type.as_ref()) else {
+        return Ok(None);
+    };
+    Ok(Some(match condition {
+        ConditionType::Exists(exists) => store::Precondition::Exists(*exists),
+        ConditionType::UpdateTime(expected) => {
+            store::Precondition::UpdateTime(expected.clone())
+        }
+    }))
+}
+
+/// Translate one `Write` from a commit batch into a store write.
+///
+/// Pure, so a batch is fully translated — and fully rejected if any write in it
+/// is unsupported — before the store is touched at all.
+fn pending_write(write: &crate::protos::google::firestore::v1::Write) -> Result<PendingWrite, Status> {
+    if !write.update_transforms.is_empty() {
+        return Err(unimplemented(
+            "field transforms (serverTimestamp, increment, array union)",
+            "a transform computes the value server-side, which needs the write pipeline",
+        ));
+    }
+
+    let operation = write
+        .operation
+        .as_ref()
+        .ok_or_else(|| Status::invalid_argument("write has no operation"))?;
+
+    let mutation = match operation {
+        Operation::Update(document) => {
+            let name = parse_document_name(&document.name)?.full();
+            match &write.update_mask {
+                // No mask: full replace, the `set()` path.
+                None => Mutation::Put(Document {
+                    name,
+                    ..document.clone()
+                }),
+                // Mask present: merge only the named fields, the
+                // `set(..., {merge: true})` / `update()` path.
+                Some(mask) => Mutation::Merge {
+                    name,
+                    fields: masked_fields(&mask.field_paths, document)?,
+                },
+            }
+        }
+        Operation::Delete(name) => Mutation::Delete {
+            name: parse_document_name(name)?.full(),
+        },
+        Operation::Transform(_) => {
+            return Err(unimplemented(
+                "DocumentTransform writes",
+                "a transform computes the value server-side, which needs the write pipeline",
+            ))
+        }
     };
 
-    match condition {
-        ConditionType::Exists(true) => {
-            if !store.contains(name).await? {
-                return Err(Status::not_found(format!("no document to update at {name}")));
-            }
-        }
-        ConditionType::Exists(false) => {
-            if store.contains(name).await? {
-                return Err(Status::already_exists(format!(
-                    "document already exists: {name}"
-                )));
-            }
-        }
-        ConditionType::UpdateTime(expected) => {
-            let actual = store.get(name).await?.and_then(|document| document.update_time);
-            if actual.as_ref() != Some(expected) {
-                return Err(Status::failed_precondition(format!(
-                    "update_time precondition failed for {name}"
-                )));
-            }
-        }
-    }
-    Ok(())
+    Ok(PendingWrite::guarded(
+        mutation,
+        precondition(&write.current_document)?,
+    ))
+}
+
+/// One `WriteResult` per applied write.
+fn write_results(count: usize, now: &Timestamp) -> Vec<WriteResult> {
+    (0..count)
+        .map(|_| WriteResult {
+            update_time: Some(now.clone()),
+            transform_results: Vec::new(),
+        })
+        .collect()
 }
 
 /// The Firestore data plane for `fireup local`.
 #[derive(Clone)]
 pub struct FirestoreApi {
     store: SharedStore,
+    /// Live transactions. Shared between clones of the API so every connection
+    /// sees the same tokens.
+    transactions: Arc<Transactions>,
 }
 
 impl FirestoreApi {
     pub fn new(store: SharedStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            transactions: Arc::new(Transactions::new()),
+        }
     }
 
     pub fn store(&self) -> &SharedStore {
         &self.store
+    }
+
+    pub fn transactions(&self) -> &Transactions {
+        &self.transactions
+    }
+
+    /// Apply one write and return the document it left behind.
+    ///
+    /// The single-document RPCs all go through the batch commit path, so there
+    /// is one implementation of precondition handling and `create_time`
+    /// preservation rather than one per RPC.
+    async fn apply_one(&self, write: PendingWrite) -> Result<Timestamp, Status> {
+        let now = now_timestamp();
+        self.store.commit(vec![write], now.clone()).await?;
+        Ok(now)
+    }
+
+    /// Read a document back after writing it, for an RPC that returns one.
+    async fn read_back(&self, name: &str, mask: &Option<DocumentMask>) -> Result<Document, Status> {
+        let mut document = self
+            .store
+            .get(name)
+            .await?
+            .ok_or_else(|| Status::internal(format!("document {name} vanished after a write")))?;
+        apply_mask(&mut document, mask)?;
+        Ok(document)
     }
 
     /// Read a document, applying the response mask.
@@ -254,62 +333,6 @@ impl FirestoreApi {
         Ok(document)
     }
 
-    /// Apply one `Write` from a commit batch.
-    async fn apply_write(
-        &self,
-        write: &crate::protos::google::firestore::v1::Write,
-        now: &Timestamp,
-    ) -> Result<WriteResult, Status> {
-        if !write.update_transforms.is_empty() {
-            return Err(unimplemented(
-                "field transforms (serverTimestamp, increment, array union)",
-                "transforms land with the write pipeline",
-            ));
-        }
-
-        let operation = write
-            .operation
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("write has no operation"))?;
-
-        match operation {
-            Operation::Update(document) => {
-                let parsed = parse_document_name(&document.name)?;
-                let name = parsed.full();
-                check_precondition(&self.store, &name, &write.current_document).await?;
-
-                match &write.update_mask {
-                    // No mask: full replace, the `set()` path.
-                    None => {
-                        self.store.put(document.clone(), now.clone()).await?;
-                    }
-                    // Mask present: merge only the named fields, the
-                    // `set(..., {merge: true})` / `update()` path.
-                    Some(mask) => {
-                        let fields = masked_fields(&mask.field_paths, document)?;
-                        self.store.merge(&name, fields, now.clone()).await?;
-                    }
-                }
-            }
-            Operation::Delete(name) => {
-                let parsed = parse_document_name(name)?;
-                let key = parsed.full();
-                check_precondition(&self.store, &key, &write.current_document).await?;
-                self.store.delete(&key).await?;
-            }
-            Operation::Transform(_) => {
-                return Err(unimplemented(
-                    "DocumentTransform writes",
-                    "transforms land with the write pipeline",
-                ));
-            }
-        }
-
-        Ok(WriteResult {
-            update_time: Some(now.clone()),
-            transform_results: Vec::new(),
-        })
-    }
 }
 
 #[tonic::async_trait]
@@ -321,16 +344,43 @@ impl Firestore for FirestoreApi {
         let request = request.into_inner();
         debug!(name = %request.name, "GetDocument");
 
+        let mut transaction = None;
         if let Some(selector) = &request.consistency_selector {
             use crate::protos::google::firestore::v1::get_document_request::ConsistencySelector;
-            let what = match selector {
-                ConsistencySelector::Transaction(_) => "transactional GetDocument",
-                ConsistencySelector::ReadTime(_) => "point-in-time GetDocument reads",
-            };
-            return Err(unimplemented(what, "consistency modes land in a later phase"));
+            match selector {
+                ConsistencySelector::Transaction(token) => {
+                    self.transactions.check(token)?;
+                    transaction = Some(token.clone());
+                }
+                ConsistencySelector::ReadTime(_) => {
+                    return Err(unimplemented(
+                        "point-in-time GetDocument reads",
+                        "the store only keeps the current version of a document",
+                    ))
+                }
+            }
         }
 
-        Ok(Response::new(self.read(&request.name, &request.mask).await?))
+        let name = parse_document_name(&request.name)?.full();
+        let found = self.store.get(&name).await?;
+        if let Some(token) = &transaction {
+            // Recorded whether or not the document exists: "it is not there"
+            // is a fact this transaction may be about to act on.
+            match &found {
+                Some(document) => {
+                    self.transactions
+                        .record_reads(token, std::slice::from_ref(document), &[])?
+                }
+                None => self
+                    .transactions
+                    .record_reads(token, &[], std::slice::from_ref(&name))?,
+            }
+        }
+
+        let mut document =
+            found.ok_or_else(|| Status::not_found(format!("no document at {name}")))?;
+        apply_mask(&mut document, &request.mask)?;
+        Ok(Response::new(document))
     }
 
     async fn create_document(
@@ -373,22 +423,17 @@ impl Firestore for FirestoreApi {
         // The API contract says the caller must not set `document.name`; the
         // server derives it from parent/collection/id.
         let name = format!("{}/{}/{}", parent.full(), request.collection_id, document_id);
-        if self.store.contains(&name).await? {
-            return Err(Status::already_exists(format!(
-                "document already exists: {name}"
-            )));
-        }
-
         document.name = name.clone();
-        self.store.put(document, now_timestamp()).await?;
 
-        let mut created = self
-            .store
-            .get(&name)
-            .await?
-            .ok_or_else(|| Status::internal("document vanished immediately after create"))?;
-        apply_mask(&mut created, &request.mask)?;
-        Ok(Response::new(created))
+        // `exists: false` rather than a contains() check: the store enforces it
+        // inside the write, so two concurrent creates cannot both succeed.
+        self.apply_one(PendingWrite::guarded(
+            Mutation::Put(document),
+            Some(store::Precondition::Exists(false)),
+        ))
+        .await?;
+
+        Ok(Response::new(self.read_back(&name, &request.mask).await?))
     }
 
     async fn update_document(
@@ -401,28 +446,25 @@ impl Firestore for FirestoreApi {
             .ok_or_else(|| Status::invalid_argument("document is required"))?;
         debug!(name = %document.name, "UpdateDocument");
 
-        let parsed = parse_document_name(&document.name)?;
-        let name = parsed.full();
-        check_precondition(&self.store, &name, &request.current_document).await?;
+        let name = parse_document_name(&document.name)?.full();
+        let mutation = match &request.update_mask {
+            None => Mutation::Put(Document {
+                name: name.clone(),
+                ..document
+            }),
+            Some(mask) => Mutation::Merge {
+                name: name.clone(),
+                fields: masked_fields(&mask.field_paths, &document)?,
+            },
+        };
 
-        let now = now_timestamp();
-        match &request.update_mask {
-            None => {
-                self.store.put(document, now).await?;
-            }
-            Some(mask) => {
-                let fields = masked_fields(&mask.field_paths, &document)?;
-                self.store.merge(&name, fields, now).await?;
-            }
-        }
+        self.apply_one(PendingWrite::guarded(
+            mutation,
+            precondition(&request.current_document)?,
+        ))
+        .await?;
 
-        let mut updated = self
-            .store
-            .get(&name)
-            .await?
-            .ok_or_else(|| Status::internal("document vanished immediately after update"))?;
-        apply_mask(&mut updated, &request.mask)?;
-        Ok(Response::new(updated))
+        Ok(Response::new(self.read_back(&name, &request.mask).await?))
     }
 
     async fn delete_document(
@@ -432,10 +474,12 @@ impl Firestore for FirestoreApi {
         let request = request.into_inner();
         debug!(name = %request.name, "DeleteDocument");
 
-        let parsed = parse_document_name(&request.name)?;
-        let name = parsed.full();
-        check_precondition(&self.store, &name, &request.current_document).await?;
-        self.store.delete(&name).await?;
+        let name = parse_document_name(&request.name)?.full();
+        self.apply_one(PendingWrite::guarded(
+            Mutation::Delete { name },
+            precondition(&request.current_document)?,
+        ))
+        .await?;
         Ok(Response::new(()))
     }
 
@@ -448,36 +492,55 @@ impl Firestore for FirestoreApi {
         let request = request.into_inner();
         debug!(count = request.documents.len(), "BatchGetDocuments");
 
-        // `read_time` (point-in-time reads) is also unserved, but the in-memory
-        // store only ever holds the latest version, so treating it as a strong
-        // read would silently lie. Reject anything but default consistency.
+        // A point-in-time read stays unserved: the store only holds the latest
+        // version of a document, so answering one would silently lie.
+        let mut transaction = None;
         if let Some(selector) = &request.consistency_selector {
             use crate::protos::google::firestore::v1::batch_get_documents_request::ConsistencySelector;
-            let what = match selector {
-                ConsistencySelector::Transaction(_) | ConsistencySelector::NewTransaction(_) => {
-                    "transactional BatchGetDocuments"
+            match selector {
+                ConsistencySelector::Transaction(token) => {
+                    self.transactions.check(token)?;
+                    transaction = Some(token.clone());
                 }
-                ConsistencySelector::ReadTime(_) => "point-in-time BatchGetDocuments reads",
-            };
-            return Err(unimplemented(what, "consistency modes land in a later phase"));
+                // The client asked us to start a transaction for this read and
+                // report the token back in the first response.
+                ConsistencySelector::NewTransaction(options) => {
+                    transaction = Some(self.transactions.begin(&Some(options.clone()))?);
+                }
+                ConsistencySelector::ReadTime(_) => {
+                    return Err(unimplemented(
+                        "point-in-time BatchGetDocuments reads",
+                        "the store only keeps the current version of a document",
+                    ))
+                }
+            }
         }
+        let started_transaction = matches!(
+            request.consistency_selector,
+            Some(crate::protos::google::firestore::v1::batch_get_documents_request::ConsistencySelector::NewTransaction(_))
+        );
 
         let read_time = now_timestamp();
         // Resolve eagerly so a bad resource name fails the call rather than
         // poisoning the stream mid-flight.
         let mut responses = Vec::with_capacity(request.documents.len());
+        let mut found = Vec::new();
+        let mut absent = Vec::new();
         for name in &request.documents {
-            let parsed = parse_document_name(name)?;
-            let result = match self.store.get(&parsed.full()).await? {
-                Some(mut document) => {
-                    apply_mask(&mut document, &request.mask)?;
+            let name = parse_document_name(name)?.full();
+            let result = match self.store.get(&name).await? {
+                Some(document) => {
+                    found.push(document.clone());
+                    let mut masked = document;
+                    apply_mask(&mut masked, &request.mask)?;
                     crate::protos::google::firestore::v1::batch_get_documents_response::Result::Found(
-                        document,
+                        masked,
                     )
                 }
                 None => {
+                    absent.push(name.clone());
                     crate::protos::google::firestore::v1::batch_get_documents_response::Result::Missing(
-                        name.clone(),
+                        name,
                     )
                 }
             };
@@ -486,6 +549,24 @@ impl Firestore for FirestoreApi {
                 transaction: Vec::new(),
                 read_time: Some(read_time.clone()),
             });
+        }
+
+        if let Some(token) = &transaction {
+            // The read set is recorded from the unmasked documents, so a mask
+            // cannot narrow what the commit's conflict check covers.
+            self.transactions.record_reads(token, &found, &absent)?;
+            if started_transaction {
+                // The contract puts the new token on the first response.
+                if let Some(first) = responses.first_mut() {
+                    first.transaction = token.clone();
+                } else {
+                    responses.push(BatchGetDocumentsResponse {
+                        result: None,
+                        transaction: token.clone(),
+                        read_time: Some(read_time.clone()),
+                    });
+                }
+            }
         }
 
         Ok(Response::new(stream_responses(responses)))
@@ -498,23 +579,30 @@ impl Firestore for FirestoreApi {
         let request = request.into_inner();
         debug!(writes = request.writes.len(), "Commit");
 
-        if !request.transaction.is_empty() {
-            return Err(unimplemented(
-                "transactional Commit",
-                "transactions land in a later phase",
-            ));
-        }
+        // Translated in full before anything is written, so an unsupported
+        // write in the middle of a batch cannot leave the first half applied.
+        let writes: Vec<PendingWrite> = request
+            .writes
+            .iter()
+            .map(pending_write)
+            .collect::<Result<_, Status>>()?;
+
+        // A transaction's read set is checked in the same store transaction as
+        // its writes, so a document that changed since it was read aborts the
+        // commit instead of being overwritten.
+        let mut batch = if request.transaction.is_empty() {
+            Vec::new()
+        } else {
+            self.transactions.finish(&request.transaction, true)?
+        };
+        let applied = writes.len();
+        batch.extend(writes);
 
         let now = now_timestamp();
-        let mut write_results = Vec::with_capacity(request.writes.len());
-        for write in &request.writes {
-            // Phase 0 has no rollback: a failed write mid-batch leaves earlier
-            // writes applied. Recorded as known divergence in the contract doc.
-            write_results.push(self.apply_write(write, &now).await?);
-        }
+        self.store.commit(batch, now.clone()).await?;
 
         Ok(Response::new(CommitResponse {
-            write_results,
+            write_results: write_results(applied, &now),
             commit_time: Some(now),
         }))
     }
@@ -533,12 +621,7 @@ impl Firestore for FirestoreApi {
         if let Some(selector) = &request.consistency_selector {
             use crate::protos::google::firestore::v1::list_documents_request::ConsistencySelector;
             match selector {
-                ConsistencySelector::Transaction(_) => {
-                    return Err(unimplemented(
-                        "transactional ListDocuments",
-                        "transactions land next",
-                    ))
-                }
+                ConsistencySelector::Transaction(token) => self.transactions.check(token)?,
                 ConsistencySelector::ReadTime(_) => {
                     return Err(unimplemented(
                         "point-in-time ListDocuments reads",
@@ -622,13 +705,26 @@ impl Firestore for FirestoreApi {
 
     async fn begin_transaction(
         &self,
-        _request: Request<BeginTransactionRequest>,
+        request: Request<BeginTransactionRequest>,
     ) -> Result<Response<BeginTransactionResponse>, Status> {
-        Err(unimplemented("BeginTransaction", "transactions phase"))
+        let request = request.into_inner();
+        debug!(database = %request.database, "BeginTransaction");
+
+        let transaction = self.transactions.begin(&request.options)?;
+        Ok(Response::new(BeginTransactionResponse { transaction }))
     }
 
-    async fn rollback(&self, _request: Request<RollbackRequest>) -> Result<Response<()>, Status> {
-        Err(unimplemented("Rollback", "transactions phase"))
+    async fn rollback(&self, request: Request<RollbackRequest>) -> Result<Response<()>, Status> {
+        let request = request.into_inner();
+        debug!("Rollback");
+
+        // Nothing to undo: the client SDK buffers a transaction's writes and
+        // only sends them with the commit, so a rolled-back transaction never
+        // wrote anything. Dropping the token is the whole operation — and it
+        // still has to reject an unknown one, or a client bug looks like a
+        // success.
+        self.transactions.finish(&request.transaction, false)?;
+        Ok(Response::new(()))
     }
 
     type RunQueryStream = ReceiverStream<Result<RunQueryResponse, Status>>;
@@ -640,15 +736,26 @@ impl Firestore for FirestoreApi {
         let request = request.into_inner();
         debug!(parent = %request.parent, "RunQuery");
 
+        let mut transaction = None;
+        let mut started_transaction = false;
         if let Some(selector) = &request.consistency_selector {
             use crate::protos::google::firestore::v1::run_query_request::ConsistencySelector;
-            let what = match selector {
-                ConsistencySelector::Transaction(_) | ConsistencySelector::NewTransaction(_) => {
-                    "transactional RunQuery"
+            match selector {
+                ConsistencySelector::Transaction(token) => {
+                    self.transactions.check(token)?;
+                    transaction = Some(token.clone());
                 }
-                ConsistencySelector::ReadTime(_) => "point-in-time RunQuery reads",
-            };
-            return Err(unimplemented(what, "transactions land next"));
+                ConsistencySelector::NewTransaction(options) => {
+                    transaction = Some(self.transactions.begin(&Some(options.clone()))?);
+                    started_transaction = true;
+                }
+                ConsistencySelector::ReadTime(_) => {
+                    return Err(unimplemented(
+                        "point-in-time RunQuery reads",
+                        "the store only keeps the current version of a document",
+                    ))
+                }
+            }
         }
         if request.explain_options.is_some() {
             return Err(unimplemented(
@@ -672,6 +779,15 @@ impl Firestore for FirestoreApi {
             .await?;
         let results = query.evaluate(documents);
 
+        if let Some(token) = &transaction {
+            // Every document the query returned joins the read set, so a
+            // transaction that acted on a query result cannot commit after
+            // someone else changed one of those documents. Documents the query
+            // filtered out are not covered — recorded in the fidelity matrix.
+            self.transactions
+                .record_reads(token, &results.documents, &[])?;
+        }
+
         let read_time = now_timestamp();
         let mut responses: Vec<RunQueryResponse> = results
             .documents
@@ -694,6 +810,9 @@ impl Firestore for FirestoreApi {
         }
         if let Some(first) = responses.first_mut() {
             first.skipped_results = i32::try_from(results.skipped).unwrap_or(i32::MAX);
+            if started_transaction {
+                first.transaction = transaction.clone().unwrap_or_default();
+            }
         }
 
         Ok(Response::new(stream_responses(responses)))
@@ -772,9 +891,47 @@ impl Firestore for FirestoreApi {
 
     async fn batch_write(
         &self,
-        _request: Request<BatchWriteRequest>,
+        request: Request<BatchWriteRequest>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
-        Err(unimplemented("BatchWrite", "Commit covers the SDK write path"))
+        let request = request.into_inner();
+        debug!(writes = request.writes.len(), "BatchWrite");
+
+        // Unlike `Commit`, `BatchWrite` is explicitly *not* atomic: each write
+        // succeeds or fails on its own and the response reports a status per
+        // write. So each one is its own single-write commit.
+        let mut write_results = Vec::with_capacity(request.writes.len());
+        let mut statuses = Vec::with_capacity(request.writes.len());
+
+        for write in &request.writes {
+            let outcome = match pending_write(write) {
+                Err(status) => Err(status),
+                Ok(pending) => self.apply_one(pending).await,
+            };
+            match outcome {
+                Ok(now) => {
+                    write_results.push(WriteResult {
+                        update_time: Some(now),
+                        transform_results: Vec::new(),
+                    });
+                    statuses.push(RpcStatus::default());
+                }
+                Err(status) => {
+                    // A failed write still occupies its slot, so the client can
+                    // line results up with the writes it sent.
+                    write_results.push(WriteResult::default());
+                    statuses.push(RpcStatus {
+                        code: status.code() as i32,
+                        message: status.message().to_string(),
+                        details: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        Ok(Response::new(BatchWriteResponse {
+            write_results,
+            status: statuses,
+        }))
     }
 }
 

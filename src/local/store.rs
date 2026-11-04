@@ -72,6 +72,14 @@ pub enum PreconditionFailure {
     /// `update_time` did not match, i.e. somebody else wrote in between.
     #[error("update_time precondition failed for {0}")]
     UpdateTime(String),
+
+    /// A document a transaction read changed before the transaction committed.
+    ///
+    /// Reported separately from the preconditions a client asked for, because
+    /// the client did not ask for this one: the right answer is ABORTED, which
+    /// is what tells an SDK to retry the whole transaction.
+    #[error("transaction conflict: {0} changed after the transaction read it")]
+    Conflict(String),
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -98,6 +106,7 @@ impl From<StoreError> for Status {
                 PreconditionFailure::UpdateTime(_) => {
                     Status::failed_precondition(failure.to_string())
                 }
+                PreconditionFailure::Conflict(_) => Status::aborted(failure.to_string()),
             },
         }
     }
@@ -130,6 +139,14 @@ pub enum Mutation {
     },
     /// Remove the document. Idempotent: deleting a missing document succeeds.
     Delete { name: String },
+    /// Change nothing; only enforce the precondition.
+    ///
+    /// This is how a transaction's **read set** is carried into its commit: one
+    /// `Verify` per document the transaction read, guarded by the
+    /// `update_time` that was read. Because the whole batch is one store
+    /// transaction, a document that someone else wrote in the meantime fails
+    /// the batch instead of being silently overwritten.
+    Verify { name: String },
 }
 
 impl Mutation {
@@ -137,7 +154,9 @@ impl Mutation {
     pub fn name(&self) -> &str {
         match self {
             Mutation::Put(document) => &document.name,
-            Mutation::Merge { name, .. } | Mutation::Delete { name } => name,
+            Mutation::Merge { name, .. }
+            | Mutation::Delete { name }
+            | Mutation::Verify { name } => name,
         }
     }
 }
@@ -217,6 +236,9 @@ pub(crate) fn mutate(
     if let Mutation::Delete { .. } = mutation {
         return (None, WriteOutcome::Deleted { existed });
     }
+    if let Mutation::Verify { .. } = mutation {
+        return (stored, WriteOutcome::Verified);
+    }
     // `create_time` only advances when a document is deleted and recreated, so
     // an overwrite keeps the time the document first appeared.
     let create_time = stored
@@ -243,8 +265,27 @@ pub(crate) fn mutate(
             document.update_time = Some(now.clone());
             (Some(document), outcome)
         }
-        Mutation::Delete { .. } => (None, outcome),
+        // Both handled above, before `stored` was consumed.
+        Mutation::Delete { .. } | Mutation::Verify { .. } => (None, outcome),
     }
+}
+
+/// Check the precondition guarding one pending write.
+///
+/// Wraps [`check_precondition`] with the one rule that depends on *why* the
+/// precondition is there: a failure on a read-set [`Mutation::Verify`] is
+/// contention, not a client mistake, and has to reach the client as ABORTED.
+pub(crate) fn check_write(
+    write: &PendingWrite,
+    stored: Option<&Document>,
+) -> Result<(), PreconditionFailure> {
+    let name = write.mutation.name();
+    check_precondition(name, stored, write.precondition.as_ref()).map_err(|failure| {
+        match &write.mutation {
+            Mutation::Verify { .. } => PreconditionFailure::Conflict(name.to_string()),
+            _ => failure,
+        }
+    })
 }
 
 /// Outcome of a write, so callers can report the right gRPC status without
@@ -257,6 +298,8 @@ pub enum WriteOutcome {
     /// are idempotent, so "nothing to delete" is a successful outcome and not
     /// an error.
     Deleted { existed: bool },
+    /// A [`Mutation::Verify`] whose precondition held. Nothing was written.
+    Verified,
 }
 
 /// A shared handle to whichever store the process was configured with.
@@ -455,7 +498,13 @@ impl Store for MemoryStore {
                 None => documents.get(&name).cloned(),
             };
 
-            check_precondition(&name, stored.as_ref(), write.precondition.as_ref())?;
+            check_write(&write, stored.as_ref())?;
+            if matches!(write.mutation, Mutation::Verify { .. }) {
+                // Nothing to stage: a verification changes no document.
+                outcomes.push(WriteOutcome::Verified);
+                continue;
+            }
+
             let (next, outcome) = mutate(write.mutation, stored, &now);
             staged.insert(name, next);
             outcomes.push(outcome);
@@ -562,6 +611,7 @@ pub mod conformance {
         preconditions_are_enforced_by_the_store(store, &name("precondition")).await;
         a_failed_precondition_abandons_the_whole_batch(store, &name("atomic")).await;
         a_batch_reads_its_own_earlier_writes(store, &name("ordered")).await;
+        a_verification_changes_nothing_but_can_fail_the_batch(store, &name("verify")).await;
         collection_reads_return_only_direct_children(store, &name("scan")).await;
         collection_ids_include_collections_under_an_unwritten_parent(store, &name("ids")).await;
     }
@@ -774,6 +824,59 @@ pub mod conformance {
         let found = store.get(name).await.expect("get").expect("written");
         assert!(found.fields.contains_key("first"));
         assert!(found.fields.contains_key("second"));
+    }
+
+    /// A read-set verification writes nothing, and fails the batch — as a
+    /// conflict, not as a client error — when the document moved on.
+    async fn a_verification_changes_nothing_but_can_fail_the_batch(
+        store: &dyn Store,
+        name: &str,
+    ) {
+        let read = format!("{name}-read");
+        let written = format!("{name}-written");
+        store.put(doc(&read, "k", "v"), ts(10)).await.expect("put");
+
+        let batch = |expected: Timestamp, target: &str| {
+            vec![
+                PendingWrite::guarded(
+                    Mutation::Verify {
+                        name: read.clone(),
+                    },
+                    Some(Precondition::UpdateTime(expected)),
+                ),
+                PendingWrite::new(Mutation::Put(doc(target, "k", "v"))),
+            ]
+        };
+
+        let outcomes = store
+            .commit(batch(ts(10), &written), ts(20))
+            .await
+            .expect("the verification holds");
+        assert_eq!(outcomes, vec![WriteOutcome::Verified, WriteOutcome::Created]);
+
+        let unchanged = store.get(&read).await.expect("get").expect("still there");
+        assert_eq!(
+            unchanged.update_time,
+            Some(ts(10)),
+            "a verification must not touch the document it checks"
+        );
+
+        let doomed = format!("{name}-doomed");
+        let failure = store
+            .commit(batch(ts(999), &doomed), ts(30))
+            .await
+            .expect_err("the document moved on");
+        assert!(
+            matches!(
+                failure,
+                StoreError::Precondition(PreconditionFailure::Conflict(_))
+            ),
+            "a stale read set is contention, not a bad request: {failure}"
+        );
+        assert!(
+            store.get(&doomed).await.expect("get").is_none(),
+            "the batch's writes must not survive a failed verification"
+        );
     }
 
     /// A collection read is the documents *directly* in it: subcollection
