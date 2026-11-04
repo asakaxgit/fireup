@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Fireup">
+  <!-- Fireup mark. One row has come off the stem and moved on: the stack on the
+       left is the store, the ember row is the one that has been lifted out.
+       Geometry is on a 64-unit grid; every edge is a multiple of 2. -->
+  <rect x="12" y="9"  width="12" height="46" fill="#0B1220"/>
+  <rect x="12" y="9"  width="36" height="12" fill="#0B1220"/>
+  <rect x="30" y="27" width="22" height="12" fill="#C2410C"/>
+</svg>

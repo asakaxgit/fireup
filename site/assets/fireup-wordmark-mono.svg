@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-6 -2 212 76" role="img" aria-label="fireup">
+  <!-- MASTER. Hand-drawn geometric monoline wordmark. Drawn rather than set, so
+       the identity carries no webfont licence and does not depend on a font
+       file being present to render. Construction: baseline y=50, x-height top
+       y=20, ascender y=4, descender y=66, stroke 9, bowl radius 15.
+       Colour variants and lockups are generated from this file and
+       mark.svg — see brand/scripts/build.mjs. -->
+  <g fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="butt" stroke-linejoin="round">
+    <!-- f -->
+    <path d="M12 50 V13 A8 8 0 0 1 20 5"/>
+    <path d="M4 20 H23"/>
+    <!-- i -->
+    <path d="M34 20 V50"/>
+    <!-- r -->
+    <path d="M50 20 V50"/>
+    <path d="M50 32 Q50 20 63 20"/>
+    <!-- e -->
+    <path d="M104 35 A15 15 0 1 0 96.5 48"/>
+    <path d="M74 35 H104"/>
+    <!-- u -->
+    <path d="M120 20 V35 A15 15 0 0 0 150 35"/>
+    <path d="M150 20 V50"/>
+    <!-- p -->
+    <path d="M166 20 V66"/>
+    <path d="M166 20 H181 A15 15 0 0 1 181 50 H166"/>
+  </g>
+  <!-- dot of the i, drawn solid so it keeps its weight at small sizes -->
+  <circle cx="34" cy="9" r="4.5" fill="currentColor"/>
+</svg>
