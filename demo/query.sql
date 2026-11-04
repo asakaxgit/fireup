@@ -64,15 +64,17 @@ SELECT name, update_time_seconds
  WHERE document_id = 'demo-sdk-write';
 
 \echo
-\echo '  The documented fidelity gap, in the stored row: the export parser'
-\echo '  tags a timestamp instead of producing a timestampValue, so the'
-\echo '  document plane stores a map. See docs/local/END_TO_END.md.'
-SELECT document_id,
-       (SELECT string_agg(value_type, ', ')
-          FROM jsonb_object_keys(fields -> 'created_at') AS value_type)
-         AS "created_at is stored as",
-       (SELECT string_agg(field, ', ' ORDER BY field)
-          FROM jsonb_object_keys(fields -> 'created_at' -> 'mapValue' -> 'fields') AS field)
-         AS "whose fields are"
-  FROM fireup_local_documents
- WHERE document_id = 'ada';
+\echo '  The four Datastore types JSON has no native form for. The export'
+\echo '  parser hands them to seed as __fireup_type__-tagged maps; seeding'
+\echo '  reads those tags, so the row holds the real value types — the same'
+\echo '  ones the SDK read a moment ago. An ordinary object stays a mapValue.'
+SELECT f.field,
+       v.key AS "stored value type",
+       left(v.value #>> '{}', 54) AS "value"
+  FROM fireup_local_documents d
+ CROSS JOIN (VALUES ('created_at'), ('avatar'), ('location'), ('manager'), ('address'))
+         AS f(field)
+ -- Each field is a single-key object: the value-type tag and its payload.
+ CROSS JOIN LATERAL jsonb_each(d.fields -> f.field) AS v
+ WHERE d.collection_id = 'Users' AND d.document_id = 'grace'
+ ORDER BY f.field;

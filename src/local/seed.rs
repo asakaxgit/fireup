@@ -12,25 +12,34 @@
 //! Writes go through `put`, which upserts, so seeding the same export twice
 //! leaves the store in the same state as seeding it once.
 //!
-//! ## Known fidelity limit
+//! ## Value types
 //!
-//! Seeding infers a Firestore value type from the JSON the shared export parser
-//! produced (string/number/bool/null/array/object), so it does **not** restore
-//! `timestampValue`, `bytesValue`, `geoPointValue` or `referenceValue`.
+//! Most of a document's data arrives as plain JSON and infers its Firestore
+//! value type from that JSON (string/number/bool/null/array/object). Four
+//! Datastore types have no native JSON form, so the shared export parser decodes
+//! them into a *tagged map* instead of erasing them — see
+//! [`crate::types::DATASTORE_TYPE_TAG`] and its companions. Seeding reads those
+//! same tags and restores the real value type:
 //!
-//! The information is not lost on the way in. The parser decodes a Datastore
-//! blob, timestamp, geo point, or key reference into a *tagged map* — see
-//! [`crate::types::DATASTORE_TYPE_TAG`] and its companions — because JSON has no
-//! native form for them. `fireup import` reads those tags and maps them onto
-//! `bytea`, `timestamptz`, `point`, and `text`. This module does not, so such a
-//! field seeds as a `mapValue` and an SDK reads a map rather than a
-//! `Timestamp`/`Bytes`/`GeoPoint`/reference.
+//! | Tag | Seeds as |
+//! |---|---|
+//! | `blob` | `bytesValue` |
+//! | `timestamp` | `timestampValue` |
+//! | `geo_point` | `geoPointValue` |
+//! | `key` | `referenceValue` |
 //!
-//! So the gap is here, not in the parser, and closing it means honouring the
-//! same tags rather than guessing from a string's shape — a document holding the
-//! literal text of a date is not the same as one holding a timestamp. Until
-//! then it is published as a divergence in `docs/local/README.md` and
-//! demonstrated by `scripts/demo-export-to-sql.sh`.
+//! which is the document-plane counterpart of `fireup import` reading the same
+//! tags to produce `bytea`, `timestamptz`, `point`, and `text`.
+//!
+//! Dispatch is on the tag and never on a string's shape: a document holding the
+//! literal text of a date is not the same as one holding a timestamp. A map that
+//! merely happens to carry a `__fireup_type__` key whose value this module does
+//! not know stays an ordinary `mapValue`.
+//!
+//! A tagged value whose payload cannot be restored — unparseable base64, a key
+//! path in a non-default namespace — is reported as a skipped document rather
+//! than seeded as something else, for the same reason the namespace refusal
+//! below exists.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -41,8 +50,12 @@ use tracing::{debug, warn};
 
 use crate::leveldb_parser::parser::{FirestoreDocumentParser, LevelDBParser};
 use crate::local::store::{SharedStore, WriteOutcome};
+use crate::local::value_json;
 use crate::protos::google::firestore::v1::{value::ValueType, ArrayValue, Document, MapValue, Value};
-use crate::types::{DatastoreKey, FirestoreDocument};
+use crate::types::{
+    datastore_type_tag, DatastoreKey, DatastoreKeyId, DatastoreKeyPathElement, FirestoreDocument,
+    DATASTORE_TYPE_BLOB, DATASTORE_TYPE_GEO_POINT, DATASTORE_TYPE_KEY, DATASTORE_TYPE_TIMESTAMP,
+};
 
 /// A document in the export that was not seeded, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,7 +178,7 @@ fn collect_documents(
             }
         };
 
-        match convert_fields(&source.data) {
+        match convert_fields(documents_root, &source.data) {
             Ok(fields) => {
                 debug!(%name, fields = fields.len(), "seeding document");
                 out.push((
@@ -284,21 +297,39 @@ fn seed_timestamp(source: &FirestoreDocument) -> Timestamp {
 }
 
 fn convert_fields(
+    documents_root: &str,
     data: &HashMap<String, serde_json::Value>,
 ) -> Result<HashMap<String, Value>, String> {
     let mut fields = HashMap::with_capacity(data.len());
     for (name, json) in data {
-        let value = json_to_value(json).map_err(|reason| format!("field {name:?}: {reason}"))?;
+        let value = json_to_value(documents_root, json)
+            .map_err(|reason| format!("field {name:?}: {reason}"))?;
         fields.insert(name.clone(), value);
     }
     Ok(fields)
 }
 
-/// Infer a Firestore `Value` from the plain JSON the export parser produced.
+/// Turn the JSON the export parser produced into a Firestore `Value`.
 ///
-/// Integers stay integers and fractional numbers become doubles; no string is
-/// re-interpreted as a timestamp or as bytes (see the module note).
-pub fn json_to_value(json: &serde_json::Value) -> Result<Value, String> {
+/// A map carrying a Datastore type tag becomes the value type that tag names
+/// (see the module note). Everything else is inferred from its JSON shape:
+/// integers stay integers, fractional numbers become doubles, and no string is
+/// re-interpreted as a timestamp or as bytes.
+///
+/// `documents_root` is needed because a `referenceValue` is a full resource
+/// name, while the tag carries a Datastore key path.
+pub fn json_to_value(
+    documents_root: &str,
+    json: &serde_json::Value,
+) -> Result<Value, String> {
+    if let Some(tag) = datastore_type_tag(json) {
+        if let Some(restored) = tagged_value(documents_root, tag, json) {
+            return restored;
+        }
+        // An unknown tag value is somebody else's `__fireup_type__` key, not a
+        // type this module can restore, so it keeps its JSON shape.
+    }
+
     let value_type = match json {
         serde_json::Value::Null => ValueType::NullValue(0),
         serde_json::Value::Bool(flag) => ValueType::BooleanValue(*flag),
@@ -320,13 +351,13 @@ pub fn json_to_value(json: &serde_json::Value) -> Result<Value, String> {
         serde_json::Value::Array(items) => ValueType::ArrayValue(ArrayValue {
             values: items
                 .iter()
-                .map(json_to_value)
+                .map(|item| json_to_value(documents_root, item))
                 .collect::<Result<Vec<_>, _>>()?,
         }),
         serde_json::Value::Object(entries) => {
             let mut fields = HashMap::with_capacity(entries.len());
             for (key, value) in entries {
-                fields.insert(key.clone(), json_to_value(value)?);
+                fields.insert(key.clone(), json_to_value(documents_root, value)?);
             }
             ValueType::MapValue(MapValue { fields })
         }
@@ -337,10 +368,112 @@ pub fn json_to_value(json: &serde_json::Value) -> Result<Value, String> {
     })
 }
 
+/// Restore the value type a Datastore type tag names.
+///
+/// `None` means the tag is not one of ours, so the caller should treat the map
+/// as ordinary data. `Some(Err(..))` means the tag *is* ours but its payload is
+/// unusable, which must not be papered over as a map.
+///
+/// Each tagged payload is rebuilt in the public REST value shape and handed to
+/// [`value_json::decode`], the codec the store itself round-trips through. That
+/// keeps one implementation of RFC 3339 and base64 parsing, and guarantees
+/// anything this produces is storable.
+fn tagged_value(
+    documents_root: &str,
+    tag: &str,
+    json: &serde_json::Value,
+) -> Option<Result<Value, String>> {
+    let rest_shape = match tag {
+        DATASTORE_TYPE_TIMESTAMP => tagged_payload(json, tag, "rfc3339")
+            .map(|rfc3339| serde_json::json!({ "timestampValue": rfc3339 })),
+        DATASTORE_TYPE_BLOB => tagged_payload(json, tag, "base64")
+            .map(|base64| serde_json::json!({ "bytesValue": base64 })),
+        DATASTORE_TYPE_GEO_POINT => tagged_payload(json, tag, "latitude").and_then(|latitude| {
+            let longitude = tagged_payload(json, tag, "longitude")?;
+            Ok(serde_json::json!({
+                "geoPointValue": { "latitude": latitude, "longitude": longitude },
+            }))
+        }),
+        DATASTORE_TYPE_KEY => tagged_payload(json, tag, "key_path").and_then(|key_path| {
+            let key_path = key_path
+                .as_str()
+                .ok_or_else(|| format!("{tag:?} value has a non-string \"key_path\""))?;
+            Ok(serde_json::json!({
+                "referenceValue": reference_name(documents_root, key_path)?,
+            }))
+        }),
+        _ => return None,
+    };
+
+    Some(
+        rest_shape.and_then(|shape| {
+            value_json::decode(&shape)
+                .map_err(|error| format!("{tag:?} value cannot be restored: {error}"))
+        }),
+    )
+}
+
+fn tagged_payload(
+    json: &serde_json::Value,
+    tag: &str,
+    key: &str,
+) -> Result<serde_json::Value, String> {
+    json.get(key)
+        .cloned()
+        .ok_or_else(|| format!("{tag:?} value has no {key:?} payload"))
+}
+
+/// Resource name a key reference points at.
+///
+/// A `referenceValue` is a full `projects/…/documents/…` name, so the key path
+/// the tag carries goes through the same key-to-document-path mapping as a
+/// seeded document's own name — including its namespace refusal, because a
+/// reference into another namespace has no document name either.
+fn reference_name(documents_root: &str, key_path: &str) -> Result<String, String> {
+    let key = key_from_encoded_path(key_path)?;
+    Ok(format!("{documents_root}/{}", key_segments(&key)?.join("/")))
+}
+
+/// Read a Datastore encoded key path (`Users/ada`, `[tenant-b]Users/ada`) back
+/// into the key it was written from by [`DatastoreKey::encoded_path`].
+///
+/// Every identifier comes back as a string name. The distinction between a name
+/// and a numeric id is not recoverable from the encoded form and does not
+/// matter here: both render as the same path segment.
+fn key_from_encoded_path(encoded: &str) -> Result<DatastoreKey, String> {
+    let (namespace, path) = match encoded.strip_prefix('[') {
+        Some(rest) => {
+            let (namespace, path) = rest.split_once(']').ok_or_else(|| {
+                format!("key path {encoded:?} has an unterminated namespace prefix")
+            })?;
+            (namespace.to_string(), path)
+        }
+        None => (String::new(), encoded),
+    };
+
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() % 2 != 0 {
+        return Err(format!(
+            "key path {encoded:?} is not a sequence of kind/id pairs"
+        ));
+    }
+
+    Ok(DatastoreKey {
+        namespace,
+        path: segments
+            .chunks(2)
+            .map(|pair| DatastoreKeyPathElement {
+                kind: pair[0].to_string(),
+                id: DatastoreKeyId::Name(pair[1].to_string()),
+            })
+            .collect(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DatastoreKeyId, DatastoreKeyPathElement, DocumentMetadata};
+    use crate::types::DocumentMetadata;
 
     const ROOT: &str = "projects/demo/databases/(default)/documents";
 
@@ -467,7 +600,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let fields = convert_fields(&data).expect("all values are representable");
+        let fields = convert_fields(ROOT, &data).expect("all values are representable");
 
         assert_eq!(
             fields["text"].value_type,
@@ -490,6 +623,197 @@ mod tests {
     }
 
     #[test]
+    fn tagged_maps_restore_the_datastore_value_types_json_cannot_express() {
+        let data: HashMap<String, serde_json::Value> = [
+            (
+                "created_at".to_string(),
+                crate::types::tagged_timestamp("2026-03-14T09:26:53.589793Z".to_string()),
+            ),
+            (
+                "avatar".to_string(),
+                crate::types::tagged_blob("AAEC/f7/".to_string()),
+            ),
+            (
+                "location".to_string(),
+                crate::types::tagged_geo_point(51.5074, -0.1278),
+            ),
+            (
+                "manager".to_string(),
+                crate::types::tagged_key_reference("Users/ada".to_string()),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let fields = convert_fields(ROOT, &data).expect("every tag is restorable");
+
+        assert_eq!(
+            fields["created_at"].value_type,
+            Some(ValueType::TimestampValue(Timestamp {
+                seconds: 1_773_480_413,
+                nanos: 589_793_000,
+            })),
+            "the tag carries RFC 3339, so nanoseconds must survive"
+        );
+        assert_eq!(
+            fields["avatar"].value_type,
+            Some(ValueType::BytesValue(vec![0, 1, 2, 253, 254, 255]))
+        );
+        assert_eq!(
+            fields["location"].value_type,
+            Some(ValueType::GeoPointValue(
+                crate::protos::google::r#type::LatLng {
+                    latitude: 51.5074,
+                    longitude: -0.1278,
+                }
+            ))
+        );
+        // A key path is a Datastore path; a referenceValue is a resource name.
+        assert_eq!(
+            fields["manager"].value_type,
+            Some(ValueType::ReferenceValue(format!("{ROOT}/Users/ada"))),
+        );
+
+        // And everything the restore produced is storable as it stands.
+        let encoded = value_json::encode_fields(&fields).expect("encodes");
+        assert_eq!(
+            value_json::decode_fields(&encoded).expect("decodes"),
+            fields
+        );
+    }
+
+    #[test]
+    fn a_multi_element_key_reference_keeps_its_whole_path() {
+        let data: HashMap<String, serde_json::Value> = [(
+            "order".to_string(),
+            crate::types::tagged_key_reference("Users/ada/Orders/1001".to_string()),
+        )]
+        .into_iter()
+        .collect();
+
+        let fields = convert_fields(ROOT, &data).expect("restorable");
+        assert_eq!(
+            fields["order"].value_type,
+            Some(ValueType::ReferenceValue(format!(
+                "{ROOT}/Users/ada/Orders/1001"
+            ))),
+        );
+        // The reference has to name a document the data plane can serve.
+        let Some(ValueType::ReferenceValue(name)) = &fields["order"].value_type else {
+            panic!("expected a reference");
+        };
+        crate::local::names::parse_document_name(name).expect("valid document name");
+    }
+
+    #[test]
+    fn tagged_values_are_restored_inside_arrays_and_maps_too() {
+        let data: HashMap<String, serde_json::Value> = [
+            (
+                "history".to_string(),
+                serde_json::json!([crate::types::tagged_timestamp(
+                    "2024-05-01T12:00:00Z".to_string()
+                )]),
+            ),
+            (
+                "profile".to_string(),
+                serde_json::json!({"home": crate::types::tagged_geo_point(0.0, 0.0)}),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let fields = convert_fields(ROOT, &data).expect("restorable");
+
+        let Some(ValueType::ArrayValue(array)) = &fields["history"].value_type else {
+            panic!("expected an array");
+        };
+        assert!(matches!(
+            array.values[0].value_type,
+            Some(ValueType::TimestampValue(_))
+        ));
+
+        let Some(ValueType::MapValue(map)) = &fields["profile"].value_type else {
+            panic!("expected a map");
+        };
+        assert!(matches!(
+            map.fields["home"].value_type,
+            Some(ValueType::GeoPointValue(_))
+        ));
+    }
+
+    #[test]
+    fn only_the_tag_decides_the_type_never_a_strings_shape() {
+        // A document that holds the literal text of a date holds a string.
+        let data: HashMap<String, serde_json::Value> = [
+            ("when".to_string(), serde_json::json!("2026-03-14T09:26:53Z")),
+            ("bytes_ish".to_string(), serde_json::json!("AAEC/f7/")),
+            ("path_ish".to_string(), serde_json::json!("Users/ada")),
+        ]
+        .into_iter()
+        .collect();
+
+        let fields = convert_fields(ROOT, &data).expect("strings are representable");
+        for name in ["when", "bytes_ish", "path_ish"] {
+            assert!(
+                matches!(fields[name].value_type, Some(ValueType::StringValue(_))),
+                "{name} must stay a string, got {:?}",
+                fields[name].value_type
+            );
+        }
+    }
+
+    #[test]
+    fn a_map_with_an_unknown_type_tag_stays_a_map() {
+        let data: HashMap<String, serde_json::Value> = [(
+            "theirs".to_string(),
+            serde_json::json!({
+                crate::types::DATASTORE_TYPE_TAG: "something-else",
+                "payload": 1,
+            }),
+        )]
+        .into_iter()
+        .collect();
+
+        let fields = convert_fields(ROOT, &data).expect("an unknown tag is ordinary data");
+        let Some(ValueType::MapValue(map)) = &fields["theirs"].value_type else {
+            panic!("expected a map, got {:?}", fields["theirs"].value_type);
+        };
+        assert_eq!(
+            map.fields[crate::types::DATASTORE_TYPE_TAG].value_type,
+            Some(ValueType::StringValue("something-else".to_string()))
+        );
+        assert_eq!(map.fields["payload"].value_type, Some(ValueType::IntegerValue(1)));
+    }
+
+    #[test]
+    fn a_tagged_value_with_an_unusable_payload_is_refused_rather_than_seeded_as_a_map() {
+        let cases = [
+            ("not RFC 3339", crate::types::tagged_timestamp("yesterday".to_string())),
+            ("not base64", crate::types::tagged_blob("not base64!!".to_string())),
+            (
+                "a namespaced key has no document name",
+                crate::types::tagged_key_reference("[tenant-b]Users/ada".to_string()),
+            ),
+            (
+                "an odd key path is not kind/id pairs",
+                crate::types::tagged_key_reference("Users".to_string()),
+            ),
+            (
+                "a missing payload key",
+                serde_json::json!({ crate::types::DATASTORE_TYPE_TAG: "timestamp" }),
+            ),
+        ];
+
+        for (what, json) in cases {
+            let data: HashMap<String, serde_json::Value> =
+                [("field".to_string(), json)].into_iter().collect();
+            let reason = convert_fields(ROOT, &data)
+                .expect_err(&format!("{what} must not seed as a map"));
+            assert!(reason.contains("field"), "{what}: {reason}");
+        }
+    }
+
+    #[test]
     fn seeded_values_survive_the_storage_codec() {
         // Seeding writes through the same JSONB codec the store uses, so every
         // value the mapper can produce has to be storable.
@@ -500,7 +824,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let fields = convert_fields(&data).expect("representable");
+        let fields = convert_fields(ROOT, &data).expect("representable");
         let encoded = crate::local::value_json::encode_fields(&fields).expect("encodes");
         assert_eq!(
             crate::local::value_json::decode_fields(&encoded).expect("decodes"),
@@ -517,7 +841,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        convert_fields(&data).expect_err("u64::MAX cannot be stored exactly");
+        convert_fields(ROOT, &data).expect_err("u64::MAX cannot be stored exactly");
     }
 
     #[test]

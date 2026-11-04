@@ -1,6 +1,6 @@
 # Fireup — Firebase / GCP local & API license ledger
 
-**Status:** current as of Phase 4 (SAK-167) — glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth landed before it
+**Status:** current as of SAK-174 — seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo before it; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth landed before it
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -224,9 +224,30 @@ positioning is recorded here rather than left to marketing:
 `{"timestampValue": …}` becomes a plain JSON string". That was wrong about our
 own first-party parser: it emits a *tagged map* (`__fireup_type__`, defined in
 `src/types.rs`) which `fireup import` consumes to pick `bytea`/`timestamptz`/
-`point`/`text`. `fireup local seed` ignores the tag, which is the actual gap.
-Both that file and `src/local/seed.rs` now describe the real behaviour. No code
-behaviour changed.
+`point`/`text`. `fireup local seed` ignored the tag, which was the actual gap.
+Both that file and `src/local/seed.rs` were corrected to describe the real
+behaviour. No code behaviour changed in this phase; the gap itself was closed in
+SAK-174 below.
+
+### SAK-174 notes — seeding restores Datastore value types
+
+**No new Google or Firebase artefact, no new proto, no new Rust dependency, and
+no new npm package.** The proto pin is unchanged at googleapis `57aa4dbc`.
+
+`src/local/seed.rs` now reads the first-party `__fireup_type__` tags
+`src/types.rs` defines and restores `bytesValue`/`timestampValue`/
+`geoPointValue`/`referenceValue`. Both the tag vocabulary and the target value
+types are already ours or already vendored: the tags are Fireup's own invention
+for JSON that has no native form for a Datastore blob, timestamp, geo point, or
+key, and the value types come from the public `google/firestore/v1/document.proto`
+already in the ledger. The restore reuses `src/local/value_json.rs`, so no new
+parsing of any Google format was added.
+
+The demo's SDK half (`demo/read-with-sdk.mjs`) now asserts the four real types
+instead of asserting the gap. It still uses Google's own open-source
+`@google-cloud/firestore` purely as a **client** against our server, which is the
+documented, non-reverse-engineering way to verify API compatibility. No version
+range changed.
 
 ## Existing Fireup notes (pre-local-cloud)
 
@@ -240,13 +261,13 @@ behaviour changed.
 The PR checklist in `.cursor/rules/firebase-gcp-compliance.mdc`, answered as each
 phase landed.
 
-| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) |
-|---|---|---|---|---|
-| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected |
-| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` |
-| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated/OOB → `501` | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden |
-| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none |
-| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added |
+| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 |
+|---|---|---|---|---|---|
+| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos |
+| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added |
+| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated/OOB → `501` | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused |
+| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged |
+| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added |
 
 ## How to add a row
 

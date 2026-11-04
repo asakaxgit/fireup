@@ -113,23 +113,26 @@ same as seeding once. If any document could not be written, the command prints
 each reason and **exits non-zero** — a partially seeded store looks identical to
 a complete one from the outside, so it is not reported as success.
 
-Two limits worth knowing:
+Two things worth knowing:
 
-- **Seeding does not restore four Firestore value types.** The shared export
-  parser decodes a Datastore blob, timestamp, geo point, or key reference into a
-  *tagged map* — `{"__fireup_type__": "timestamp", "rfc3339": "…"}`, the tags
-  defined in [`src/types.rs`](../../src/types.rs) — because JSON has no native
-  form for them. `fireup import` consumes those tags and maps them onto
-  `bytea`, `timestamptz`, `point`, and `text`. Seeding does not: it infers a
-  Firestore value type from the JSON it is handed, so those four seed as a
-  `mapValue` and an SDK reads a map rather than a
-  `Timestamp`/`Bytes`/`GeoPoint`/`DocumentReference`. Nothing is guessed from a
-  string's shape. The tag is still in the row, so this is a gap in seeding
-  rather than lost information — see
-  [`END_TO_END.md`](END_TO_END.md#the-fidelity-gap-this-workflow-has).
+- **Datastore value types survive.** JSON has no native form for a blob,
+  timestamp, geo point, or key reference, so the shared export parser decodes
+  those into a *tagged map* — `{"__fireup_type__": "timestamp", "rfc3339":
+  "…"}`, the tags defined in [`src/types.rs`](../../src/types.rs). Seeding reads
+  the same tags and restores `bytesValue`, `timestampValue`, `geoPointValue`, and
+  `referenceValue`, so an SDK reads a
+  `Bytes`/`Timestamp`/`GeoPoint`/`DocumentReference` — the document-plane
+  counterpart of `fireup import` reading those tags to produce `bytea`,
+  `timestamptz`, `point`, and `text`. Dispatch is on the tag and never on a
+  string's shape: a document holding the literal text of a date holds a string.
+  A map carrying an unknown `__fireup_type__` value stays a `mapValue`; a tagged
+  value whose payload cannot be restored fails its document rather than seeding
+  as something else. See
+  [`END_TO_END.md`](END_TO_END.md#what-seeding-does-with-datastore-value-types).
 - Datastore entities in a non-default **namespace** are skipped, not merged:
   two namespaces can hold the same key path, and mapping both onto one document
-  name would silently overwrite data.
+  name would silently overwrite data. A key reference *into* another namespace is
+  refused for the same reason.
 
 ### Why port 4589
 
