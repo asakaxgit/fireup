@@ -14,6 +14,9 @@ pub mod google {
     pub mod rpc {
         include!(concat!(env!("OUT_DIR"), "/google.rpc.rs"));
     }
+    pub mod longrunning {
+        include!(concat!(env!("OUT_DIR"), "/google.longrunning.rs"));
+    }
     pub mod datastore {
         pub mod v1 {
             include!(concat!(env!("OUT_DIR"), "/google.datastore.v1.rs"));

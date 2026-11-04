@@ -83,7 +83,7 @@ pub fn discovery_body(config: &LocalConfig, store: &dyn crate::local::store::Sto
             .map(|service| json!({
                 "id": service.id(),
                 "api": service.api(),
-                "protocol": "grpc",
+                "protocol": service.protocol(),
                 "enabled": true,
                 "clientEnvVar": service.client_env_var(),
             }))

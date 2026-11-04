@@ -26,6 +26,8 @@ GOOGLEAPIS_COMMIT="${GOOGLEAPIS_COMMIT:-57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d
 # Entry points. Everything they import is fetched automatically.
 ROOTS=(
   "google/firestore/v1/firestore.proto"
+  "google/datastore/v1/datastore.proto"
+  "google/datastore/admin/v1/datastore_admin.proto"
 )
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

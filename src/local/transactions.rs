@@ -94,7 +94,12 @@ impl Transactions {
                 true
             }
         };
+        self.begin_mode(read_only)
+    }
 
+    /// Start a transaction by mode alone — used by the Datastore surface,
+    /// whose `TransactionOptions` message is a different proto type.
+    pub fn begin_mode(&self, read_only: bool) -> Result<Vec<u8>, Status> {
         // Sweeping here rather than on a timer: tokens are only ever created
         // here, so this is the one place where the map can grow.
         let now = Instant::now();

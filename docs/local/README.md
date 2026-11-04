@@ -1,10 +1,12 @@
-# `fireup local` — local Firestore-compatible data plane
+# `fireup local` — local Firestore- and Datastore-compatible data plane
 
-Fireup serves Google's **published** `google.firestore.v1` gRPC API on one local
-port so official Firestore client SDKs can point at it with the documented
-`FIRESTORE_EMULATOR_HOST` environment variable: document CRUD, `StructuredQuery`
-reads, collection listings, and transactions. The [fidelity
-matrix](#fidelity-matrix) says exactly what is served and what is refused.
+Fireup serves Google's **published** `google.firestore.v1` and
+`google.datastore.v1` gRPC APIs on one local port so official client SDKs can
+point at them with the documented `FIRESTORE_EMULATOR_HOST` and
+`DATASTORE_EMULATOR_HOST` environment variables. Both surfaces share the same
+in-memory or PostgreSQL document store: a Datastore kind maps onto a Firestore
+collection. The [fidelity matrix](#fidelity-matrix) says exactly what is served
+and what is refused.
 
 This is an independent implementation of a public API contract. It is **not** the
 Firebase Emulator Suite, is **not** affiliated with Google, and contains no code
@@ -28,10 +30,11 @@ Then, in your app:
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=127.0.0.1:4589
+export DATASTORE_EMULATOR_HOST=127.0.0.1:4589
 ```
 
-Any official SDK (Node, Python, Go, Java, Admin SDKs) honours that variable and
-will talk plaintext gRPC to Fireup instead of production Firestore.
+Any official SDK (Node, Python, Go, Java, Admin SDKs) honours those variables and
+will talk plaintext gRPC to Fireup instead of production.
 
 ### Flags
 
@@ -41,8 +44,8 @@ will talk plaintext gRPC to Fireup instead of production Firestore.
 | `--port` | `4589` | The one port. gRPC and HTTP share it. |
 | `--postgres-url` | *(unset)* | Store documents in PostgreSQL instead of memory. |
 | `--project-id` | `fireup-local` | Project the data plane answers for. |
-| `--database-id` | `(default)` | Firestore's default database is literally `(default)`. |
-| `--enable` | `firestore` | Services to serve. Repeatable; closed set, so a typo is an error. |
+| `--database-id` | `(default)` | Firestore's default database is literally `(default)`. Datastore clients use `""` for the same database. |
+| `--enable` | `firestore`, `datastore` | Services to serve. Repeatable; closed set, so a typo is an error. |
 | `--max-connections` | `5` | PostgreSQL pool size. |
 
 An unreachable `--postgres-url` is a **hard error**, not a fallback to memory:
@@ -201,6 +204,22 @@ wrong. Fireup implements the published Firestore behaviour for each:
 - **Tokens last 60 seconds**, matching the documented limit, and an expired one
   is `ABORTED`.
 
+### Datastore RPCs (Phase 3)
+
+| RPC | Status | Notes |
+|---|---|---|
+| `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
+| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`), `AND`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. |
+| `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional. |
+| `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. |
+| `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
+| `ReserveIds` | served | Acknowledged; local allocations already avoid colliding with completed keys. |
+| `RunAggregationQuery` | `UNIMPLEMENTED` | |
+
+Kinds share the Postgres/`MemoryStore` rows with Firestore: `Task/sample` is
+`…/documents/Task/sample`. Non-default namespaces, GQL, projection queries,
+cursors, property transforms, and nested property masks are refused.
+
 ### Other known limits
 
 - **A query reads the whole collection.** Filtering, ordering, and limiting
@@ -238,9 +257,11 @@ src/local/
   query.rs           StructuredQuery compilation and evaluation
   transactions.rs    transaction tokens, read sets, and the conflict check
   value_json.rs      Firestore Value ⇄ JSON, the format of data at rest
+  entity_map.rs      Datastore Key/Entity ⇄ Firestore document mapping
   http.rs            GET / and GET /health
   seed.rs            export → store
   firestore.rs       the google.firestore.v1.Firestore service implementation
+  datastore.rs       the google.datastore.v1.Datastore service implementation
 ```
 
 `MemoryStore` uses a `BTreeMap` rather than a hash map because every query shape
@@ -298,16 +319,18 @@ Two layers, because they prove different things:
 ```bash
 # Fast: drives the server over real gRPC using our generated stubs.
 cargo test --test local_firestore_tests
+cargo test --test local_datastore_tests
 cargo test --lib local::
 
 # Durable store. Skips unless a dedicated test database is configured.
 FIREUP_TEST_POSTGRES_URL=postgresql://fireup:pw@127.0.0.1:5433/fireup_dev \
   cargo test --test local_postgres_store_tests
 
-# Slow but conclusive: drives it with Google's official client library.
+# Slow but conclusive: drives it with Google's official client libraries.
 scripts/smoke-local-firestore.sh
+scripts/smoke-local-datastore.sh
 FIREUP_SMOKE_POSTGRES_URL=postgresql://fireup:pw@127.0.0.1:5433/fireup_dev \
-  scripts/smoke-local-firestore.sh   # …against the durable store
+  scripts/smoke-local-datastore.sh   # …against the durable store
 ```
 
 `MemoryStore` and `PostgresStore` are held to one contract: the assertions in

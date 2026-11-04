@@ -587,6 +587,7 @@ mod tests {
                 "name".to_string(),
                 Value {
                     value_type: Some(ValueType::StringValue("Ada".to_string())),
+                    ..Default::default()
                 },
             );
             let entity = Entity {

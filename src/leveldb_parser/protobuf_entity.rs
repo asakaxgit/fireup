@@ -230,18 +230,21 @@ mod tests {
             "name".to_string(),
             Value {
                 value_type: Some(ValueType::StringValue("Ada".to_string())),
+                ..Default::default()
             },
         );
         properties.insert(
             "age".to_string(),
             Value {
                 value_type: Some(ValueType::IntegerValue(36)),
+                ..Default::default()
             },
         );
         properties.insert(
             "active".to_string(),
             Value {
                 value_type: Some(ValueType::BooleanValue(true)),
+                ..Default::default()
             },
         );
         properties.insert(
@@ -251,12 +254,15 @@ mod tests {
                     values: vec![
                         Value {
                             value_type: Some(ValueType::StringValue("rust".to_string())),
+                            ..Default::default()
                         },
                         Value {
                             value_type: Some(ValueType::StringValue("db".to_string())),
+                            ..Default::default()
                         },
                     ],
                 })),
+                ..Default::default()
             },
         );
 
@@ -305,6 +311,7 @@ mod tests {
         let entity = sample_entity();
         let wrapped = EntityResult {
             entity: Some(entity),
+            ..Default::default()
         };
         let mut buf = Vec::new();
         wrapped.encode(&mut buf).expect("encode entity result");

@@ -21,12 +21,15 @@ pub const DEFAULT_PORT: u16 = 4589;
 pub enum Service {
     /// The `google.firestore.v1.Firestore` gRPC API.
     Firestore,
+    /// The `google.datastore.v1.Datastore` gRPC API.
+    Datastore,
 }
 
 impl Service {
     pub const fn id(self) -> &'static str {
         match self {
             Service::Firestore => "firestore",
+            Service::Datastore => "datastore",
         }
     }
 
@@ -34,6 +37,14 @@ impl Service {
     pub const fn api(self) -> &'static str {
         match self {
             Service::Firestore => "google.firestore.v1.Firestore",
+            Service::Datastore => "google.datastore.v1.Datastore",
+        }
+    }
+
+    /// Wire protocol clients use to reach this service on the shared port.
+    pub const fn protocol(self) -> &'static str {
+        match self {
+            Service::Firestore | Service::Datastore => "grpc",
         }
     }
 
@@ -42,7 +53,14 @@ impl Service {
     pub const fn client_env_var(self) -> &'static str {
         match self {
             Service::Firestore => "FIRESTORE_EMULATOR_HOST",
+            Service::Datastore => "DATASTORE_EMULATOR_HOST",
         }
+    }
+}
+
+impl std::fmt::Display for Service {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.id())
     }
 }
 
@@ -78,8 +96,15 @@ impl LocalConfig {
             database_id: Self::DEFAULT_DATABASE_ID.to_string(),
             postgres_url: None,
             max_connections: Self::DEFAULT_MAX_CONNECTIONS,
-            services: vec![Service::Firestore],
+            services: vec![Service::Firestore, Service::Datastore],
         }
+    }
+
+    /// Config with a single service enabled, for tests that care about one
+    /// surface being absent.
+    pub fn with_only(mut self, service: Service) -> Self {
+        self.services = vec![service];
+        self
     }
 
     /// Same, but storing documents in PostgreSQL.
@@ -132,7 +157,9 @@ impl LocalConfig {
             );
         }
         if self.services.is_empty() {
-            anyhow::bail!("at least one service must be enabled (--enable firestore)");
+            anyhow::bail!(
+                "at least one service must be enabled (--enable firestore, --enable datastore)"
+            );
         }
         if self.max_connections == 0 {
             anyhow::bail!("--max-connections must be at least 1");
@@ -162,11 +189,26 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_in_memory_with_firestore_enabled() {
+    fn defaults_are_in_memory_with_both_surfaces_enabled() {
         let config = config();
         assert!(config.postgres_url.is_none());
         assert!(config.enables(Service::Firestore));
+        assert!(config.enables(Service::Datastore));
         config.validate().expect("defaults must be valid");
+    }
+
+    #[test]
+    fn every_service_names_the_env_var_its_sdks_read() {
+        for service in [Service::Firestore, Service::Datastore] {
+            assert!(!service.id().is_empty());
+            assert!(!service.api().is_empty());
+            assert_eq!(service.protocol(), "grpc");
+            assert!(
+                service.client_env_var().ends_with("_EMULATOR_HOST"),
+                "{service}"
+            );
+        }
+        assert_eq!(Service::Datastore.client_env_var(), "DATASTORE_EMULATOR_HOST");
     }
 
     #[test]

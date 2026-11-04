@@ -182,12 +182,12 @@ enum Commands {
         max_errors: usize,
     },
 
-    /// Run a local Firestore-compatible server for official client SDKs
-    #[command(long_about = "Serve the public google.firestore.v1 gRPC API on a single local port so official Firestore client SDKs can talk to Fireup via the documented FIRESTORE_EMULATOR_HOST environment variable. The same port answers HTTP GET / (service discovery) and GET /health.
+    /// Run a local Firestore- and Datastore-compatible server for official client SDKs
+    #[command(long_about = "Serve the public google.firestore.v1 and google.datastore.v1 gRPC APIs on a single local port so official client SDKs can talk to Fireup via the documented FIRESTORE_EMULATOR_HOST and DATASTORE_EMULATOR_HOST environment variables. The same port answers HTTP GET / (service discovery) and GET /health.
 
-This is an independent implementation of Google's published Firestore API. It is not the Firebase Emulator Suite and is not affiliated with Google.
+This is an independent implementation of Google's published APIs. It is not the Firebase Emulator Suite and is not affiliated with Google.
 
-Phase 1 serves document CRUD (GetDocument, CreateDocument, UpdateDocument, DeleteDocument, BatchGetDocuments, Commit). Storage is in-memory unless --postgres-url is given, in which case documents are stored in PostgreSQL and survive a restart. Queries, transactions, and realtime listeners return UNIMPLEMENTED.")]
+Phase 3 serves Firestore CRUD/query/transactions and Datastore Lookup/RunQuery/Commit/BeginTransaction/AllocateIds against the same in-memory or PostgreSQL store. Realtime listeners, GQL, aggregations, and field transforms return UNIMPLEMENTED.")]
     Local {
         #[command(subcommand)]
         command: Option<LocalCommands>,
@@ -209,12 +209,19 @@ Phase 1 serves document CRUD (GetDocument, CreateDocument, UpdateDocument, Delet
         #[arg(long, default_value = local::LocalConfig::DEFAULT_PROJECT_ID, global = true)]
         project_id: String,
 
-        /// Database id; Firestore's default database is literally "(default)"
+        /// Database id; Firestore's default database is literally "(default)".
+        /// Datastore clients omit the id (empty string) for the default database;
+        /// both forms address the same store.
         #[arg(long, default_value = local::LocalConfig::DEFAULT_DATABASE_ID, global = true)]
         database_id: String,
 
         /// Services to enable (repeatable)
-        #[arg(long = "enable", value_enum, default_value = "firestore", global = true)]
+        #[arg(
+            long = "enable",
+            value_enum,
+            default_values_t = [local::Service::Firestore, local::Service::Datastore],
+            global = true
+        )]
         enable: Vec<local::Service>,
 
         /// PostgreSQL connection pool size
