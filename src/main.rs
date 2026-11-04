@@ -209,8 +209,9 @@ LOCAL DEVELOPMENT ONLY: the auth surface mints unsigned ID tokens and checks no 
         #[arg(short, long, default_value_t = local::DEFAULT_PORT, global = true)]
         port: u16,
 
-        /// Store documents in PostgreSQL instead of memory, so they survive a
-        /// restart (format: postgresql://user:password@host:port/database)
+        /// Store documents and auth accounts in PostgreSQL instead of memory,
+        /// so they survive a restart
+        /// (format: postgresql://user:password@host:port/database)
         #[arg(long, value_name = "URL", global = true)]
         postgres_url: Option<String>,
 

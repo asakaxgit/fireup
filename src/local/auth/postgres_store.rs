@@ -37,10 +37,23 @@ use crate::local::store::{StoreError, StoreResult};
 /// Table holding the local auth surface's accounts.
 pub const USERS_TABLE: &str = "fireup_local_auth_users";
 
-/// Advisory-lock key serialising schema creation for this table. Distinct from
-/// the documents table's key so a server and a seed creating both schemas at
-/// once cannot deadlock on one lock in two orders.
-const SCHEMA_LOCK_KEY: i64 = 4_589_000_2;
+/// Advisory-lock key serialising schema creation for this table.
+///
+/// Arbitrary but fixed — every Fireup process has to pick the same number for
+/// the lock to mean anything. Derived from the default port (4589) plus a
+/// per-table sequence number, so the keys this project takes are recognisable in
+/// `pg_locks`.
+///
+/// Distinct from the documents table's key, which is the same scheme ending in
+/// `001` (see [`crate::local::postgres_store`]), so a server and a seed creating
+/// both schemas at once cannot deadlock on one lock taken in two orders.
+const SCHEMA_LOCK_KEY: i64 = 45_890_002;
+
+/// The documents table's lock key, named here only so
+/// [`tests::the_two_schema_locks_are_distinct`] can assert the two differ: the
+/// constant itself is private to its own module.
+#[cfg(test)]
+const DOCUMENTS_SCHEMA_LOCK_KEY: i64 = 45_890_001;
 
 /// Statements that bring an empty database up to the current auth schema.
 ///
@@ -489,7 +502,7 @@ mod tests {
         // Both schemas are created at startup; one shared key would serialise
         // them needlessly and two keys taken in different orders would deadlock,
         // so they are distinct and each is taken alone.
-        assert_ne!(SCHEMA_LOCK_KEY, 4_589_000_1);
+        assert_ne!(SCHEMA_LOCK_KEY, DOCUMENTS_SCHEMA_LOCK_KEY);
     }
 
     #[test]

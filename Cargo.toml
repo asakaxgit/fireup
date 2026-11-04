@@ -110,3 +110,7 @@ path = "tests/local_postgres_store_tests.rs"
 [[test]]
 name = "local_auth_tests"
 path = "tests/local_auth_tests.rs"
+
+[[test]]
+name = "local_auth_postgres_tests"
+path = "tests/local_auth_postgres_tests.rs"
