@@ -1,8 +1,9 @@
 //! Firestore v1 gRPC service for `fireup local`.
 //!
 //! Implemented against the public `google.firestore.v1.Firestore` service
-//! definition vendored under `proto/`. Phase 0 serves the subset that official
-//! client SDKs need for document CRUD:
+//! definition vendored under `proto/`. Phase 1 serves the subset that official
+//! client SDKs need for document CRUD, against whichever
+//! [`Store`](crate::local::store::Store) the process was configured with:
 //!
 //! | RPC                  | Status |
 //! |----------------------|--------|
@@ -22,15 +23,13 @@
 //! Firebase Emulator Suite code or behaviour was reverse-engineered; see
 //! `.cursor/rules/firebase-gcp-compliance.mdc`.
 
-use std::collections::HashMap;
-
 use prost_types::Timestamp;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
 use crate::local::names::{parse_document_name, parse_parent_name};
-use crate::local::store::DocumentStore;
+use crate::local::store::SharedStore;
 use crate::protos::google::firestore::v1::{
     firestore_server::Firestore, precondition::ConditionType, write::Operation,
     BatchGetDocumentsRequest, BatchGetDocumentsResponse, BatchWriteRequest, BatchWriteResponse,
@@ -56,7 +55,7 @@ type UnimplementedStream<T> = ReceiverStream<Result<T, Status>>;
 fn unimplemented(rpc: &str, plan: &str) -> Status {
     Status::unimplemented(format!(
         "fireup local does not serve {rpc} yet ({plan}). \
-         Phase 0 serves document CRUD only."
+         Phase 1 serves document CRUD only."
     ))
 }
 
@@ -117,9 +116,30 @@ fn simple_field_paths(field_paths: &[String]) -> Result<Vec<String>, Status> {
     Ok(field_paths.to_vec())
 }
 
+/// The fields an update mask selects, in mask order.
+///
+/// A masked field the document does not carry is dropped rather than written as
+/// null: Firestore treats that as "delete this field", and Phase 1 has no field
+/// deletion, so writing a null would be worse than leaving it alone.
+fn masked_fields(
+    field_paths: &[String],
+    document: &Document,
+) -> Result<Vec<(String, Value)>, Status> {
+    Ok(simple_field_paths(field_paths)?
+        .into_iter()
+        .filter_map(|field| {
+            document
+                .fields
+                .get(&field)
+                .cloned()
+                .map(|value| (field, value))
+        })
+        .collect())
+}
+
 /// Check a write precondition against current store state.
-fn check_precondition(
-    store: &DocumentStore,
+async fn check_precondition(
+    store: &SharedStore,
     name: &str,
     precondition: &Option<Precondition>,
 ) -> Result<(), Status> {
@@ -129,19 +149,19 @@ fn check_precondition(
 
     match condition {
         ConditionType::Exists(true) => {
-            if !store.contains(name) {
+            if !store.contains(name).await? {
                 return Err(Status::not_found(format!("no document to update at {name}")));
             }
         }
         ConditionType::Exists(false) => {
-            if store.contains(name) {
+            if store.contains(name).await? {
                 return Err(Status::already_exists(format!(
                     "document already exists: {name}"
                 )));
             }
         }
         ConditionType::UpdateTime(expected) => {
-            let actual = store.get(name).and_then(|document| document.update_time);
+            let actual = store.get(name).await?.and_then(|document| document.update_time);
             if actual.as_ref() != Some(expected) {
                 return Err(Status::failed_precondition(format!(
                     "update_time precondition failed for {name}"
@@ -153,33 +173,34 @@ fn check_precondition(
 }
 
 /// The Firestore data plane for `fireup local`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct FirestoreApi {
-    store: DocumentStore,
+    store: SharedStore,
 }
 
 impl FirestoreApi {
-    pub fn new(store: DocumentStore) -> Self {
+    pub fn new(store: SharedStore) -> Self {
         Self { store }
     }
 
-    pub fn store(&self) -> &DocumentStore {
+    pub fn store(&self) -> &SharedStore {
         &self.store
     }
 
     /// Read a document, applying the response mask.
-    fn read(&self, name: &str, mask: &Option<DocumentMask>) -> Result<Document, Status> {
+    async fn read(&self, name: &str, mask: &Option<DocumentMask>) -> Result<Document, Status> {
         let parsed = parse_document_name(name)?;
         let mut document = self
             .store
             .get(&parsed.full())
+            .await?
             .ok_or_else(|| Status::not_found(format!("no document at {name}")))?;
         apply_mask(&mut document, mask)?;
         Ok(document)
     }
 
     /// Apply one `Write` from a commit batch.
-    fn apply_write(
+    async fn apply_write(
         &self,
         write: &crate::protos::google::firestore::v1::Write,
         now: &Timestamp,
@@ -200,36 +221,26 @@ impl FirestoreApi {
             Operation::Update(document) => {
                 let parsed = parse_document_name(&document.name)?;
                 let name = parsed.full();
-                check_precondition(&self.store, &name, &write.current_document)?;
+                check_precondition(&self.store, &name, &write.current_document).await?;
 
                 match &write.update_mask {
                     // No mask: full replace, the `set()` path.
                     None => {
-                        self.store.put(document.clone(), now.clone());
+                        self.store.put(document.clone(), now.clone()).await?;
                     }
                     // Mask present: merge only the named fields, the
                     // `set(..., {merge: true})` / `update()` path.
                     Some(mask) => {
-                        let wanted = simple_field_paths(&mask.field_paths)?;
-                        let fields: HashMap<String, Value> = wanted
-                            .into_iter()
-                            .filter_map(|field| {
-                                document
-                                    .fields
-                                    .get(&field)
-                                    .cloned()
-                                    .map(|value| (field, value))
-                            })
-                            .collect();
-                        self.store.merge(&name, fields, now.clone());
+                        let fields = masked_fields(&mask.field_paths, document)?;
+                        self.store.merge(&name, fields, now.clone()).await?;
                     }
                 }
             }
             Operation::Delete(name) => {
                 let parsed = parse_document_name(name)?;
                 let key = parsed.full();
-                check_precondition(&self.store, &key, &write.current_document)?;
-                self.store.delete(&key);
+                check_precondition(&self.store, &key, &write.current_document).await?;
+                self.store.delete(&key).await?;
             }
             Operation::Transform(_) => {
                 return Err(unimplemented(
@@ -264,7 +275,7 @@ impl Firestore for FirestoreApi {
             return Err(unimplemented(what, "consistency modes land in a later phase"));
         }
 
-        Ok(Response::new(self.read(&request.name, &request.mask)?))
+        Ok(Response::new(self.read(&request.name, &request.mask).await?))
     }
 
     async fn create_document(
@@ -307,18 +318,19 @@ impl Firestore for FirestoreApi {
         // The API contract says the caller must not set `document.name`; the
         // server derives it from parent/collection/id.
         let name = format!("{}/{}/{}", parent.full(), request.collection_id, document_id);
-        if self.store.contains(&name) {
+        if self.store.contains(&name).await? {
             return Err(Status::already_exists(format!(
                 "document already exists: {name}"
             )));
         }
 
         document.name = name.clone();
-        self.store.put(document, now_timestamp());
+        self.store.put(document, now_timestamp()).await?;
 
         let mut created = self
             .store
             .get(&name)
+            .await?
             .ok_or_else(|| Status::internal("document vanished immediately after create"))?;
         apply_mask(&mut created, &request.mask)?;
         Ok(Response::new(created))
@@ -336,28 +348,23 @@ impl Firestore for FirestoreApi {
 
         let parsed = parse_document_name(&document.name)?;
         let name = parsed.full();
-        check_precondition(&self.store, &name, &request.current_document)?;
+        check_precondition(&self.store, &name, &request.current_document).await?;
 
         let now = now_timestamp();
         match &request.update_mask {
             None => {
-                self.store.put(document, now);
+                self.store.put(document, now).await?;
             }
             Some(mask) => {
-                let wanted = simple_field_paths(&mask.field_paths)?;
-                let fields: HashMap<String, Value> = wanted
-                    .into_iter()
-                    .filter_map(|field| {
-                        document.fields.get(&field).cloned().map(|v| (field, v))
-                    })
-                    .collect();
-                self.store.merge(&name, fields, now);
+                let fields = masked_fields(&mask.field_paths, &document)?;
+                self.store.merge(&name, fields, now).await?;
             }
         }
 
         let mut updated = self
             .store
             .get(&name)
+            .await?
             .ok_or_else(|| Status::internal("document vanished immediately after update"))?;
         apply_mask(&mut updated, &request.mask)?;
         Ok(Response::new(updated))
@@ -372,8 +379,8 @@ impl Firestore for FirestoreApi {
 
         let parsed = parse_document_name(&request.name)?;
         let name = parsed.full();
-        check_precondition(&self.store, &name, &request.current_document)?;
-        self.store.delete(&name);
+        check_precondition(&self.store, &name, &request.current_document).await?;
+        self.store.delete(&name).await?;
         Ok(Response::new(()))
     }
 
@@ -406,7 +413,7 @@ impl Firestore for FirestoreApi {
         let mut responses = Vec::with_capacity(request.documents.len());
         for name in &request.documents {
             let parsed = parse_document_name(name)?;
-            let result = match self.store.get(&parsed.full()) {
+            let result = match self.store.get(&parsed.full()).await? {
                 Some(mut document) => {
                     apply_mask(&mut document, &request.mask)?;
                     crate::protos::google::firestore::v1::batch_get_documents_response::Result::Found(
@@ -456,7 +463,7 @@ impl Firestore for FirestoreApi {
         for write in &request.writes {
             // Phase 0 has no rollback: a failed write mid-batch leaves earlier
             // writes applied. Recorded as known divergence in the contract doc.
-            write_results.push(self.apply_write(write, &now)?);
+            write_results.push(self.apply_write(write, &now).await?);
         }
 
         Ok(Response::new(CommitResponse {

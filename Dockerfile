@@ -20,6 +20,11 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs
 # Build dependencies (this layer will be cached)
 RUN cargo build --release && rm -rf src
 
+# The build script generates the Firestore/Datastore protobuf stubs from the
+# vendored public protos, so both have to be in the image before the real build.
+COPY build.rs ./
+COPY proto ./proto
+
 # Copy source code
 COPY src ./src
 
