@@ -15,10 +15,12 @@
 //!
 //! Current scope:
 //!
-//! * **Firestore** — document CRUD against an in-memory **or PostgreSQL**
-//!   store, plus seeding from a managed export. Queries, transactions, and
-//!   realtime listeners are not served yet; those RPCs answer `UNIMPLEMENTED`
-//!   with a message saying so.
+//! * **Firestore** — document CRUD, `StructuredQuery` reads, collection
+//!   listings, and transactional writes against an in-memory **or PostgreSQL**
+//!   store, plus seeding from a managed export. Realtime listeners, field
+//!   transforms, and aggregation queries are not served; those RPCs answer
+//!   `UNIMPLEMENTED` with a message saying so, and `docs/local/README.md` has
+//!   the full fidelity matrix.
 //! * **Auth** — email/password and anonymous sign-in, emulator-style ID tokens,
 //!   token refresh, and admin account CRUD. See [`auth`] for what is and is not
 //!   served.
@@ -29,8 +31,10 @@ pub mod firestore;
 pub mod http;
 pub mod names;
 pub mod postgres_store;
+pub mod query;
 pub mod seed;
 pub mod store;
+pub mod transactions;
 pub mod value_json;
 
 use std::sync::Arc;

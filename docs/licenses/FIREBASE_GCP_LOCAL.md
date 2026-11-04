@@ -1,6 +1,6 @@
 # Fireup — Firebase / GCP local & API license ledger
 
-**Status:** current as of Phase L (SAK-168) — Firebase Auth / Identity Platform  
+**Status:** current as of Phase 2 (SAK-165) and Phase L (SAK-168) — Firestore queries/transactions and Firebase Auth / Identity Platform  
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -26,7 +26,7 @@ and nothing here was obtained by decompiling or analysing a binary.
 | `google/firestore/v1/document.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [link](https://github.com/googleapis/googleapis/blob/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/firestore/v1/document.proto) | Document/Value wire types | Yes | Same pin |
 | `google/firestore/v1/common.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [link](https://github.com/googleapis/googleapis/blob/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/firestore/v1/common.proto) | `DocumentMask`, `Precondition`, `TransactionOptions` | Yes | Same pin |
 | `google/firestore/v1/write.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [link](https://github.com/googleapis/googleapis/blob/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/firestore/v1/write.proto) | `Write`/`WriteResult` for `Commit` | Yes | Same pin |
-| `google/firestore/v1/query.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [link](https://github.com/googleapis/googleapis/blob/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/firestore/v1/query.proto) | Query types (compiled; `RunQuery` not served in Phase 0) | Yes | Same pin |
+| `google/firestore/v1/query.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [link](https://github.com/googleapis/googleapis/blob/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/firestore/v1/query.proto) | `StructuredQuery` types — filters, ordering, projection — now served by `RunQuery` | Yes | Same pin |
 | `google/firestore/v1/aggregation_result.proto`, `bloom_filter.proto`, `explain_stats.proto`, `pipeline.proto`, `query_profile.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [dir](https://github.com/googleapis/googleapis/tree/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/firestore/v1) | Transitive imports of `firestore.proto`; compiled, not served | Yes | Same pin — pulled automatically by the import closure |
 | `google/api/annotations.proto`, `client.proto`, `field_behavior.proto`, `http.proto`, `launch_stage.proto`, `routing.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [dir](https://github.com/googleapis/googleapis/tree/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/api) | Service annotations required to compile the Firestore service | Yes | Same pin |
 | `google/rpc/status.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [link](https://github.com/googleapis/googleapis/blob/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/rpc/status.proto) | Error status in batch write responses | Yes | Same pin |
@@ -60,6 +60,33 @@ split out, seconds+nanos timestamps) is Fireup's own.
 
 The HTTP `/` and `/health` routes are Fireup's own surface, not a reimplementation
 of any Google endpoint. Their payloads are first-party.
+
+### Phase 2 (SAK-165) notes
+
+No new Google or Firebase artefact, no new proto, and no new Rust dependency.
+The proto pin is unchanged at googleapis `57aa4dbc`; `query.proto` and
+`write.proto` were already vendored and compiled, and Phase 2 only starts
+serving the RPCs that use them.
+
+The query semantics in `src/local/query.rs` — the value sort order, the
+treatment of a document that lacks a filtered or ordered field, `NaN` handling,
+and the implicit `__name__` tiebreak — were written from the **public** Firestore
+query documentation and the vendored `query.proto`. No emulator was run,
+decompiled, or observed to derive them, and no Google test suite or fixture was
+used. Where our behaviour is known to differ from production Firestore, the
+difference is published in the fidelity matrix in `docs/local/README.md` rather
+than left for a user to discover.
+
+The transaction model in `src/local/transactions.rs` (opaque 16-byte tokens, a
+60-second lifetime matching the documented limit, and optimistic
+concurrency via the read set) is Fireup's own design against the public
+three-RPC contract. Google's transaction implementation was not inspected.
+
+`@google-cloud/firestore` stays test-only and un-vendored. The Phase 2 smoke
+test drives more of it (queries, `listDocuments()`, `listCollections()`,
+`runTransaction()`, `bulkWriter()`), still purely as a **client** against our
+server, which is the documented and non-reverse-engineering way to check API
+compatibility.
 
 ### Phase L (SAK-168) notes — Firebase Auth / Identity Platform
 

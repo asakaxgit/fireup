@@ -10,14 +10,21 @@ use std::collections::HashMap;
 
 use fireup::local;
 use fireup::protos::google::firestore::v1::{
-    firestore_client::FirestoreClient, precondition::ConditionType, value::ValueType,
-    write::Operation, BatchGetDocumentsRequest, CommitRequest, CreateDocumentRequest,
-    DeleteDocumentRequest, Document, DocumentMask, GetDocumentRequest, Precondition, RunQueryRequest,
-    Value, Write,
+    firestore_client::FirestoreClient, precondition::ConditionType,
+    run_query_request::QueryType, structured_query::field_filter::Operator as FieldOperator,
+    structured_query::filter::FilterType, structured_query::CollectionSelector,
+    structured_query::Direction, structured_query::FieldFilter, structured_query::FieldReference,
+    structured_query::Filter, structured_query::Order, value::ValueType, write::Operation,
+    BatchGetDocumentsRequest, BatchWriteRequest, BeginTransactionRequest, CommitRequest,
+    CreateDocumentRequest, DeleteDocumentRequest,
+    Document, DocumentMask, GetDocumentRequest, ListCollectionIdsRequest, ListDocumentsRequest,
+    ListDocumentsResponse, PartitionQueryRequest, Precondition, RollbackRequest,
+    RunAggregationQueryRequest, RunQueryRequest, StructuredQuery, Value, Write,
 };
 use tonic::transport::Channel;
 use tonic::Code;
 
+const DATABASE: &str = "projects/fireup-test/databases/(default)";
 const ROOT: &str = "projects/fireup-test/databases/(default)/documents";
 
 fn string_value(text: &str) -> Value {
@@ -425,21 +432,656 @@ async fn delete_document_is_idempotent() {
 async fn unserved_rpcs_answer_unimplemented_rather_than_hanging() {
     let (server, mut client) = start().await;
 
-    let status = client
-        .run_query(RunQueryRequest {
+    // One assertion per RPC that is still out of scope. As each one lands, this
+    // test fails until it is moved out of the list — which is the checklist.
+    let aggregation = client
+        .run_aggregation_query(RunAggregationQueryRequest {
             parent: ROOT.to_string(),
             ..Default::default()
         })
         .await
-        .expect_err("RunQuery is out of Phase 1 scope");
+        .expect_err("RunAggregationQuery is out of scope");
+    let partition = client
+        .partition_query(PartitionQueryRequest {
+            parent: ROOT.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("PartitionQuery is out of scope");
+
+    for status in [aggregation, partition] {
+        assert_eq!(status.code(), Code::Unimplemented);
+        assert!(
+            status.message().contains("fireup local"),
+            "the status should say who refused and why: {}",
+            status.message()
+        );
+    }
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// Write `documents` with one commit, so a test can set up a collection in a
+/// single call.
+async fn seed(client: &mut FirestoreClient<Channel>, documents: Vec<Document>) {
+    client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: documents
+                .into_iter()
+                .map(|document| Write {
+                    operation: Some(Operation::Update(document)),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .await
+        .expect("seeding should succeed");
+}
+
+fn person(id: &str, city: &str, age: i64) -> Document {
+    Document {
+        name: format!("{ROOT}/people/{id}"),
+        fields: fields([("city", string_value(city)), ("age", integer_value(age))]),
+        ..Default::default()
+    }
+}
+
+fn from(collection_id: &str) -> Vec<CollectionSelector> {
+    vec![CollectionSelector {
+        collection_id: collection_id.to_string(),
+        all_descendants: false,
+    }]
+}
+
+fn equals(field_path: &str, value: Value) -> Option<Filter> {
+    Some(Filter {
+        filter_type: Some(FilterType::FieldFilter(FieldFilter {
+            field: Some(FieldReference {
+                field_path: field_path.to_string(),
+            }),
+            op: FieldOperator::Equal as i32,
+            value: Some(value),
+        })),
+    })
+}
+
+/// Run a query and collect the document ids it returned, in order.
+async fn run_query(
+    client: &mut FirestoreClient<Channel>,
+    query: StructuredQuery,
+) -> Result<Vec<String>, tonic::Status> {
+    let mut stream = client
+        .run_query(RunQueryRequest {
+            parent: ROOT.to_string(),
+            query_type: Some(QueryType::StructuredQuery(query)),
+            ..Default::default()
+        })
+        .await?
+        .into_inner();
+
+    let mut ids = Vec::new();
+    while let Some(response) = stream.message().await? {
+        assert!(
+            response.read_time.is_some(),
+            "every response carries the read time"
+        );
+        if let Some(document) = response.document {
+            ids.push(
+                document
+                    .name
+                    .rsplit('/')
+                    .next()
+                    .expect("a name has segments")
+                    .to_string(),
+            );
+        }
+    }
+    Ok(ids)
+}
+
+#[tokio::test]
+async fn run_query_filters_orders_and_limits() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            person("alice", "Tokyo", 31),
+            person("bob", "Kyoto", 41),
+            person("carol", "Tokyo", 25),
+            person("dan", "Tokyo", 55),
+        ],
+    )
+    .await;
+
+    let found = run_query(
+        &mut client,
+        StructuredQuery {
+            from: from("people"),
+            r#where: equals("city", string_value("Tokyo")),
+            order_by: vec![Order {
+                field: Some(FieldReference {
+                    field_path: "age".to_string(),
+                }),
+                direction: Direction::Descending as i32,
+            }],
+            limit: Some(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the query runs");
+
+    assert_eq!(found, vec!["dan", "alice"], "Tokyo, oldest first, top two");
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn run_query_does_not_look_inside_subcollections() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            person("alice", "Tokyo", 31),
+            Document {
+                name: format!("{ROOT}/people/alice/pets/rex"),
+                fields: fields([("city", string_value("Tokyo")), ("age", integer_value(3))]),
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+
+    let found = run_query(
+        &mut client,
+        StructuredQuery {
+            from: from("people"),
+            r#where: equals("city", string_value("Tokyo")),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the query runs");
+
+    assert_eq!(found, vec!["alice"], "a pet is not a person");
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn run_query_with_no_matches_still_answers() {
+    let (server, mut client) = start().await;
+    seed(&mut client, vec![person("alice", "Tokyo", 31)]).await;
+
+    let found = run_query(
+        &mut client,
+        StructuredQuery {
+            from: from("people"),
+            r#where: equals("city", string_value("Nowhere")),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("an empty result is not an error");
+
+    // `run_query` asserts that every response carries a read_time, so arriving
+    // here with no ids means the server said "ran it, found nothing".
+    assert!(found.is_empty());
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn run_query_rejects_a_collection_group_query_clearly() {
+    let (server, mut client) = start().await;
+
+    let status = run_query(
+        &mut client,
+        StructuredQuery {
+            from: vec![CollectionSelector {
+                collection_id: "people".to_string(),
+                all_descendants: true,
+            }],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("collection group queries are not served");
 
     assert_eq!(status.code(), Code::Unimplemented);
     assert!(
-        status.message().contains("fireup local"),
-        "the status should say who refused and why: {}",
+        status.message().contains("all_descendants"),
+        "the message should name the unsupported feature: {}",
+        status.message()
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn list_documents_pages_with_a_resume_token() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            person("alice", "Tokyo", 31),
+            person("bob", "Kyoto", 41),
+            person("carol", "Tokyo", 25),
+        ],
+    )
+    .await;
+
+    let mut seen = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let page = client
+            .list_documents(ListDocumentsRequest {
+                parent: ROOT.to_string(),
+                collection_id: "people".to_string(),
+                page_size: 2,
+                page_token: page_token.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("ListDocuments succeeds")
+            .into_inner();
+
+        seen.extend(page.documents.iter().map(|document| document.name.clone()));
+        page_token = page.next_page_token;
+        if page_token.is_empty() {
+            break;
+        }
+        assert!(seen.len() <= 3, "paging must terminate");
+    }
+
+    assert_eq!(
+        seen,
+        vec![
+            format!("{ROOT}/people/alice"),
+            format!("{ROOT}/people/bob"),
+            format!("{ROOT}/people/carol"),
+        ]
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn list_documents_reports_documents_that_exist_only_as_parents() {
+    let (server, mut client) = start().await;
+    // `ghost` itself is never written — only a document in its subcollection
+    // is. An SDK's listDocuments() has to see it anyway.
+    seed(
+        &mut client,
+        vec![
+            person("alice", "Tokyo", 31),
+            Document {
+                name: format!("{ROOT}/people/ghost/posts/p1"),
+                fields: fields([("title", string_value("Boo"))]),
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+
+    let request = |show_missing: bool| ListDocumentsRequest {
+        parent: ROOT.to_string(),
+        collection_id: "people".to_string(),
+        show_missing,
+        ..Default::default()
+    };
+    let names = |response: ListDocumentsResponse| {
+        response
+            .documents
+            .iter()
+            .map(|document| document.name.clone())
+            .collect::<Vec<String>>()
+    };
+
+    let without = client
+        .list_documents(request(false))
+        .await
+        .expect("ListDocuments succeeds")
+        .into_inner();
+    assert_eq!(names(without), vec![format!("{ROOT}/people/alice")]);
+
+    let with = client
+        .list_documents(request(true))
+        .await
+        .expect("ListDocuments succeeds")
+        .into_inner();
+    let ghost = with
+        .documents
+        .iter()
+        .find(|document| document.name.ends_with("/ghost"))
+        .expect("the missing document is listed")
+        .clone();
+    assert_eq!(
+        names(with),
+        vec![
+            format!("{ROOT}/people/alice"),
+            format!("{ROOT}/people/ghost"),
+        ]
+    );
+    assert!(ghost.fields.is_empty(), "a missing document has no fields");
+    assert!(
+        ghost.create_time.is_none() && ghost.update_time.is_none(),
+        "a missing document has no timestamps"
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn list_collection_ids_sees_root_and_nested_collections() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            person("alice", "Tokyo", 31),
+            Document {
+                name: format!("{ROOT}/people/alice/posts/p1"),
+                ..Default::default()
+            },
+            Document {
+                name: format!("{ROOT}/places/tokyo"),
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+
+    let root = client
+        .list_collection_ids(ListCollectionIdsRequest {
+            parent: ROOT.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("ListCollectionIds succeeds")
+        .into_inner();
+    assert_eq!(root.collection_ids, vec!["people", "places"]);
+
+    let nested = client
+        .list_collection_ids(ListCollectionIdsRequest {
+            parent: format!("{ROOT}/people/alice"),
+            ..Default::default()
+        })
+        .await
+        .expect("ListCollectionIds succeeds")
+        .into_inner();
+    assert_eq!(nested.collection_ids, vec!["posts"]);
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn commit_applies_the_whole_batch_or_none_of_it() {
+    let (server, mut client) = start().await;
+
+    let status = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: vec![
+                Write {
+                    operation: Some(Operation::Update(person("alice", "Tokyo", 31))),
+                    ..Default::default()
+                },
+                Write {
+                    operation: Some(Operation::Update(person("ghost", "Nowhere", 0))),
+                    // Nothing was ever written here, so this cannot hold.
+                    current_document: Some(Precondition {
+                        condition_type: Some(ConditionType::Exists(true)),
+                    }),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect_err("the batch must fail");
+
+    assert_eq!(status.code(), Code::NotFound);
+    assert_eq!(
+        server.store.count().await.expect("count"),
+        0,
+        "a failed batch must not leave its first write applied"
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// Begin a transaction and return its token.
+async fn begin(client: &mut FirestoreClient<Channel>) -> Vec<u8> {
+    client
+        .begin_transaction(BeginTransactionRequest {
+            database: DATABASE.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("BeginTransaction succeeds")
+        .into_inner()
+        .transaction
+}
+
+/// Read one document inside `transaction`, so it joins the read set.
+async fn get_in_transaction(
+    client: &mut FirestoreClient<Channel>,
+    name: &str,
+    transaction: &[u8],
+) -> Result<Document, tonic::Status> {
+    use fireup::protos::google::firestore::v1::get_document_request::ConsistencySelector;
+    client
+        .get_document(GetDocumentRequest {
+            name: name.to_string(),
+            consistency_selector: Some(ConsistencySelector::Transaction(transaction.to_vec())),
+            ..Default::default()
+        })
+        .await
+        .map(|response| response.into_inner())
+}
+
+#[tokio::test]
+async fn a_transaction_reads_then_commits_its_writes() {
+    let (server, mut client) = start().await;
+    seed(&mut client, vec![person("alice", "Tokyo", 31)]).await;
+
+    let transaction = begin(&mut client).await;
+    let read = get_in_transaction(&mut client, &format!("{ROOT}/people/alice"), &transaction)
+        .await
+        .expect("a transactional read succeeds");
+    assert_eq!(read.fields["age"], integer_value(31));
+
+    client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            transaction: transaction.clone(),
+            writes: vec![Write {
+                operation: Some(Operation::Update(person("alice", "Tokyo", 32))),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("the transaction commits");
+
+    let after = client
+        .get_document(GetDocumentRequest {
+            name: format!("{ROOT}/people/alice"),
+            ..Default::default()
+        })
+        .await
+        .expect("get after commit")
+        .into_inner();
+    assert_eq!(after.fields["age"], integer_value(32));
+
+    // The token is spent, so replaying the same commit must not write again.
+    let replay = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            transaction,
+            writes: Vec::new(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a transaction token works once");
+    assert_eq!(replay.code(), Code::InvalidArgument);
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_transaction_is_aborted_when_a_document_it_read_changed() {
+    let (server, mut client) = start().await;
+    seed(&mut client, vec![person("alice", "Tokyo", 31)]).await;
+    let name = format!("{ROOT}/people/alice");
+
+    let transaction = begin(&mut client).await;
+    get_in_transaction(&mut client, &name, &transaction)
+        .await
+        .expect("the transactional read succeeds");
+
+    // Somebody else writes the document the transaction is working from.
+    seed(&mut client, vec![person("alice", "Osaka", 99)]).await;
+
+    let status = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            transaction,
+            writes: vec![Write {
+                operation: Some(Operation::Update(person("alice", "Tokyo", 32))),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("the transaction must not commit on stale data");
+
+    assert_eq!(
+        status.code(),
+        Code::Aborted,
+        "ABORTED is what makes an SDK retry the transaction: {}",
         status.message()
     );
 
+    let after = client
+        .get_document(GetDocumentRequest {
+            name,
+            ..Default::default()
+        })
+        .await
+        .expect("get after the aborted commit")
+        .into_inner();
+    assert_eq!(
+        after.fields["age"],
+        integer_value(99),
+        "the aborted transaction must not have overwritten the other writer"
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_transaction_that_created_a_document_aborts_if_someone_else_creates_it_first() {
+    let (server, mut client) = start().await;
+    let name = format!("{ROOT}/people/alice");
+
+    let transaction = begin(&mut client).await;
+    // Read as absent — the fact this transaction is about to act on.
+    let missing = get_in_transaction(&mut client, &name, &transaction)
+        .await
+        .expect_err("alice does not exist yet");
+    assert_eq!(missing.code(), Code::NotFound);
+
+    seed(&mut client, vec![person("alice", "Osaka", 99)]).await;
+
+    let status = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            transaction,
+            writes: vec![Write {
+                operation: Some(Operation::Update(person("alice", "Tokyo", 31))),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("the document appeared after it was read as absent");
+
+    assert_eq!(status.code(), Code::Aborted);
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn rollback_spends_the_token_without_writing_anything() {
+    let (server, mut client) = start().await;
+    let transaction = begin(&mut client).await;
+
+    client
+        .rollback(RollbackRequest {
+            database: DATABASE.to_string(),
+            transaction: transaction.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("Rollback succeeds");
+
+    let status = client
+        .rollback(RollbackRequest {
+            database: DATABASE.to_string(),
+            transaction,
+            ..Default::default()
+        })
+        .await
+        .expect_err("the token is already spent");
+    assert_eq!(status.code(), Code::InvalidArgument);
+
+    assert_eq!(server.store.count().await.expect("count"), 0);
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn batch_write_reports_a_status_for_every_write() {
+    let (server, mut client) = start().await;
+
+    let response = client
+        .batch_write(BatchWriteRequest {
+            database: DATABASE.to_string(),
+            writes: vec![
+                Write {
+                    operation: Some(Operation::Update(person("alice", "Tokyo", 31))),
+                    ..Default::default()
+                },
+                Write {
+                    operation: Some(Operation::Update(person("ghost", "Nowhere", 0))),
+                    current_document: Some(Precondition {
+                        condition_type: Some(ConditionType::Exists(true)),
+                    }),
+                    ..Default::default()
+                },
+                Write {
+                    operation: Some(Operation::Update(person("bob", "Kyoto", 41))),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect("BatchWrite itself succeeds even when a write fails")
+        .into_inner();
+
+    assert_eq!(response.status.len(), 3);
+    assert_eq!(response.write_results.len(), 3);
+    assert_eq!(response.status[0].code, Code::Ok as i32);
+    assert_eq!(
+        response.status[1].code,
+        Code::NotFound as i32,
+        "the failing write reports its own status: {:?}",
+        response.status[1]
+    );
+    assert_eq!(response.status[2].code, Code::Ok as i32);
+
+    // Unlike Commit, a failed write does not take the others with it.
+    assert_eq!(
+        server.store.count().await.expect("count"),
+        2,
+        "BatchWrite is not atomic: the two good writes stay"
+    );
     server.shutdown().await.expect("clean shutdown");
 }
 

@@ -1,0 +1,120 @@
+name: fireup local — Firestore API
+
+# Triggers are deliberately left off, matching integration_tests.yml: CI in this
+# repository is currently manual-only ("TEMPORARILY DISABLED - Re-enable after
+# code preparation"). Turning automatic runs back on is one decision for the
+# whole repo, not something this workflow should decide on its own.
+#
+# TODO: re-enable alongside integration_tests.yml.
+# on:
+#   push:
+#     branches: [ main ]
+#   pull_request:
+#     branches: [ main ]
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fast layer: drives the server over real gRPC with our generated stubs.
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Cache cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-local-firestore-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Data plane unit tests
+        run: cargo test --lib local::
+
+      - name: Firestore gRPC tests
+        run: cargo test --test local_firestore_tests
+
+  # Conclusive layer: drives the server with Google's own client library, which
+  # picks its own RPCs and does its own serialization. The Rust tests can pass
+  # while this one fails, which is exactly why it exists.
+  sdk-smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same SDK checks against both stores: a durable backend that
+        # disagrees with the in-memory one has to fail here, not in someone's
+        # local debugging session.
+        store: [memory, postgres]
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: fireup_local
+          POSTGRES_USER: fireup
+          POSTGRES_PASSWORD: fireup_ci_password
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: tests/local-smoke/package-lock.json
+
+      - name: Cache cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-local-firestore-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install the official Firestore client library
+        working-directory: tests/local-smoke
+        run: npm ci --no-audit --no-fund
+
+      - name: SDK smoke test (in-memory store)
+        if: matrix.store == 'memory'
+        run: scripts/smoke-local-firestore.sh
+
+      - name: SDK smoke test (PostgreSQL store)
+        if: matrix.store == 'postgres'
+        env:
+          FIREUP_SMOKE_POSTGRES_URL: postgresql://fireup:fireup_ci_password@localhost:5432/fireup_local
+        run: scripts/smoke-local-firestore.sh
+
+      - name: Durable store conformance tests
+        if: matrix.store == 'postgres'
+        env:
+          FIREUP_TEST_POSTGRES_URL: postgresql://fireup:fireup_ci_password@localhost:5432/fireup_local
+        run: cargo test --test local_postgres_store_tests

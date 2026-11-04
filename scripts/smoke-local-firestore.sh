@@ -22,6 +22,9 @@ export PATH="$HOME/.cargo/bin:$PATH"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 smoke_dir="$repo_root/tests/local-smoke"
 port="${1:-4589}"
+# Honour CARGO_TARGET_DIR so this works from a git worktree, where the default
+# target directory is not $repo_root/target.
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 log="$(mktemp -t fireup-local-smoke.XXXXXX.log)"
 
 server_pid=""
@@ -50,7 +53,7 @@ else
 fi
 
 echo "==> starting fireup local on 127.0.0.1:$port"
-"$repo_root/target/debug/fireup" "${server_args[@]}" >"$log" 2>&1 &
+"$target_dir/debug/fireup" "${server_args[@]}" >"$log" 2>&1 &
 server_pid=$!
 
 # Wait for the port to accept connections rather than sleeping a guess.
