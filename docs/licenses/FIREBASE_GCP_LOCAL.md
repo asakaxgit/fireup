@@ -1,6 +1,6 @@
 # Fireup — Firebase / GCP local & API license ledger
 
-**Status:** current as of Phase 0 (SAK-163)  
+**Status:** current as of Phase 1 (SAK-164)  
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -39,8 +39,25 @@ and nothing here was obtained by decompiling or analysing a binary.
 |---|---|---|---|---|---|---|
 | `tonic` | 0.11 | MIT | [crates.io](https://crates.io/crates/tonic) | gRPC server + generated client | Yes (crate license) | Public OSS, not Google code. Pinned to the 0.11 line because it tracks `prost` 0.12, which the export parser already uses — one prost version in the tree. |
 | `tonic-build` | 0.11 | MIT | [crates.io](https://crates.io/crates/tonic-build) | build-time service codegen from the public protos | Yes | Same line as `tonic` |
-| `tokio-stream` | 0.1 (`net`) | MIT | [crates.io](https://crates.io/crates/tokio-stream) | `TcpListenerStream` for graceful shutdown; `ReceiverStream` for server streaming | Yes | Public OSS |
+| `tokio-stream` | 0.1 (`net`) | MIT | [crates.io](https://crates.io/crates/tokio-stream) | `ReceiverStream` for handing multiplexed connections to tonic and for server streaming | Yes | Public OSS |
+| `async-trait` | 0.1 | MIT OR Apache-2.0 | [crates.io](https://crates.io/crates/async-trait) | async methods on the `Store` trait (`src/local/store.rs`) | Yes (crate license) | Public OSS. Added in Phase 1 as a **direct** dependency; it was already in the tree via `tonic`, so no new third-party code enters the build. |
 | `@google-cloud/firestore` (npm, **test-only**) | ^7.11.0 | Apache-2.0 | [npm](https://www.npmjs.com/package/@google-cloud/firestore) | `tests/local-smoke/` SDK smoke test only; never linked or redistributed | Yes | Google's own *open-source* client library, used as a client against our server — the documented, non-RE way to verify API compatibility. Not vendored; installed on demand by `scripts/smoke-local-firestore.sh`. |
+
+### Phase 1 (SAK-164) notes
+
+No new Google or Firebase artefact was introduced. The durable store is built on
+dependencies the migrator already used (`tokio-postgres`, `deadpool-postgres`),
+and `async-trait` above is the only new direct dependency.
+
+The JSONB payload format in `src/local/value_json.rs` follows the **published**
+JSON encoding of `google.firestore.v1.Value` as documented in the public
+Firestore REST reference and the vendored `document.proto`. It was written from
+those public definitions; no emulator storage format was inspected or
+reverse-engineered, and the choice of layout (one row per document, key columns
+split out, seconds+nanos timestamps) is Fireup's own.
+
+The HTTP `/` and `/health` routes are Fireup's own surface, not a reimplementation
+of any Google endpoint. Their payloads are first-party.
 
 ## Existing Fireup notes (pre-local-cloud)
 

@@ -1,6 +1,6 @@
 # Fireup Project Status
 
-**Last Updated:** November 3, 2026  
+**Last Updated:** November 4, 2026  
 **Version:** 0.1.0  
 **Status:** ⛔ NOT production ready — fixture path works; live GCP export + scale unproven
 
@@ -260,13 +260,65 @@ runs.
 **Postgres test database (November 2026):**
 - Integration tests require `FIREUP_TEST_POSTGRES_URL` or `TEST_DATABASE_URL` pointing at a **dedicated** fireup test database (preferred: Docker Compose on port **5433** via `docker-compose.yml`).
 - Tests **skip** when no URL is set; they do **not** fall back to host Postgres on 5432.
-- URLs using the Paperclip `paperclip` role or `paperclip` database are **rejected**.
+- URLs using the Paperclip `paperclip` role or `paperclip` database are **rejected** (`tests/postgres_test_env.rs`).
 - Run `./scripts/run_integration_tests.sh` to start Compose Postgres and export the correct URL.
+- **No Docker socket access?** Run a throwaway cluster of your own — it touches neither the host
+  cluster nor the Paperclip role, since it has its own data directory, port, and superuser:
+  ```bash
+  export PATH=/usr/lib/postgresql/18/bin:$PATH
+  PGDIR=$(mktemp -d); initdb -D "$PGDIR/data" -U fireup --auth=trust -E UTF8
+  pg_ctl -D "$PGDIR/data" -l "$PGDIR/log" -o "-p 55432 -c listen_addresses=127.0.0.1" start
+  createdb -h 127.0.0.1 -p 55432 -U fireup fireup_local_test
+  export FIREUP_TEST_POSTGRES_URL='postgresql://fireup@127.0.0.1:55432/fireup_local_test'
+  # …run tests, then: pg_ctl -D "$PGDIR/data" stop && rm -rf "$PGDIR"
+  ```
+  Used on 2026-11-04 to verify the SAK-164 PostgreSQL store.
 
 **Functional sample-data ladder:**
 - Levels 1–4 generators live under `tests/data-generator/` (`npm run generate:level1` … `generate:level4`, or `generate:all-levels`).
 - Rust coverage: `tests/functional-tests/level{1,2,3,4}_tests.rs` (skips when `tests/.firestore-data` fixtures are missing).
 - See `tests/functional-tests/README.md` for fixture generation and `cargo test --test integration_tests functional_tests::`.
+
+---
+
+## Local cloud (`fireup local`)
+
+An independent implementation of Google's **published** `google.firestore.v1`
+gRPC contract, served on one port so official Firestore SDKs can point at it via
+`FIRESTORE_EMULATOR_HOST`. Not the Firebase Emulator Suite, not affiliated with
+Google. See `docs/local/README.md`, `.cursor/rules/firebase-gcp-compliance.mdc`,
+and `docs/licenses/FIREBASE_GCP_LOCAL.md`.
+
+**Phase 0 (SAK-163)** — document CRUD over gRPC against an in-memory store.
+**Phase 1 (SAK-164, November 4 2026)** — durable storage and seeding:
+
+- `Store` trait with two implementations, held to one conformance suite:
+  `MemoryStore` (default) and `PostgresStore` (`--postgres-url`).
+- One row per document in `fireup_local_documents`; fields stored as JSONB in
+  the public Firestore REST value shape; `create_time`/`update_time` kept exact
+  as seconds + nanos.
+- Single port carries gRPC (HTTP/2) and HTTP/1.1 `GET /` (discovery) and
+  `GET /health` (a real check — it queries the store).
+- `fireup local seed --backup-file …` loads a managed export through the same
+  parser `fireup import` uses; upserts, and exits non-zero if any document was
+  not written.
+- `docker compose up -d postgres fireup-local` runs it beside Compose Postgres.
+
+**Verified on 2026-11-04:** `cargo test --lib` (261), `--test
+local_firestore_tests` (12, including a real same-port gRPC + HTTP check),
+`--test local_postgres_store_tests` (7, against a throwaway cluster: documents
+and every Firestore value type come back unchanged after a server restart), and
+`scripts/smoke-local-firestore.sh` 11/11 with Google's official
+`@google-cloud/firestore` client against the PostgreSQL store.
+
+**Not verified here:** the `fireup-local` Docker image build (no Docker socket
+access in the agent environment). The Dockerfile was fixed to copy `build.rs`
+and `proto/`, without which the image could not have compiled the generated
+stubs at all.
+
+**Still unserved** (answer `UNIMPLEMENTED` with a message naming the gap):
+queries, transactions, realtime listeners, field transforms, nested field-path
+masks, auth and security rules. `Commit` is not atomic.
 
 ---
 
