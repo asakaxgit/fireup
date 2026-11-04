@@ -283,11 +283,13 @@ runs.
 
 ## Local cloud (`fireup local`)
 
-An independent implementation of Google's **published** `google.firestore.v1`
-gRPC contract, served on one port so official Firestore SDKs can point at it via
-`FIRESTORE_EMULATOR_HOST`. Not the Firebase Emulator Suite, not affiliated with
-Google. See `docs/local/README.md`, `.cursor/rules/firebase-gcp-compliance.mdc`,
-and `docs/licenses/FIREBASE_GCP_LOCAL.md`.
+An independent implementation of two of Google's **published** API contracts —
+`google.firestore.v1` over gRPC and a subset of Identity Toolkit (Firebase Auth)
+over REST — served on **one** port, so official SDKs can point at it via
+`FIRESTORE_EMULATOR_HOST` and `FIREBASE_AUTH_EMULATOR_HOST`. Not the Firebase
+Emulator Suite, not affiliated with Google. See `docs/local/README.md`,
+`.cursor/rules/firebase-gcp-compliance.mdc`, and
+`docs/licenses/FIREBASE_GCP_LOCAL.md`.
 
 **Phase 0 (SAK-163)** — document CRUD over gRPC against an in-memory store.
 **Phase 1 (SAK-164, November 4 2026)** — durable storage and seeding:
@@ -343,6 +345,59 @@ realtime listeners (`Listen`, streaming `Write`), aggregation queries,
 `PartitionQuery`, collection group queries, query cursors, field transforms,
 nested field paths, point-in-time reads, auth and security rules. The fidelity
 matrix in `docs/local/README.md` is the authoritative list.
+
+**Phase L (SAK-168, November 4 2026)** — Firebase Auth / Identity Platform, in
+parallel with Phase 2 and without waiting for a Phase 2 exit:
+
+- Public Identity Toolkit REST only, on the same port:
+  `accounts:signUp` (email+password and anonymous),
+  `accounts:signInWithPassword`, `accounts:signInWithCustomToken`,
+  `accounts:lookup`, `accounts:update`, `accounts:delete`, the `securetoken`
+  `/v1/token` refresh, and the project-scoped admin endpoints
+  (`accounts` create, `:lookup`, `:update`, `:delete`, `:batchGet`). Plus the
+  documented emulator control routes
+  (`DELETE /emulator/v1/projects/{p}/accounts`, `GET …/config`).
+- SDKs reach these at `/identitytoolkit.googleapis.com/v1/…` (the API host
+  becomes the first path segment when `FIREBASE_AUTH_EMULATOR_HOST` is set); the
+  bare `/v1/…` form is accepted too, for `curl`.
+- ID tokens are **unsigned** JWTs (`alg: none`) carrying the published claim
+  set — the form Google's open-source SDKs accept in emulator mode. No signing
+  key is generated or shipped: production key material is a non-goal.
+- Accounts live in their **own** store (`UserStore`, with the same
+  memory/Postgres + one-conformance-suite shape as documents), never as
+  Firestore documents, so identity data is not reachable through the Firestore
+  API or counted by `GET /health`.
+- `fireup_local_auth_users`, keyed `(project_id, local_id)`, with a **partial**
+  unique index on `(project_id, email) WHERE email IS NOT NULL` so any number of
+  anonymous accounts coexist. `EMAIL_EXISTS` / `DUPLICATE_LOCAL_ID` are those
+  constraints, not a racy pre-read.
+- `src/local/http.rs` grew `Content-Length` body reading and POST/DELETE
+  routing; `/` and `/health` stay read-only, and `Transfer-Encoding: chunked`
+  is refused with a `400` rather than mis-read.
+
+**Non-goals, answering `501` with a message naming the gap:** phone auth,
+multi-factor enrolment and the rest of the Identity Platform `v2` surface,
+federated/OAuth providers, out-of-band email flows (verification and
+password-reset links), production key material.
+
+**Local development only:** unsigned tokens, no API-key or admin-credential
+check, and passwords hashed without a work factor. Anything that can reach the
+port can act as any account; the bind is loopback by default and the server says
+this at startup.
+
+**Verified on 2026-11-04:** `cargo test --lib` (371, of which 77 are the auth
+module), `--test local_auth_tests` (15, over real HTTP/1.1 on the shared port —
+including sign-up → sign-in → lookup, refresh, admin CRUD, paging, and the
+request-parsing edge cases), and `--test local_auth_postgres_tests` (8, against
+a throwaway cluster: an account and its password digest survive a server
+restart, uniqueness is enforced by the database, five anonymous accounts
+coexist, and no row lands in the documents table). Full `cargo test` green.
+
+**Not verified here:** an official Firebase Auth SDK driving the surface
+end-to-end. `tests/local-smoke/` covers Firestore with
+`@google-cloud/firestore`; the equivalent `firebase-admin` / `firebase` smoke
+test is the obvious next step and is the only thing that can prove real-client
+compatibility rather than contract compliance.
 
 ---
 
