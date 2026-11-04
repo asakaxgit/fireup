@@ -14,7 +14,7 @@
 //!   the only required write method; `put`/`merge`/`delete` are now provided
 //!   methods on top of it, so a backend cannot implement single writes and
 //!   batches with different semantics.
-//! - [`Store::scan_collection`] and [`Store::collection_ids`] are the two
+//! - [`Store::scan_collection`] and [`Store::child_segments`] are the two
 //!   collection reads `RunQuery`, `ListDocuments`, and `ListCollectionIds` are
 //!   built from. Filtering, ordering, and limiting live in
 //!   [`query`](crate::local::query) rather than in each backend, so both
@@ -303,14 +303,22 @@ pub trait Store: Send + Sync + 'static {
         collection_id: &str,
     ) -> StoreResult<Vec<Document>>;
 
-    /// Ids of the collections that hold at least one document anywhere beneath
-    /// `parent`, sorted.
+    /// The distinct first path segments of every document name beneath
+    /// `prefix`, sorted in UTF-8 byte order.
     ///
-    /// A collection counts even when the document between it and `parent` was
+    /// Two RPCs are built from this, because Firestore paths alternate
+    /// collection and document:
+    ///
+    /// - with a document (or the database root) as `prefix`, the result is the
+    ///   **collection ids** under it, which is `ListCollectionIds`;
+    /// - with a collection as `prefix`, the result is the **document ids** in
+    ///   it, which is what `ListDocuments(show_missing: true)` needs.
+    ///
+    /// A segment counts even when the document between it and `prefix` was
     /// never written: Firestore has no empty collections and no required
     /// parent documents, so `…/users/alice/posts/p1` puts `users` under the
     /// database root whether or not `users/alice` itself exists.
-    async fn collection_ids(&self, parent: &str) -> StoreResult<Vec<String>>;
+    async fn child_segments(&self, prefix: &str) -> StoreResult<Vec<String>>;
 
     /// Total number of stored documents. Used by the seed command's summary and
     /// by tests; not on any request path.
@@ -481,7 +489,7 @@ impl Store for MemoryStore {
             .collect())
     }
 
-    async fn collection_ids(&self, parent: &str) -> StoreResult<Vec<String>> {
+    async fn child_segments(&self, parent: &str) -> StoreResult<Vec<String>> {
         let prefix = format!("{parent}/");
         let documents = self.documents.read().expect("document store lock poisoned");
 
@@ -814,12 +822,21 @@ pub mod conformance {
             .expect("put");
 
         assert_eq!(
-            store.collection_ids(name).await.expect("collection ids"),
+            store.child_segments(name).await.expect("collection ids"),
             vec!["direct".to_string(), "ghostly".to_string()]
+        );
+        assert_eq!(
+            store
+                .child_segments(&format!("{name}/ghostly"))
+                .await
+                .expect("document ids"),
+            vec!["never-written".to_string()],
+            "a collection prefix yields document ids, including documents that \
+             exist only as the parent of something deeper"
         );
         assert!(
             store
-                .collection_ids(&format!("{name}/direct/d1"))
+                .child_segments(&format!("{name}/direct/d1"))
                 .await
                 .expect("collection ids")
                 .is_empty(),

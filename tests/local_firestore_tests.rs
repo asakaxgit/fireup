@@ -10,14 +10,20 @@ use std::collections::HashMap;
 
 use fireup::local;
 use fireup::protos::google::firestore::v1::{
-    firestore_client::FirestoreClient, precondition::ConditionType, value::ValueType,
-    write::Operation, BatchGetDocumentsRequest, CommitRequest, CreateDocumentRequest,
-    DeleteDocumentRequest, Document, DocumentMask, GetDocumentRequest, Precondition, RunQueryRequest,
-    Value, Write,
+    firestore_client::FirestoreClient, precondition::ConditionType,
+    run_query_request::QueryType, structured_query::field_filter::Operator as FieldOperator,
+    structured_query::filter::FilterType, structured_query::CollectionSelector,
+    structured_query::Direction, structured_query::FieldFilter, structured_query::FieldReference,
+    structured_query::Filter, structured_query::Order, value::ValueType, write::Operation,
+    BatchGetDocumentsRequest, CommitRequest, CreateDocumentRequest, DeleteDocumentRequest,
+    Document, DocumentMask, GetDocumentRequest, ListCollectionIdsRequest, ListDocumentsRequest,
+    ListDocumentsResponse, PartitionQueryRequest, Precondition, RunAggregationQueryRequest,
+    RunQueryRequest, StructuredQuery, Value, Write,
 };
 use tonic::transport::Channel;
 use tonic::Code;
 
+const DATABASE: &str = "projects/fireup-test/databases/(default)";
 const ROOT: &str = "projects/fireup-test/databases/(default)/documents";
 
 fn string_value(text: &str) -> Value {
@@ -425,20 +431,381 @@ async fn delete_document_is_idempotent() {
 async fn unserved_rpcs_answer_unimplemented_rather_than_hanging() {
     let (server, mut client) = start().await;
 
-    let status = client
-        .run_query(RunQueryRequest {
+    // One assertion per RPC that is still out of scope. As each one lands, this
+    // test fails until it is moved out of the list — which is the checklist.
+    let aggregation = client
+        .run_aggregation_query(RunAggregationQueryRequest {
             parent: ROOT.to_string(),
             ..Default::default()
         })
         .await
-        .expect_err("RunQuery is out of Phase 1 scope");
+        .expect_err("RunAggregationQuery is out of scope");
+    let partition = client
+        .partition_query(PartitionQueryRequest {
+            parent: ROOT.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("PartitionQuery is out of scope");
+
+    for status in [aggregation, partition] {
+        assert_eq!(status.code(), Code::Unimplemented);
+        assert!(
+            status.message().contains("fireup local"),
+            "the status should say who refused and why: {}",
+            status.message()
+        );
+    }
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// Write `documents` with one commit, so a test can set up a collection in a
+/// single call.
+async fn seed(client: &mut FirestoreClient<Channel>, documents: Vec<Document>) {
+    client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: documents
+                .into_iter()
+                .map(|document| Write {
+                    operation: Some(Operation::Update(document)),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .await
+        .expect("seeding should succeed");
+}
+
+fn person(id: &str, city: &str, age: i64) -> Document {
+    Document {
+        name: format!("{ROOT}/people/{id}"),
+        fields: fields([("city", string_value(city)), ("age", integer_value(age))]),
+        ..Default::default()
+    }
+}
+
+fn from(collection_id: &str) -> Vec<CollectionSelector> {
+    vec![CollectionSelector {
+        collection_id: collection_id.to_string(),
+        all_descendants: false,
+    }]
+}
+
+fn equals(field_path: &str, value: Value) -> Option<Filter> {
+    Some(Filter {
+        filter_type: Some(FilterType::FieldFilter(FieldFilter {
+            field: Some(FieldReference {
+                field_path: field_path.to_string(),
+            }),
+            op: FieldOperator::Equal as i32,
+            value: Some(value),
+        })),
+    })
+}
+
+/// Run a query and collect the document ids it returned, in order.
+async fn run_query(
+    client: &mut FirestoreClient<Channel>,
+    query: StructuredQuery,
+) -> Result<Vec<String>, tonic::Status> {
+    let mut stream = client
+        .run_query(RunQueryRequest {
+            parent: ROOT.to_string(),
+            query_type: Some(QueryType::StructuredQuery(query)),
+            ..Default::default()
+        })
+        .await?
+        .into_inner();
+
+    let mut ids = Vec::new();
+    while let Some(response) = stream.message().await? {
+        assert!(
+            response.read_time.is_some(),
+            "every response carries the read time"
+        );
+        if let Some(document) = response.document {
+            ids.push(
+                document
+                    .name
+                    .rsplit('/')
+                    .next()
+                    .expect("a name has segments")
+                    .to_string(),
+            );
+        }
+    }
+    Ok(ids)
+}
+
+#[tokio::test]
+async fn run_query_filters_orders_and_limits() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            person("alice", "Tokyo", 31),
+            person("bob", "Kyoto", 41),
+            person("carol", "Tokyo", 25),
+            person("dan", "Tokyo", 55),
+        ],
+    )
+    .await;
+
+    let found = run_query(
+        &mut client,
+        StructuredQuery {
+            from: from("people"),
+            r#where: equals("city", string_value("Tokyo")),
+            order_by: vec![Order {
+                field: Some(FieldReference {
+                    field_path: "age".to_string(),
+                }),
+                direction: Direction::Descending as i32,
+            }],
+            limit: Some(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the query runs");
+
+    assert_eq!(found, vec!["dan", "alice"], "Tokyo, oldest first, top two");
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn run_query_does_not_look_inside_subcollections() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            person("alice", "Tokyo", 31),
+            Document {
+                name: format!("{ROOT}/people/alice/pets/rex"),
+                fields: fields([("city", string_value("Tokyo")), ("age", integer_value(3))]),
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+
+    let found = run_query(
+        &mut client,
+        StructuredQuery {
+            from: from("people"),
+            r#where: equals("city", string_value("Tokyo")),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the query runs");
+
+    assert_eq!(found, vec!["alice"], "a pet is not a person");
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn run_query_with_no_matches_still_answers() {
+    let (server, mut client) = start().await;
+    seed(&mut client, vec![person("alice", "Tokyo", 31)]).await;
+
+    let found = run_query(
+        &mut client,
+        StructuredQuery {
+            from: from("people"),
+            r#where: equals("city", string_value("Nowhere")),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("an empty result is not an error");
+
+    // `run_query` asserts that every response carries a read_time, so arriving
+    // here with no ids means the server said "ran it, found nothing".
+    assert!(found.is_empty());
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn run_query_rejects_a_collection_group_query_clearly() {
+    let (server, mut client) = start().await;
+
+    let status = run_query(
+        &mut client,
+        StructuredQuery {
+            from: vec![CollectionSelector {
+                collection_id: "people".to_string(),
+                all_descendants: true,
+            }],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("collection group queries are not served");
 
     assert_eq!(status.code(), Code::Unimplemented);
     assert!(
-        status.message().contains("fireup local"),
-        "the status should say who refused and why: {}",
+        status.message().contains("all_descendants"),
+        "the message should name the unsupported feature: {}",
         status.message()
     );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn list_documents_pages_with_a_resume_token() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            person("alice", "Tokyo", 31),
+            person("bob", "Kyoto", 41),
+            person("carol", "Tokyo", 25),
+        ],
+    )
+    .await;
+
+    let mut seen = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let page = client
+            .list_documents(ListDocumentsRequest {
+                parent: ROOT.to_string(),
+                collection_id: "people".to_string(),
+                page_size: 2,
+                page_token: page_token.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("ListDocuments succeeds")
+            .into_inner();
+
+        seen.extend(page.documents.iter().map(|document| document.name.clone()));
+        page_token = page.next_page_token;
+        if page_token.is_empty() {
+            break;
+        }
+        assert!(seen.len() <= 3, "paging must terminate");
+    }
+
+    assert_eq!(
+        seen,
+        vec![
+            format!("{ROOT}/people/alice"),
+            format!("{ROOT}/people/bob"),
+            format!("{ROOT}/people/carol"),
+        ]
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn list_documents_reports_documents_that_exist_only_as_parents() {
+    let (server, mut client) = start().await;
+    // `ghost` itself is never written — only a document in its subcollection
+    // is. An SDK's listDocuments() has to see it anyway.
+    seed(
+        &mut client,
+        vec![
+            person("alice", "Tokyo", 31),
+            Document {
+                name: format!("{ROOT}/people/ghost/posts/p1"),
+                fields: fields([("title", string_value("Boo"))]),
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+
+    let request = |show_missing: bool| ListDocumentsRequest {
+        parent: ROOT.to_string(),
+        collection_id: "people".to_string(),
+        show_missing,
+        ..Default::default()
+    };
+    let names = |response: ListDocumentsResponse| {
+        response
+            .documents
+            .iter()
+            .map(|document| document.name.clone())
+            .collect::<Vec<String>>()
+    };
+
+    let without = client
+        .list_documents(request(false))
+        .await
+        .expect("ListDocuments succeeds")
+        .into_inner();
+    assert_eq!(names(without), vec![format!("{ROOT}/people/alice")]);
+
+    let with = client
+        .list_documents(request(true))
+        .await
+        .expect("ListDocuments succeeds")
+        .into_inner();
+    let ghost = with
+        .documents
+        .iter()
+        .find(|document| document.name.ends_with("/ghost"))
+        .expect("the missing document is listed")
+        .clone();
+    assert_eq!(
+        names(with),
+        vec![
+            format!("{ROOT}/people/alice"),
+            format!("{ROOT}/people/ghost"),
+        ]
+    );
+    assert!(ghost.fields.is_empty(), "a missing document has no fields");
+    assert!(
+        ghost.create_time.is_none() && ghost.update_time.is_none(),
+        "a missing document has no timestamps"
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn list_collection_ids_sees_root_and_nested_collections() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            person("alice", "Tokyo", 31),
+            Document {
+                name: format!("{ROOT}/people/alice/posts/p1"),
+                ..Default::default()
+            },
+            Document {
+                name: format!("{ROOT}/places/tokyo"),
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+
+    let root = client
+        .list_collection_ids(ListCollectionIdsRequest {
+            parent: ROOT.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("ListCollectionIds succeeds")
+        .into_inner();
+    assert_eq!(root.collection_ids, vec!["people", "places"]);
+
+    let nested = client
+        .list_collection_ids(ListCollectionIdsRequest {
+            parent: format!("{ROOT}/people/alice"),
+            ..Default::default()
+        })
+        .await
+        .expect("ListCollectionIds succeeds")
+        .into_inner();
+    assert_eq!(nested.collection_ids, vec!["posts"]);
 
     server.shutdown().await.expect("clean shutdown");
 }

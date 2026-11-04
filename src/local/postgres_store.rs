@@ -386,7 +386,7 @@ impl Store for PostgresStore {
         Ok(documents)
     }
 
-    async fn collection_ids(&self, parent: &str) -> StoreResult<Vec<String>> {
+    async fn child_segments(&self, parent: &str) -> StoreResult<Vec<String>> {
         let prefix = format!("{parent}/");
         // 1-based, and one past the prefix: the first segment of what is left.
         let first_segment_at = prefix.len() as i32 + 1;

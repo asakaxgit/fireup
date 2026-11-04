@@ -1,9 +1,10 @@
 //! Firestore v1 gRPC service for `fireup local`.
 //!
 //! Implemented against the public `google.firestore.v1.Firestore` service
-//! definition vendored under `proto/`. Phase 1 serves the subset that official
-//! client SDKs need for document CRUD, against whichever
-//! [`Store`](crate::local::store::Store) the process was configured with:
+//! definition vendored under `proto/`. Phase 2 serves the whole v1 surface an
+//! official client SDK uses for document work, queries, and transactions,
+//! against whichever [`Store`](crate::local::store::Store) the process was
+//! configured with:
 //!
 //! | RPC                  | Status |
 //! |----------------------|--------|
@@ -12,7 +13,10 @@
 //! | `UpdateDocument`     | served |
 //! | `DeleteDocument`     | served |
 //! | `BatchGetDocuments`  | served (gRPC SDK read path) |
-//! | `Commit`             | served, non-transactional writes only |
+//! | `Commit`             | served, atomically |
+//! | `RunQuery`           | served, see [`query`](crate::local::query) |
+//! | `ListDocuments`      | served, incl. `show_missing` |
+//! | `ListCollectionIds`  | served |
 //! | everything else      | `UNIMPLEMENTED` |
 //!
 //! Every unimplemented RPC answers with an explicit `UNIMPLEMENTED` status and a
@@ -29,7 +33,9 @@ use tonic::{Request, Response, Status};
 use tracing::debug;
 
 use crate::local::names::{parse_document_name, parse_parent_name};
-use crate::local::store::SharedStore;
+use crate::local::query::Query;
+use crate::local::store::{now_timestamp, SharedStore};
+use crate::protos::google::firestore::v1::run_query_request::QueryType;
 use crate::protos::google::firestore::v1::{
     firestore_server::Firestore, precondition::ConditionType, write::Operation,
     BatchGetDocumentsRequest, BatchGetDocumentsResponse, BatchWriteRequest, BatchWriteResponse,
@@ -55,16 +61,65 @@ type UnimplementedStream<T> = ReceiverStream<Result<T, Status>>;
 fn unimplemented(rpc: &str, plan: &str) -> Status {
     Status::unimplemented(format!(
         "fireup local does not serve {rpc} yet ({plan}). \
-         Phase 1 serves document CRUD only."
+         See docs/local/README.md for the full fidelity matrix."
     ))
 }
 
-fn now_timestamp() -> Timestamp {
-    let now = chrono::Utc::now();
-    Timestamp {
-        seconds: now.timestamp(),
-        nanos: now.timestamp_subsec_nanos() as i32,
+/// Send `responses` as a gRPC server stream.
+///
+/// The whole response set is resolved before the stream is created, so a bad
+/// resource name or an unsupported query fails the call rather than poisoning
+/// the stream mid-flight, where many clients report it far less clearly.
+fn stream_responses<T: Send + 'static>(responses: Vec<T>) -> ReceiverStream<Result<T, Status>> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(responses.len().max(1));
+    tokio::spawn(async move {
+        for response in responses {
+            if sender.send(Ok(response)).await.is_err() {
+                break; // client hung up
+            }
+        }
+    });
+    ReceiverStream::new(receiver)
+}
+
+/// Apply `page_size`/`page_token` paging to an already-ordered list.
+///
+/// The token is the key of the last item returned, so resuming is a seek rather
+/// than an offset: a document written or deleted between two pages shifts
+/// nothing, where an offset would make the client skip or repeat an item.
+/// `page_size` of 0 means "no limit", which is what the field's default has to
+/// mean for a client that never sets it.
+fn paginate<T>(
+    items: Vec<T>,
+    page_size: i32,
+    page_token: &str,
+    key: impl Fn(&T) -> String,
+) -> Result<(Vec<T>, String), Status> {
+    if page_size < 0 {
+        return Err(Status::invalid_argument("page_size must not be negative"));
     }
+
+    let mut remaining: Vec<T> = if page_token.is_empty() {
+        items
+    } else {
+        items
+            .into_iter()
+            .filter(|item| key(item).as_bytes() > page_token.as_bytes())
+            .collect()
+    };
+
+    let page = if page_size == 0 {
+        remaining.len()
+    } else {
+        page_size as usize
+    };
+    if remaining.len() <= page {
+        return Ok((remaining, String::new()));
+    }
+
+    remaining.truncate(page);
+    let next = remaining.last().map(&key).unwrap_or_default();
+    Ok((remaining, next))
 }
 
 /// Generate a Firestore-style 20-character auto id.
@@ -433,15 +488,7 @@ impl Firestore for FirestoreApi {
             });
         }
 
-        let (sender, receiver) = tokio::sync::mpsc::channel(responses.len().max(1));
-        tokio::spawn(async move {
-            for response in responses {
-                if sender.send(Ok(response)).await.is_err() {
-                    break; // client hung up
-                }
-            }
-        });
-        Ok(Response::new(ReceiverStream::new(receiver)))
+        Ok(Response::new(stream_responses(responses)))
     }
 
     async fn commit(
@@ -474,9 +521,103 @@ impl Firestore for FirestoreApi {
 
     async fn list_documents(
         &self,
-        _request: Request<ListDocumentsRequest>,
+        request: Request<ListDocumentsRequest>,
     ) -> Result<Response<ListDocumentsResponse>, Status> {
-        Err(unimplemented("ListDocuments", "Phase 1 collection reads"))
+        let request = request.into_inner();
+        debug!(
+            parent = %request.parent,
+            collection_id = %request.collection_id,
+            "ListDocuments"
+        );
+
+        if let Some(selector) = &request.consistency_selector {
+            use crate::protos::google::firestore::v1::list_documents_request::ConsistencySelector;
+            match selector {
+                ConsistencySelector::Transaction(_) => {
+                    return Err(unimplemented(
+                        "transactional ListDocuments",
+                        "transactions land next",
+                    ))
+                }
+                ConsistencySelector::ReadTime(_) => {
+                    return Err(unimplemented(
+                        "point-in-time ListDocuments reads",
+                        "the store only keeps the current version of a document",
+                    ))
+                }
+            }
+        }
+        if !request.order_by.is_empty() {
+            return Err(unimplemented(
+                &format!("ListDocuments ordered by {:?}", request.order_by),
+                "documents come back ordered by name; use RunQuery to order by a field",
+            ));
+        }
+
+        let parent = parse_parent_name(&request.parent)?;
+        // An empty collection_id means "every collection under this parent",
+        // which the published contract allows.
+        let collections = if request.collection_id.is_empty() {
+            self.store.child_segments(&parent.full()).await?
+        } else {
+            if request.collection_id.contains('/') {
+                return Err(Status::invalid_argument(
+                    "collection_id must be a single path segment",
+                ));
+            }
+            vec![request.collection_id.clone()]
+        };
+
+        let mut documents = Vec::new();
+        for collection_id in &collections {
+            documents.extend(
+                self.store
+                    .scan_collection(&parent.full(), collection_id)
+                    .await?,
+            );
+
+            if request.show_missing {
+                // A "missing" document is one that was never written but has
+                // something nested underneath it. Firestore reports it with a
+                // name and no fields or timestamps, which is how an SDK's
+                // `listDocuments()` sees a collection whose parents are gaps.
+                let collection = format!("{}/{}", parent.full(), collection_id);
+                let present: std::collections::HashSet<&str> = documents
+                    .iter()
+                    .map(|document: &Document| document.name.as_str())
+                    .collect();
+                let missing: Vec<Document> = self
+                    .store
+                    .child_segments(&collection)
+                    .await?
+                    .into_iter()
+                    .map(|document_id| format!("{collection}/{document_id}"))
+                    .filter(|name| !present.contains(name.as_str()))
+                    .map(|name| Document {
+                        name,
+                        ..Default::default()
+                    })
+                    .collect();
+                documents.extend(missing);
+            }
+        }
+
+        // One order for the whole response, since several collections may have
+        // contributed to it.
+        documents.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+        for document in &mut documents {
+            apply_mask(document, &request.mask)?;
+        }
+
+        let (documents, next_page_token) =
+            paginate(documents, request.page_size, &request.page_token, |document| {
+                document.name.clone()
+            })?;
+
+        Ok(Response::new(ListDocumentsResponse {
+            documents,
+            next_page_token,
+        }))
     }
 
     async fn begin_transaction(
@@ -490,13 +631,72 @@ impl Firestore for FirestoreApi {
         Err(unimplemented("Rollback", "transactions phase"))
     }
 
-    type RunQueryStream = UnimplementedStream<RunQueryResponse>;
+    type RunQueryStream = ReceiverStream<Result<RunQueryResponse, Status>>;
 
     async fn run_query(
         &self,
-        _request: Request<RunQueryRequest>,
+        request: Request<RunQueryRequest>,
     ) -> Result<Response<Self::RunQueryStream>, Status> {
-        Err(unimplemented("RunQuery", "Phase 1 simple-query engine"))
+        let request = request.into_inner();
+        debug!(parent = %request.parent, "RunQuery");
+
+        if let Some(selector) = &request.consistency_selector {
+            use crate::protos::google::firestore::v1::run_query_request::ConsistencySelector;
+            let what = match selector {
+                ConsistencySelector::Transaction(_) | ConsistencySelector::NewTransaction(_) => {
+                    "transactional RunQuery"
+                }
+                ConsistencySelector::ReadTime(_) => "point-in-time RunQuery reads",
+            };
+            return Err(unimplemented(what, "transactions land next"));
+        }
+        if request.explain_options.is_some() {
+            return Err(unimplemented(
+                "query explain options",
+                "there is no query planner to explain",
+            ));
+        }
+
+        let parent = parse_parent_name(&request.parent)?;
+        let structured = match &request.query_type {
+            Some(QueryType::StructuredQuery(query)) => query,
+            None => return Err(Status::invalid_argument("RunQuery needs a structured_query")),
+        };
+
+        // Compiled before anything is read, so an unsupported query shape fails
+        // immediately instead of after a collection scan.
+        let query = Query::compile(structured)?;
+        let documents = self
+            .store
+            .scan_collection(&parent.full(), query.collection_id())
+            .await?;
+        let results = query.evaluate(documents);
+
+        let read_time = now_timestamp();
+        let mut responses: Vec<RunQueryResponse> = results
+            .documents
+            .into_iter()
+            .map(|document| RunQueryResponse {
+                document: Some(document),
+                read_time: Some(read_time.clone()),
+                skipped_results: 0,
+                ..Default::default()
+            })
+            .collect();
+
+        // The contract says an empty result set still reports the time the
+        // query ran, so a client can tell "no matches" from "nothing happened".
+        if responses.is_empty() {
+            responses.push(RunQueryResponse {
+                read_time: Some(read_time.clone()),
+                ..Default::default()
+            });
+        }
+        if let Some(first) = responses.first_mut() {
+            first.skipped_results = i32::try_from(results.skipped).unwrap_or(i32::MAX);
+        }
+
+        Ok(Response::new(stream_responses(responses)))
     }
 
     type ExecutePipelineStream = UnimplementedStream<ExecutePipelineResponse>;
@@ -547,12 +747,27 @@ impl Firestore for FirestoreApi {
 
     async fn list_collection_ids(
         &self,
-        _request: Request<ListCollectionIdsRequest>,
+        request: Request<ListCollectionIdsRequest>,
     ) -> Result<Response<ListCollectionIdsResponse>, Status> {
-        Err(unimplemented(
-            "ListCollectionIds",
-            "Phase 1 collection reads",
-        ))
+        let request = request.into_inner();
+        debug!(parent = %request.parent, "ListCollectionIds");
+
+        if request.consistency_selector.is_some() {
+            return Err(unimplemented(
+                "point-in-time ListCollectionIds reads",
+                "the store only keeps the current version of a document",
+            ));
+        }
+
+        let parent = parse_parent_name(&request.parent)?;
+        let ids = self.store.child_segments(&parent.full()).await?;
+        let (collection_ids, next_page_token) =
+            paginate(ids, request.page_size, &request.page_token, Clone::clone)?;
+
+        Ok(Response::new(ListCollectionIdsResponse {
+            collection_ids,
+            next_page_token,
+        }))
     }
 
     async fn batch_write(
