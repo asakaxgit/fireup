@@ -27,7 +27,7 @@ use serde_json::{json, Map, Value as Json};
 use tracing::debug;
 
 use super::store::{InsertOutcome, SharedUserStore, UpdateOutcome};
-use super::token::{self, RefreshToken, TokenError};
+use super::token::{self, RefreshToken, SessionContext, TokenError};
 use super::user::{AuthUser, PasswordHash, SignInProvider};
 use crate::local::config::LocalConfig;
 use crate::local::store::StoreError;
@@ -369,12 +369,31 @@ impl AuthApi {
 
     /// Start a session for `user`: an ID token plus a refresh token.
     fn open_session(&self, user: &AuthUser, now_millis: i64) -> Session {
+        self.open_session_in(user, SessionContext::default(), now_millis)
+    }
+
+    /// Open a session carrying its own `context` — how it authenticated and the
+    /// claims from the custom token that opened it, neither of which is account
+    /// state. Both ride along on the refresh token so a refresh re-issues the
+    /// same session rather than a weaker one.
+    fn open_session_in(
+        &self,
+        user: &AuthUser,
+        context: SessionContext,
+        now_millis: i64,
+    ) -> Session {
         Session {
-            id_token: token::mint_id_token(user, self.project_id(), now_millis / 1000),
+            id_token: token::mint_id_token_for_session(
+                user,
+                self.project_id(),
+                now_millis / 1000,
+                &context,
+            ),
             refresh_token: RefreshToken {
                 local_id: user.local_id.clone(),
                 project_id: self.project_id().to_string(),
                 issued_at_millis: now_millis,
+                session: context,
             }
             .encode(),
         }
@@ -592,15 +611,22 @@ impl AuthApi {
         if user.disabled {
             return bad_request("USER_DISABLED");
         }
-        // Claims in the token are for this session, so they replace whatever was
-        // stored: that is how an Admin SDK changes a user's claims without an
-        // admin update call.
-        if let Some(extra) = claims.claims {
-            if let Err(reason) = token::validate_custom_claims(&extra) {
-                return bad_request(&format!("INVALID_CLAIMS : {reason}"));
+        // Claims in the token are for this session only. They are *not* written
+        // onto the account: `createCustomToken(uid, claims)` documents them as
+        // additional claims for the session the token opens, while the account's
+        // stored custom claims are owned by `setCustomUserClaims`. Storing them
+        // here would make signing in with a custom token silently destroy claims
+        // an admin had set, which is how this was found — an SDK smoke test
+        // signed in and the account's `role` claim was gone.
+        let session_claims = match claims.claims {
+            Some(extra) => {
+                if let Err(reason) = token::validate_custom_claims(&extra) {
+                    return bad_request(&format!("INVALID_CLAIMS : {reason}"));
+                }
+                Some(extra)
             }
-            user.custom_claims = Some(extra);
-        }
+            None => None,
+        };
         user.last_login_at_millis = Some(now_millis);
 
         let stored = if is_new_user {
@@ -625,7 +651,14 @@ impl AuthApi {
             Err(error) => return store_failure("storing the account", error),
         }
 
-        let session = self.open_session(&user, now_millis);
+        // `sign_in_provider` is documented as how the sign-in happened, so a
+        // custom token reports `custom` even when the account it names has a
+        // password and was created some other way.
+        let context = SessionContext {
+            provider: Some(SignInProvider::Custom),
+            claims: session_claims,
+        };
+        let session = self.open_session_in(&user, context, now_millis);
         let mut response = Map::new();
         response.insert(
             "kind".into(),
@@ -741,7 +774,10 @@ impl AuthApi {
             return bad_request("TOKEN_EXPIRED");
         }
 
-        let session = self.open_session(&user, now_millis);
+        // Carry the session's own context across, so refreshing a custom-token
+        // session keeps both the claims and the provider it signed in with
+        // instead of silently becoming a different session an hour in.
+        let session = self.open_session_in(&user, refresh.session, now_millis);
         (
             200,
             json!({
@@ -1213,8 +1249,13 @@ impl AuthApi {
 
     /// Parse `customAttributes`, which the API carries as a JSON **string**.
     ///
-    /// An empty string clears the claims — that is how an Admin SDK removes
-    /// them — so it maps to `None` rather than to an empty object.
+    /// Both an empty string and an empty object clear the claims, because both
+    /// are how an Admin SDK removes them: `setCustomUserClaims(uid, null)`
+    /// wire-encodes as the *string* `"{}"`, not as an absent field. Keeping
+    /// `Some({})` here would echo `customAttributes: "{}"` back on the next
+    /// lookup, and the SDK reports any present value as claims — so
+    /// `UserRecord.customClaims` would come back as `{}` where the documented
+    /// value for an account with no claims is `undefined`.
     fn parse_custom_attributes(
         &self,
         raw: &str,
@@ -1229,6 +1270,9 @@ impl AuthApi {
         })?;
         token::validate_custom_claims(&parsed)
             .map_err(|reason| bad_request(&format!("INVALID_CLAIMS : {reason}")))?;
+        if parsed.as_object().is_some_and(Map::is_empty) {
+            return Ok(None);
+        }
         Ok(Some(parsed))
     }
 }
@@ -1293,6 +1337,21 @@ mod tests {
             .as_str()
             .unwrap_or_else(|| panic!("not an error envelope: {body}"))
             .to_string()
+    }
+
+    /// The claims inside the ID token of a sign-in or refresh response.
+    ///
+    /// Identity Toolkit sign-in responses name the field `idToken`; the
+    /// secure-token refresh endpoint is snake_case and names it `id_token`.
+    /// Both are correct, so this reads whichever is present.
+    fn id_token_claims(body: &Json) -> Json {
+        let id_token = body["idToken"]
+            .as_str()
+            .or_else(|| body["id_token"].as_str())
+            .unwrap_or_else(|| panic!("no ID token in {body}"));
+        let payload = id_token.split('.').nth(1).expect("claims segment");
+        serde_json::from_slice(&super::super::base64url_decode(payload).expect("base64url"))
+            .expect("JSON claims")
     }
 
     async fn signed_up(api: &AuthApi, email: &str, password: &str) -> Json {
@@ -1629,6 +1688,102 @@ mod tests {
             post(&api, "/v1/accounts:signInWithCustomToken", json!({ "token": custom })).await;
         assert_eq!(status, 200, "{body}");
         assert_eq!(body["isNewUser"], false);
+    }
+
+    #[tokio::test]
+    async fn custom_token_claims_are_session_scoped_and_do_not_overwrite_the_account() {
+        let api = api();
+        post(
+            &api,
+            "/v1/projects/demo/accounts",
+            json!({
+                "localId": "both",
+                "email": "both@example.com",
+                "password": "secret12",
+                "customAttributes": "{\"role\":\"admin\",\"tier\":3}",
+            }),
+        )
+        .await;
+
+        // A custom token's `claims` are documented as additional claims for the
+        // session it opens, not an edit to the account.
+        let custom =
+            token::mint_custom_token("both", Some(&json!({ "scope": "batch" })), NOW / 1000);
+        let (status, body) =
+            post(&api, "/v1/accounts:signInWithCustomToken", json!({ "token": custom })).await;
+        assert_eq!(status, 200, "{body}");
+
+        // The session sees both the account's claims and the token's, and
+        // reports how *it* signed in rather than how the account was made.
+        let session_claims = id_token_claims(&body);
+        assert_eq!(session_claims["scope"], "batch");
+        assert_eq!(session_claims["role"], "admin", "{session_claims}");
+        assert_eq!(session_claims["tier"], 3, "{session_claims}");
+        assert_eq!(
+            session_claims["firebase"]["sign_in_provider"], "custom",
+            "a custom-token sign-in signed in with a custom token: {session_claims}"
+        );
+
+        // The account itself is untouched: signing in with a custom token must
+        // not destroy what an admin set.
+        let (status, lookup) = post(
+            &api,
+            "/v1/projects/demo/accounts:lookup",
+            json!({ "localId": ["both"] }),
+        )
+        .await;
+        assert_eq!(status, 200, "{lookup}");
+        assert_eq!(
+            lookup["users"][0]["customAttributes"], "{\"role\":\"admin\",\"tier\":3}",
+            "custom-token sign-in must leave stored claims alone: {lookup}"
+        );
+
+        // A password sign-in therefore still sees the account's claims, and not
+        // the previous session's.
+        let (status, password_session) = post(
+            &api,
+            "/v1/accounts:signInWithPassword",
+            json!({ "email": "both@example.com", "password": "secret12" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{password_session}");
+        let claims = id_token_claims(&password_session);
+        assert_eq!(claims["role"], "admin");
+        assert_eq!(claims["firebase"]["sign_in_provider"], "password");
+        assert!(
+            claims.get("scope").is_none(),
+            "one session's claims must not leak into another: {claims}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refreshing_a_custom_token_session_keeps_its_claims() {
+        let api = api();
+        let custom =
+            token::mint_custom_token("refresher", Some(&json!({ "scope": "batch" })), NOW / 1000);
+        let (status, body) =
+            post(&api, "/v1/accounts:signInWithCustomToken", json!({ "token": custom })).await;
+        assert_eq!(status, 200, "{body}");
+
+        let refresh_token = body["refreshToken"].as_str().expect("refreshToken");
+        let (status, refreshed) = request(
+            &api,
+            "POST",
+            "/v1/token",
+            &format!("grant_type=refresh_token&refresh_token={refresh_token}"),
+        )
+        .await;
+        assert_eq!(status, 200, "{refreshed}");
+
+        // Without the claims on the refresh token, the session would silently
+        // lose them an hour in — the hardest kind of bug to attribute.
+        let claims = id_token_claims(&refreshed);
+        assert_eq!(claims["scope"], "batch", "{claims}");
+        assert_eq!(claims["sub"], "refresher");
+        assert_eq!(
+            claims["firebase"]["sign_in_provider"], "custom",
+            "a refresh must not change how the session signed in: {claims}"
+        );
     }
 
     #[tokio::test]
@@ -1971,6 +2126,45 @@ mod tests {
         .expect("claims JSON");
         assert_eq!(claims["role"], "editor");
         assert_eq!(claims["email_verified"], true);
+    }
+
+    #[tokio::test]
+    async fn clearing_custom_claims_removes_the_field_rather_than_emptying_it() {
+        let api = api();
+        post(
+            &api,
+            "/v1/projects/demo/accounts",
+            json!({
+                "localId": "claimed",
+                "customAttributes": "{\"role\":\"editor\"}",
+            }),
+        )
+        .await;
+
+        // `setCustomUserClaims(uid, null)` in an Admin SDK sends the *string*
+        // "{}", not an absent field or an empty string. Storing that as an
+        // empty object would make the next lookup report `customAttributes:
+        // "{}"`, which an SDK reads back as claims of `{}` where the documented
+        // value for an account with no claims is absent.
+        let (status, body) = post(
+            &api,
+            "/v1/projects/demo/accounts:update",
+            json!({ "localId": "claimed", "customAttributes": "{}" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+
+        let (status, body) = post(
+            &api,
+            "/v1/projects/demo/accounts:lookup",
+            json!({ "localId": ["claimed"] }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body["users"][0].get("customAttributes").is_none(),
+            "cleared claims must not come back as an empty object: {body}"
+        );
     }
 
     #[tokio::test]

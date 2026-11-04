@@ -157,18 +157,62 @@ fn decode_claims(token: &str) -> Result<Map<String, Json>, TokenError> {
 /// token's own meaning; [`validate_custom_claims`] rejects them at the point a
 /// caller sets them, so reaching this is already a bug elsewhere.
 pub fn mint_id_token(user: &AuthUser, project_id: &str, now_seconds: i64) -> String {
+    mint_id_token_for_session(user, project_id, now_seconds, &SessionContext::default())
+}
+
+/// What is true of one sign-in rather than of the account it signed in to.
+///
+/// SAK-168 read both of these off the stored account, which conflated two
+/// different things and was wrong in both directions: a custom-token sign-in
+/// overwrote the account's claims, and it reported the account's original
+/// provider instead of how the session had actually authenticated. Keeping them
+/// here, and on the refresh token, is what makes "this session" a thing the
+/// server can talk about.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionContext {
+    /// How *this* session authenticated, when that differs from how the account
+    /// was created. `firebase.sign_in_provider` is documented as the method used
+    /// for the sign-in, so a custom-token sign-in reports `custom` even for an
+    /// account that has a password.
+    pub provider: Option<SignInProvider>,
+    /// Extra claims carried by the custom token that opened the session.
+    pub claims: Option<Json>,
+}
+
+/// Mint an ID token for `user` as seen by one session.
+///
+/// Custom-token sign-in is the case that needs this. The `claims` an Admin SDK
+/// puts in a custom token are documented as additional claims for the session
+/// that token opens — they are not the account's stored custom claims, which
+/// only `setCustomUserClaims` (`accounts:update`) changes. So they are merged
+/// into the token here and carried on the refresh token, rather than written
+/// onto the account, where they would silently destroy whatever an admin had
+/// set.
+///
+/// Session claims are layered over the account's own, so a custom token can
+/// override one claim for one session without touching the rest.
+pub fn mint_id_token_for_session(
+    user: &AuthUser,
+    project_id: &str,
+    now_seconds: i64,
+    session: &SessionContext,
+) -> String {
     let mut claims = Map::new();
 
-    if let Some(custom) = user.custom_claims.as_ref().and_then(Json::as_object) {
-        for (claim, value) in custom {
-            if !RESERVED_CLAIMS.contains(&claim.as_str()) {
-                claims.insert(claim.clone(), value.clone());
+    for source in [user.custom_claims.as_ref(), session.claims.as_ref()] {
+        if let Some(custom) = source.and_then(Json::as_object) {
+            for (claim, value) in custom {
+                if !RESERVED_CLAIMS.contains(&claim.as_str()) {
+                    claims.insert(claim.clone(), value.clone());
+                }
             }
         }
     }
 
+    let provider = session.provider.unwrap_or(user.provider);
+
     let mut identities = Map::new();
-    if let (SignInProvider::Password, Some(email)) = (user.provider, &user.email) {
+    if let (SignInProvider::Password, Some(email)) = (provider, &user.email) {
         identities.insert(
             "email".into(),
             Json::Array(vec![Json::from(email.clone())]),
@@ -199,7 +243,7 @@ pub fn mint_id_token(user: &AuthUser, project_id: &str, now_seconds: i64) -> Str
         "firebase".into(),
         serde_json::json!({
             "identities": Json::Object(identities),
-            "sign_in_provider": user.provider.as_str(),
+            "sign_in_provider": provider.as_str(),
         }),
     );
 
@@ -314,11 +358,19 @@ pub struct RefreshToken {
     /// When the token was issued, in epoch millis. Compared against the
     /// account's `validSince` to implement revocation.
     pub issued_at_millis: i64,
+    /// What was true of the sign-in that opened this session, as opposed to of
+    /// the account.
+    ///
+    /// Carried here so a refresh re-issues the same session rather than
+    /// quietly downgrading it an hour in — losing the custom token's claims, or
+    /// reporting a different `sign_in_provider` than the sign-in did. This is
+    /// not account state; see [`mint_id_token_for_session`].
+    pub session: SessionContext,
 }
 
 impl RefreshToken {
     pub fn encode(&self) -> String {
-        let envelope = serde_json::json!({
+        let mut envelope = serde_json::json!({
             "kind": REFRESH_TOKEN_KIND,
             "localId": self.local_id,
             "projectId": self.project_id,
@@ -327,6 +379,12 @@ impl RefreshToken {
             // client cannot accidentally treat them as the same session.
             "nonce": super::random_token(12),
         });
+        if let Some(claims) = &self.session.claims {
+            envelope["sessionClaims"] = claims.clone();
+        }
+        if let Some(provider) = self.session.provider {
+            envelope["sessionProvider"] = Json::from(provider.as_str());
+        }
         base64url_encode(envelope.to_string().as_bytes())
     }
 
@@ -353,6 +411,18 @@ impl RefreshToken {
                 .get("issuedAt")
                 .and_then(Json::as_i64)
                 .ok_or(TokenError::Malformed)?,
+            // Both absent for every session that was not opened by a custom
+            // token, which is most of them.
+            session: SessionContext {
+                provider: envelope
+                    .get("sessionProvider")
+                    .and_then(Json::as_str)
+                    .and_then(SignInProvider::parse),
+                claims: envelope
+                    .get("sessionClaims")
+                    .filter(|claims| claims.is_object())
+                    .cloned(),
+            },
         })
     }
 }
@@ -512,6 +582,7 @@ mod tests {
             local_id: "uid-1".into(),
             project_id: "demo".into(),
             issued_at_millis: 1_700_000_000_000,
+            session: SessionContext::default(),
         };
         let encoded = token.encode();
 
@@ -524,11 +595,27 @@ mod tests {
     }
 
     #[test]
+    fn a_refresh_token_round_trips_its_session_claims() {
+        let token = RefreshToken {
+            local_id: "uid-1".into(),
+            project_id: "demo".into(),
+            issued_at_millis: 1_700_000_000_000,
+            session: SessionContext {
+                provider: Some(SignInProvider::Custom),
+                claims: Some(serde_json::json!({ "scope": "batch" })),
+            },
+        };
+
+        assert_eq!(RefreshToken::decode(&token.encode()).expect("decodes"), token);
+    }
+
+    #[test]
     fn two_refresh_tokens_for_one_session_differ() {
         let token = RefreshToken {
             local_id: "uid-1".into(),
             project_id: "demo".into(),
             issued_at_millis: 1,
+            session: SessionContext::default(),
         };
         assert_ne!(token.encode(), token.encode());
     }
