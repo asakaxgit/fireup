@@ -77,6 +77,28 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 
+# A durable account store keeps accounts between runs, so a second run would
+# fail on the first createUser with EMAIL_EXISTS. An in-memory store starts
+# empty and this is a no-op. Uses the documented emulator control endpoint —
+# the same one the smoke test itself asserts is served.
+echo "==> clearing accounts left by a previous run"
+if ! node -e "
+  fetch('http://127.0.0.1:$port/emulator/v1/projects/fireup-smoke/accounts', {
+    method: 'DELETE',
+  })
+    .then((r) => {
+      if (!r.ok) throw new Error('HTTP ' + r.status)
+    })
+    .catch((e) => {
+      console.error('could not clear accounts: ' + e.message)
+      process.exit(1)
+    })
+"; then
+  kill "$server_pid" 2>/dev/null
+  cat "$log" >&2
+  exit 1
+fi
+
 echo "==> running the Auth SDK smoke test"
 if FIREBASE_AUTH_EMULATOR_HOST="127.0.0.1:$port" node "$smoke_dir/auth-smoke.mjs"; then
   status=0
