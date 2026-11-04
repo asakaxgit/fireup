@@ -1,0 +1,17 @@
+{
+  "name": "fireup-brand",
+  "version": "0.1.0",
+  "description": "Fireup brand identity: vector masters, design tokens, and the asset export pipeline.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "contrast": "node scripts/contrast.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "explore": "node scripts/explore.mjs",
+    "check": "npm run smoke && npm run contrast && npm run build"
+  },
+  "type": "module",
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2"
+  },
+  "private": true
+}

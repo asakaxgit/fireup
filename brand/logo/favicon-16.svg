@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" role="img" aria-label="Fireup">
+  <!-- MASTER, drawn for 16px. Not the 64-unit mark scaled down: at this size
+       the lifted row's gap and overhang have to be whole pixels or they turn to
+       grey mush, so the proportions are re-cut to a 16x16 grid.
+       stem 3px, arms 3px, gap 2px, overhang 2px. -->
+  <rect width="16" height="16" fill="#0B1220"/>
+  <rect x="2"  y="2"  width="3"  height="12" fill="#FFFFFF"/>
+  <rect x="2"  y="2"  width="10" height="3"  fill="#FFFFFF"/>
+  <rect x="7"  y="7"  width="6"  height="3"  fill="#FF5A2B"/>
+</svg>
