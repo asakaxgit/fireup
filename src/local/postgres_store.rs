@@ -26,9 +26,9 @@ use tracing::{debug, info};
 
 use crate::data_importer::parse_connection_url;
 use crate::local::names::parse_document_name;
-use crate::local::store::{Store, StoreError, StoreResult, WriteOutcome};
+use crate::local::store::{self, PendingWrite, Store, StoreError, StoreResult, WriteOutcome};
 use crate::local::value_json;
-use crate::protos::google::firestore::v1::{Document, Value};
+use crate::protos::google::firestore::v1::Document;
 
 /// Table holding the local data plane's documents.
 ///
@@ -64,10 +64,14 @@ fn schema_statements() -> Vec<String> {
              )"
         ),
         // Collection reads are "every document whose parent is P and whose
-        // collection is C, ordered by document id" — this index is that query.
+        // collection is C" — this index is that query. `parent` leads because
+        // it already encodes the project and database (it starts with
+        // `projects/{p}/databases/{d}/documents`), so putting those columns
+        // first would only have pushed the columns the query filters on out of
+        // the index prefix.
         format!(
             "CREATE INDEX IF NOT EXISTS {DOCUMENTS_TABLE}_collection_idx
-                 ON {DOCUMENTS_TABLE} (project_id, database_id, parent, collection_id, document_id)"
+                 ON {DOCUMENTS_TABLE} (parent, collection_id, document_id)"
         ),
     ]
 }
@@ -272,77 +276,17 @@ impl Store for PostgresStore {
         Ok(row.is_some())
     }
 
-    async fn put(&self, document: Document, now: Timestamp) -> StoreResult<WriteOutcome> {
-        let name = document.name.clone();
-        let key = key_columns(&name)?;
-        let payload = encode_fields(&name, &document)?;
-
-        let mut client = self.client().await?;
-        let transaction = client
-            .transaction()
-            .await
-            .context("failed to begin a write transaction")
-            .map_err(StoreError::Backend)?;
-
-        // `FOR UPDATE` holds the row for the rest of the transaction, so two
-        // concurrent writes to one document cannot interleave and lose a
-        // create_time. It also tells us the outcome without relying on
-        // upsert-internal state.
-        let existing = transaction
-            .query_opt(
-                &format!(
-                    "SELECT create_time_seconds, create_time_nanos
-                       FROM {DOCUMENTS_TABLE} WHERE name = $1 FOR UPDATE"
-                ),
-                &[&name],
-            )
-            .await
-            .with_context(|| format!("failed to lock document {name}"))
-            .map_err(StoreError::Backend)?;
-
-        let outcome = match existing {
-            Some(_) => {
-                transaction
-                    .execute(
-                        &format!(
-                            "UPDATE {DOCUMENTS_TABLE}
-                                SET fields = $2,
-                                    update_time_seconds = $3,
-                                    update_time_nanos = $4
-                              WHERE name = $1"
-                        ),
-                        &[&name, &payload, &now.seconds, &now.nanos],
-                    )
-                    .await
-                    .with_context(|| format!("failed to update document {name}"))
-                    .map_err(StoreError::Backend)?;
-                WriteOutcome::Updated
-            }
-            None => {
-                insert_document(&transaction, &name, &key, &payload, &now).await?;
-                WriteOutcome::Created
-            }
-        };
-
-        transaction
-            .commit()
-            .await
-            .with_context(|| format!("failed to commit the write of {name}"))
-            .map_err(StoreError::Backend)?;
-        Ok(outcome)
-    }
-
-    async fn merge(
+    async fn commit(
         &self,
-        name: &str,
-        fields: Vec<(String, Value)>,
+        writes: Vec<PendingWrite>,
         now: Timestamp,
-    ) -> StoreResult<WriteOutcome> {
-        let key = key_columns(name)?;
-        let merged: std::collections::HashMap<String, Value> = fields.into_iter().collect();
-        let payload = value_json::encode_fields(&merged).map_err(|error| {
-            StoreError::Unsupported(format!("fields for {name} cannot be stored: {error}"))
-        })?;
+    ) -> StoreResult<Vec<WriteOutcome>> {
+        // Validate every name before touching the database, so a batch with one
+        // unstorable name fails without having opened a transaction.
+        let keys: Vec<DocumentKey> = writes
+            .iter()
+            .map(|write| key_columns(write.mutation.name()))
+            .collect::<StoreResult<_>>()?;
 
         let mut client = self.client().await?;
         let transaction = client
@@ -351,61 +295,129 @@ impl Store for PostgresStore {
             .context("failed to begin a write transaction")
             .map_err(StoreError::Backend)?;
 
-        let existing = transaction
-            .query_opt(
-                &format!("SELECT 1 FROM {DOCUMENTS_TABLE} WHERE name = $1 FOR UPDATE"),
-                &[&name],
-            )
-            .await
-            .with_context(|| format!("failed to lock document {name}"))
-            .map_err(StoreError::Backend)?;
+        // Lock every document in the batch up front, in sorted order.
+        //
+        // An advisory lock rather than `SELECT … FOR UPDATE` because a row lock
+        // on a row that does not exist locks nothing: two concurrent
+        // `create()` calls would both read "absent", both pass their
+        // `exists: false` precondition, and the second would overwrite the
+        // first instead of reporting ALREADY_EXISTS. Sorting the names makes
+        // two overlapping batches take their locks in the same order, so they
+        // queue instead of deadlocking.
+        let mut locked: Vec<&str> = writes.iter().map(|write| write.mutation.name()).collect();
+        locked.sort_unstable();
+        locked.dedup();
+        for name in locked {
+            transaction
+                .execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&name])
+                .await
+                .with_context(|| format!("failed to lock document {name}"))
+                .map_err(StoreError::Backend)?;
+        }
 
-        let outcome = match existing {
-            Some(_) => {
-                // `||` is a shallow merge of top-level keys, which is exactly
-                // the documented semantics of an update mask: named fields are
-                // replaced, everything else is left alone.
-                transaction
-                    .execute(
-                        &format!(
-                            "UPDATE {DOCUMENTS_TABLE}
-                                SET fields = fields || $2,
-                                    update_time_seconds = $3,
-                                    update_time_nanos = $4
-                              WHERE name = $1"
-                        ),
-                        &[&name, &payload, &now.seconds, &now.nanos],
-                    )
-                    .await
-                    .with_context(|| format!("failed to merge into document {name}"))
-                    .map_err(StoreError::Backend)?;
-                WriteOutcome::Updated
-            }
-            None => {
-                insert_document(&transaction, name, &key, &payload, &now).await?;
-                WriteOutcome::Created
-            }
-        };
+        let mut outcomes = Vec::with_capacity(writes.len());
+        for (write, key) in writes.into_iter().zip(keys.iter()) {
+            let name = write.mutation.name().to_string();
+            // Reads inside the transaction, so a second write to the same
+            // document in this batch sees the first one's effect.
+            let stored = read_document(&transaction, &name).await?;
+            store::check_precondition(&name, stored.as_ref(), write.precondition.as_ref())?;
 
+            let (next, outcome) = store::mutate(write.mutation, stored, &now);
+            match next {
+                Some(document) => upsert_document(&transaction, &name, key, &document).await?,
+                None => {
+                    transaction
+                        .execute(
+                            &format!("DELETE FROM {DOCUMENTS_TABLE} WHERE name = $1"),
+                            &[&name],
+                        )
+                        .await
+                        .with_context(|| format!("failed to delete document {name}"))
+                        .map_err(StoreError::Backend)?;
+                }
+            }
+            outcomes.push(outcome);
+        }
+
+        // Returning early anywhere above drops the transaction, which rolls it
+        // back — that is what makes the batch atomic.
         transaction
             .commit()
             .await
-            .with_context(|| format!("failed to commit the merge into {name}"))
+            .context("failed to commit the write batch")
             .map_err(StoreError::Backend)?;
-        Ok(outcome)
+        Ok(outcomes)
     }
 
-    async fn delete(&self, name: &str) -> StoreResult<bool> {
+    async fn scan_collection(
+        &self,
+        parent: &str,
+        collection_id: &str,
+    ) -> StoreResult<Vec<Document>> {
         let client = self.client().await?;
-        let deleted = client
-            .execute(
-                &format!("DELETE FROM {DOCUMENTS_TABLE} WHERE name = $1"),
-                &[&name],
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT name, fields, create_time_seconds, create_time_nanos,
+                            update_time_seconds, update_time_nanos
+                       FROM {DOCUMENTS_TABLE}
+                      WHERE parent = $1 AND collection_id = $2"
+                ),
+                &[&parent, &collection_id],
             )
             .await
-            .with_context(|| format!("failed to delete document {name}"))
+            .with_context(|| format!("failed to read collection {parent}/{collection_id}"))
             .map_err(StoreError::Backend)?;
-        Ok(deleted > 0)
+
+        let mut documents = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let name: String = row.try_get("name").map_err(|error| StoreError::Corrupt {
+                name: format!("{parent}/{collection_id}"),
+                reason: format!("name column is not readable: {error}"),
+            })?;
+            documents.push(row_to_document(&name, row)?);
+        }
+
+        // Sorted here rather than in SQL: the contract is UTF-8 byte order,
+        // which is what `MemoryStore` and Firestore's `__name__` ordering use,
+        // and `ORDER BY` would instead use the database's collation.
+        documents.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+        Ok(documents)
+    }
+
+    async fn collection_ids(&self, parent: &str) -> StoreResult<Vec<String>> {
+        let prefix = format!("{parent}/");
+        // 1-based, and one past the prefix: the first segment of what is left.
+        let first_segment_at = prefix.len() as i32 + 1;
+
+        let client = self.client().await?;
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT DISTINCT split_part(substr(name, $2), '/', 1) AS collection_id
+                       FROM {DOCUMENTS_TABLE}
+                      WHERE starts_with(name, $1)"
+                ),
+                &[&prefix, &first_segment_at],
+            )
+            .await
+            .with_context(|| format!("failed to list the collections under {parent}"))
+            .map_err(StoreError::Backend)?;
+
+        let mut ids: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                row.try_get::<_, String>("collection_id")
+                    .map_err(|error| StoreError::Corrupt {
+                        name: parent.to_string(),
+                        reason: format!("collection id is not readable: {error}"),
+                    })
+            })
+            .collect::<StoreResult<_>>()?;
+        ids.retain(|id| !id.is_empty());
+        ids.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        Ok(ids)
     }
 
     async fn count(&self) -> StoreResult<usize> {
@@ -420,27 +432,57 @@ impl Store for PostgresStore {
     }
 }
 
-/// Insert a brand-new document row. `create_time` and `update_time` both start
-/// at `now`, which is what Firestore reports for a freshly created document.
-async fn insert_document(
+/// Read one document inside a transaction.
+async fn read_document(
+    transaction: &tokio_postgres::Transaction<'_>,
+    name: &str,
+) -> StoreResult<Option<Document>> {
+    let row = transaction
+        .query_opt(
+            &format!(
+                "SELECT fields, create_time_seconds, create_time_nanos,
+                        update_time_seconds, update_time_nanos
+                   FROM {DOCUMENTS_TABLE} WHERE name = $1"
+            ),
+            &[&name],
+        )
+        .await
+        .with_context(|| format!("failed to read document {name}"))
+        .map_err(StoreError::Backend)?;
+
+    row.as_ref().map(|row| row_to_document(name, row)).transpose()
+}
+
+/// Write `document` as the complete current state of its row.
+///
+/// The caller has already resolved what the row should contain — including
+/// which `create_time` survives and which fields a merge keeps — in
+/// `store::mutate`, so there is one definition of those semantics rather than
+/// one per backend. `create_time` is deliberately left alone on conflict: it
+/// only changes when a document is deleted and recreated, which is a delete
+/// followed by an insert, not an update.
+async fn upsert_document(
     transaction: &tokio_postgres::Transaction<'_>,
     name: &str,
     key: &DocumentKey,
-    payload: &serde_json::Value,
-    now: &Timestamp,
+    document: &Document,
 ) -> StoreResult<()> {
-    // A new document's create_time and update_time are the same instant, so
-    // $8/$9 are bound once and referenced twice.
-    let params: [&(dyn ToSql + Sync); 9] = [
+    let payload = encode_fields(name, document)?;
+    let create_time = document.create_time.clone().unwrap_or_default();
+    let update_time = document.update_time.clone().unwrap_or_default();
+
+    let params: [&(dyn ToSql + Sync); 11] = [
         &name,
         &key.project_id,
         &key.database_id,
         &key.parent,
         &key.collection_id,
         &key.document_id,
-        payload,
-        &now.seconds,
-        &now.nanos,
+        &payload,
+        &create_time.seconds,
+        &create_time.nanos,
+        &update_time.seconds,
+        &update_time.nanos,
     ];
 
     transaction
@@ -450,12 +492,16 @@ async fn insert_document(
                      (name, project_id, database_id, parent, collection_id, document_id,
                       fields, create_time_seconds, create_time_nanos,
                       update_time_seconds, update_time_nanos)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $8, $9)"
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 ON CONFLICT (name) DO UPDATE
+                     SET fields = EXCLUDED.fields,
+                         update_time_seconds = EXCLUDED.update_time_seconds,
+                         update_time_nanos = EXCLUDED.update_time_nanos"
             ),
             &params,
         )
         .await
-        .with_context(|| format!("failed to insert document {name}"))
+        .with_context(|| format!("failed to write document {name}"))
         .map_err(StoreError::Backend)?;
     Ok(())
 }
