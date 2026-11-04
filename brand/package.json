@@ -8,6 +8,8 @@
     "smoke": "node scripts/smoke.mjs",
     "explore": "node scripts/explore.mjs",
     "tune": "node scripts/tune.mjs",
+    "fire": "node scripts/fire.mjs",
+    "preview": "node scripts/preview.mjs",
     "check": "npm run smoke && npm run contrast && npm run build"
   },
   "type": "module",

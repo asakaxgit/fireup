@@ -1,8 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Fireup">
-  <!-- Fireup mark. One row has come off the stem and moved on: the stack on the
-       left is the store, the ember row is the one that has been lifted out.
-       Geometry is on a 64-unit grid; every edge is a multiple of 2. -->
-  <rect x="12" y="9"  width="12" height="46" fill="#FFFFFF"/>
-  <rect x="12" y="9"  width="36" height="12" fill="#FFFFFF"/>
-  <rect x="30" y="27" width="22" height="12" fill="#FF5A2B"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Fireup"
+     data-cap-top="18" data-cap-bottom="60">
+  <!-- Fireup mark: an F whose top bar is alight. The bar runs out from the stem
+       and its far end rises into a tongue — the fire is a terminal of the
+       letterform, not an object balanced on top of it.
+
+       Why it is drawn this way, from brand/scripts/fire.mjs:
+         * A flame on the *middle* arm curls back under the top bar and encloses
+           a bowl. Rendered at three tip heights, all three read as a P.
+         * A free-standing flame silhouette rendered as a water droplet, and is
+           also the shape Firebase's and Tinder's marks already occupy.
+         * The tongue rises before it leans. Flaring it sideways first makes the
+           mark right-heavy and turns the flame into a swoosh.
+         * The tip leans *right*, with the apex outboard of the bulge below it.
+           Leaning it left gives the tongue a hook, and at app-icon size the
+           mark stops being fire and becomes a horn.
+       Putting the fire on the top bar keeps the counter open on the right, so
+       the mark is still an F at 16px, which is where it is used most.
+
+       Geometry on a 64-unit grid. Bar weight 12 everywhere; the counter is 6,
+       half a bar. data-cap-top/bottom mark the F's own cap line — the flame
+       overshoots above it, the way a diacritic does, and the lockup aligns to
+       the cap rather than to the flame. -->
+  <rect x="12" y="18" width="12" height="42" fill="#FFFFFF"/>
+  <rect x="12" y="36" width="24" height="12" fill="#FFFFFF"/>
+  <path d="M12 18 H38 C44 18 47 11 50 2 C54 13 51 30 38 30 H12 Z" fill="#FF5A2B"/>
 </svg>

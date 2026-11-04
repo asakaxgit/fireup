@@ -1,10 +1,10 @@
 # Fireup brand guide
 
-**Status: proposed, changes requested.** The mark, wordmark and palette in this
-directory are a first direction for SAK-173. They are in use on the marketing
-site in `site/`, but they are **not approved** — the CEO has asked for changes
-to the identity, and those are still to be specified. Identity direction is the
-CEO's sign-off.
+**Status: proposed, redrawn to the CEO's note, still not approved.** The mark in
+this directory is round 3 for SAK-173: the CEO reviewed round 2 and asked for
+fire, and for the wordmark to stay at the lighter weight. Both are done. It is
+in use on the marketing site in `site/`, but **approval has not been given** —
+identity direction is the CEO's sign-off and it is still open.
 
 This directory is in the public repository so the direction can be reviewed in a
 pull request. That is not approval. Until the mark is signed off, do not use it
@@ -15,24 +15,59 @@ external announcement, no profile or avatar.
 
 ## The mark
 
-An **F** whose middle arm has come off the stem and moved to the right.
+An **F** whose top bar is alight. The bar runs out from the stem and its far end
+rises into a tongue: the fire is a terminal of the letterform, not an object
+balanced on top of it. Fireup is what you run to bring a local stack up, so the
+mark is the moment it catches.
 
-The stack on the left is the store. The ember row is the one that has been
-lifted out and moved somewhere else — which is the whole product in one glyph,
-whether that is an export landing in PostgreSQL or a document being served from
-a local store. It is a monogram, so it says the name at sizes where a picture
-cannot.
+It is a monogram first. That is what lets it still say the name at 16px, where a
+picture cannot.
+
+### How it got here
+
+The direction is the CEO's: an earlier mark — an F with its middle arm lifted
+clear of the stem — was reviewed and the note back was *"use fire"*. Three fire
+concepts were drawn and rendered before this one was cut, and the rendering
+changed the answer twice. All of it is in `scripts/fire.mjs` and `fire/`:
+
+- **Fire built from stacked rows** reads as a stepped pyramid, not as fire, and
+  at 16px the 6-unit bars land on 1.5 pixels and smear to grey.
+- **A free-standing flame on a plinth** renders as a **water droplet**, at every
+  size, on both backgrounds.
+- **A flame on the F's middle arm** curls back under the top bar and encloses a
+  bowl, so the mark reads as a **P**. Three tip heights, all three a P. That is
+  why the fire ended up on the top bar: an F's counter has to stay open on the
+  right.
+- **The tongue rises before it leans.** Flaring it sideways first makes the mark
+  right-heavy and turns the flame into a swoosh.
+
+### The trademark position, stated plainly
+
+A flame is the single most confusable shape available to a Firebase-compatible
+tool, and this was flagged before the direction was chosen:
+
+- Firebase's own mark **is a flame** — three faceted segments on a
+  red-orange-yellow gradient — and Google's brand guidelines forbid marks that
+  could be confused with it.
+- Tinder enforces a trademark over a rounded flame outline and has sent
+  infringement notices over flame icons in software.
+
+The CEO directed fire with that on the table, so the drawing answers the risk
+instead of the risk vetoing the drawing. This mark is **not** a flame
+silhouette: there is no faceted construction, no gradient, no free-floating
+flame. The fire is a stroke terminal of a letter F, in a single flat colour, and
+the palette is deliberately not Firebase's amber.
+
+That reduces the risk. **It does not clear it.** Clearance is a legal opinion
+and is not mine to give — see the open flags at the bottom of this file.
 
 ### What it deliberately is not
 
-- **Not a flame.** Fireup is a Firebase-adjacent tool, so a flame would read as
-  derived from Firebase's own mark; separately, flame logos in software are
-  actively enforced trademarks (Tinder has sent infringement notices over a
-  flame icon). Nothing here is worth that.
-- **Not a power symbol.** An earlier direction — a rounded square with a bar
+- **Not a power symbol.** An early direction — a rounded square with a bar
   breaking out of the top — rendered as the IEC 5009 power glyph. It read as a
   button rather than a brand, and a universal standard symbol cannot be owned.
   It is kept in `scripts/explore.mjs` with that note.
+- **Not Firebase's flame, and not Tinder's.** See above.
 
 ## Files
 
@@ -44,8 +79,10 @@ cannot.
 | `logo/favicon-32.svg` | **Master.** Its own drawing, cut to a 32×32 pixel grid. |
 | `tokens/brand.json` | **Master.** Colour, type scale, spacing, radii. |
 | `tokens/brand.css` | Generated. CSS custom properties, same values. |
-| `explore/` | The rendered directions that were considered, including the rejected ones. |
-| `tune/` | One sheet per tuning axis, for choosing between variants of the chosen direction. |
+| `explore/` | Round 1–2. The rendered directions that were considered, including the rejected ones. |
+| `tune/` | One sheet per tuning axis of the round-2 mark, for choosing between variants by pointing at one. |
+| `fire/` | Round 3. The fire concepts, where the fire goes, and the shape of the tongue. |
+| `preview/` | What actually ships, at the sizes it ships at. Rendered from `site/assets/`, not from the masters. |
 | `../site/assets/` | Generated. Every variant, lockup, favicon, app icon and the social card. |
 
 Masters are hand-authored and are the only files to edit. Everything else is
@@ -68,28 +105,34 @@ npm run check      # smoke test the pipeline, verify contrast, rebuild all asset
 - `npm run contrast` computes every palette pair the brand uses and fails if one
   misses its WCAG AA threshold. Nothing is eyeballed.
 - `npm run build` regenerates `tokens/brand.css` and all of `site/assets/`.
-- `npm run explore` re-renders the exploration sheets.
+- `npm run explore` re-renders the round 1–2 exploration sheets.
 - `npm run tune` re-renders the four tuning sheets in `tune/`.
+- `npm run fire` re-renders the round 3 sheets in `fire/`.
+- `npm run preview` re-renders `preview/` from the built assets.
 
-`explore` and `tune` are deliberately outside `check`: they are the record of a
-decision, not shipped assets, and they should only change when the question
-being asked changes.
+`explore`, `tune` and `fire` are deliberately outside `check`: they are the
+record of a decision, not shipped assets, and they should only change when the
+question being asked changes. `preview` is outside it because looking at the
+result is a human step, not a gate.
 
-## Choosing between variants
+## Deciding by looking, not by arguing
 
-`npm run tune` renders the four axes that can move without redrawing the
-direction — the ember colour, the gap between the lifted arm and the stem, the
-height the arm sits at, and the wordmark weight. Each sheet puts three options
-side by side at the sizes they will really be used at, and for the mark it also
-magnifies the **actual 16px raster** 8x with no resampling, so the decision is
-made on the pixels that land rather than on a smooth preview of them.
+Every sheet puts three options side by side at the sizes they will really be
+used at, and for the mark it also magnifies the **actual 16px raster** with no
+resampling — rendered at 16, read back out of the renderer, redrawn as one
+square per pixel. A magnified preview that disagrees with the real output is
+worse than no preview.
 
-Two of those sheets changed an opinion, which is the point of rendering them:
+That has now reversed a stated opinion five times, which is the whole point:
 
-- At a 4-unit counter the arm **fuses with the top bar at 16px** — the mark
-  stops being an F at the size it is used at most.
+- At a 4-unit counter the arm **fused with the top bar at 16px** — the mark
+  stopped being an F at the size it is used at most.
 - A heavier wordmark is *worse* small, not better: at stroke 11 the `e`'s
   aperture and the `p`'s bowl close up by 96px wide, the stated lockup minimum.
+  Stroke 8 is the most legible there, and is what ships.
+- Fire built from rows is a **pyramid**; a flame on a plinth is a **droplet**; a
+  flame on the F's middle arm is a **P**. All three were written up as good
+  ideas before they were rendered.
 
 ## Clear space and minimum sizes
 
@@ -111,10 +154,16 @@ Each of these breaks something specific, not just taste:
 - **Do not** put the dark variant on a light background or vice versa. The
   accent drops to 3.1:1 the wrong way round.
 - **Do not** scale the 64-unit mark below 32px. Use the size-specific drawings.
-- **Do not** stretch, shear, rotate, outline, or add a gradient, shadow or
-  bevel. The mark is three rectangles; there is nothing to decorate.
-- **Do not** close the gap between the stem and the ember row, or re-attach the
-  row to the stem. That gap is the idea.
+- **Do not** add a gradient to the flame, or facet it into segments. Both are
+  how Firebase's mark is built, and the single flat colour is what keeps this
+  one distinguishable from it. This is the one misuse rule with a legal edge.
+- **Do not** stretch, shear, rotate, outline, or add a shadow or bevel. The mark
+  is two rectangles and one path; there is nothing to decorate.
+- **Do not** detach the flame from the top bar, or use it on its own as an icon.
+  Separated, it is a generic flame silhouette and loses both the idea and the
+  distance from the marks named above.
+- **Do not** let the middle arm grow to the width of the top bar. The counter
+  closing on the right is what turned earlier drawings into a P.
 - **Do not** set the wordmark in a font. It is drawn. Typing "fireup" in Inter
   is not the wordmark.
 - **Do not** place the mark on a busy photograph. Use the mono variant on a flat
@@ -168,8 +217,14 @@ The scale is a 1.2 (minor third) ratio on a 16px base; see `size` in
    black-and-yellow. I am flagging the name, not clearing it — trademark
    clearance is not mine to give and this needs a real search before the name
    goes on anything public.
-2. **No licence file.** The repository has no `LICENSE`, so the site does not
+2. **Flame prior art.** The mark is now fire, by direction. Firebase's own mark
+   is a flame and we are a Firebase-compatible tool; Tinder separately enforces
+   a flame-icon trademark. The drawing is built to sit as far from both as a
+   flame can — letterform terminal, flat colour, no facets, no amber — and that
+   is risk reduction, not clearance. A real search is warranted before the mark
+   goes on anything published, and I am not qualified to give the opinion.
+3. **No licence file.** The repository has no `LICENSE`, so the site does not
    state one. It should before the site is published anywhere.
-3. **Sign-off.** The mark, wordmark and palette need approval before they are
+4. **Sign-off.** The mark, wordmark and palette need approval before they are
    locked. After that, changes come back through the CEO rather than being
    edited here.

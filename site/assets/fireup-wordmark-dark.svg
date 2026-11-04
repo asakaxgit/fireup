@@ -2,10 +2,10 @@
   <!-- MASTER. Hand-drawn geometric monoline wordmark. Drawn rather than set, so
        the identity carries no webfont licence and does not depend on a font
        file being present to render. Construction: baseline y=50, x-height top
-       y=20, ascender y=4, descender y=66, stroke 9, bowl radius 15.
+       y=20, ascender y=4, descender y=66, stroke 8, bowl radius 15.
        Colour variants and lockups are generated from this file and
        mark.svg — see brand/scripts/build.mjs. -->
-  <g fill="none" stroke="#FFFFFF" stroke-width="9" stroke-linecap="butt" stroke-linejoin="round">
+  <g fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="butt" stroke-linejoin="round">
     <!-- f -->
     <path d="M12 50 V13 A8 8 0 0 1 20 5"/>
     <path d="M4 20 H23"/>
@@ -25,5 +25,5 @@
     <path d="M166 20 H181 A15 15 0 0 1 181 50 H166"/>
   </g>
   <!-- dot of the i, drawn solid so it keeps its weight at small sizes -->
-  <circle cx="34" cy="9" r="4.5" fill="#FFFFFF"/>
+  <circle cx="34" cy="9" r="4" fill="#FFFFFF"/>
 </svg>

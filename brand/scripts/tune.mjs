@@ -8,8 +8,7 @@
 // Each sheet shows every option at the sizes it will really be used at, and
 // for the mark it also shows the actual 16px raster magnified 8x with no
 // resampling — the pixels that landed, not a smooth preview of them.
-import { Resvg } from '@resvg/resvg-js'
-import { renderPng } from './render.mjs'
+import { renderPng, pixelMap } from './render.mjs'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -53,28 +52,8 @@ const wordmark = ({ weight = 9, fg = PAPER } = {}) => `
   </g>
   <circle cx="34" cy="9" r="${(4.5 * weight) / 9}" fill="${fg}"/>`
 
-// --- the actual 16px raster, re-expressed as one rect per pixel -------------
-
-// Magnifying a PNG needs an image decoder and a resampler. Drawing the decoded
-// pixels back out as unit squares needs neither, and it cannot lie about what
-// the renderer produced: every square is one real pixel at its real colour.
-const pixelMap = (svgSource, size, scale) => {
-  const { pixels } = new Resvg(svgSource, { fitTo: { mode: 'width', value: size } }).render()
-  const hex = (n) => n.toString(16).padStart(2, '0')
-  const squares = []
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const at = (y * size + x) * 4
-      const [r, g, b, a] = [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
-      if (a === 0) continue
-      squares.push(
-        `<rect x="${x * scale}" y="${y * scale}" width="${scale}" height="${scale}" ` +
-          `fill="#${hex(r)}${hex(g)}${hex(b)}"${a === 255 ? '' : ` fill-opacity="${(a / 255).toFixed(3)}"`}/>`,
-      )
-    }
-  }
-  return squares.join('')
-}
+// The 16px magnified raster comes from `pixelMap` in render.mjs — real pixels,
+// no decoder and no resampler, so the blow-up cannot disagree with what ships.
 
 // --- the axes ---------------------------------------------------------------
 
