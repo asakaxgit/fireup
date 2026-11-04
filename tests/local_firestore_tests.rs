@@ -21,6 +21,7 @@ use fireup::protos::google::firestore::v1::{
     ListDocumentsResponse, PartitionQueryRequest, Precondition, RollbackRequest,
     RunAggregationQueryRequest, RunQueryRequest, StructuredQuery, Value, Write,
 };
+use fireup::protos::google::r#type::LatLng;
 use tonic::transport::Channel;
 use tonic::Code;
 
@@ -1160,6 +1161,112 @@ async fn one_port_serves_both_grpc_and_the_http_surface() {
 
     let (status, _) = http_get(server.addr, "/not-a-route").await;
     assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+// ---------------------------------------------------------------------------
+// Seeding a real export
+// ---------------------------------------------------------------------------
+
+/// `fireup local seed` on the repo's managed-export fixture, read back over the
+/// same gRPC path an SDK uses.
+///
+/// The four Datastore types JSON cannot express arrive from the shared export
+/// parser as tagged maps. The point of this test is that an SDK sees the real
+/// value types and not those maps, because a client cannot be asked to know
+/// about `__fireup_type__`.
+#[tokio::test]
+async fn a_seeded_export_reads_back_as_real_firestore_value_types() {
+    let (server, mut client) = start().await;
+
+    let export = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/export-onestore");
+    let report = local::seed::seed_from_export(&server.store, ROOT, &export)
+        .await
+        .expect("the fixture export seeds");
+    assert!(report.is_complete(), "{:?}", report.skipped);
+    assert_eq!(report.parsed, 12, "{}", report.summary());
+
+    // Grace is the one fixture user carrying all four types at once.
+    let grace = client
+        .get_document(GetDocumentRequest {
+            name: format!("{ROOT}/Users/grace"),
+            ..Default::default()
+        })
+        .await
+        .expect("a seeded document is readable")
+        .into_inner();
+
+    // A `gd:when` property, not a string that happens to look like a date.
+    assert_eq!(
+        grace.fields["created_at"].value_type,
+        Some(ValueType::TimestampValue(prost_types::Timestamp {
+            seconds: 1_773_480_413,
+            nanos: 589_793_000,
+        })),
+        "created_at must come back as a timestamp with its microseconds intact"
+    );
+
+    // A blob, byte for byte — the fixture's avatar is deliberately not UTF-8.
+    assert_eq!(
+        grace.fields["avatar"].value_type,
+        Some(ValueType::BytesValue((0u8..64).collect())),
+        "avatar must come back as bytes"
+    );
+
+    assert_eq!(
+        grace.fields["location"].value_type,
+        Some(ValueType::GeoPointValue(LatLng {
+            latitude: 40.7128,
+            longitude: -74.0060,
+        })),
+        "location must come back as a geo point"
+    );
+
+    // A key reference becomes a full resource name, which is what an SDK turns
+    // into a DocumentReference — not the `Users/ada` key path the tag carried.
+    assert_eq!(
+        grace.fields["manager"].value_type,
+        Some(ValueType::ReferenceValue(format!("{ROOT}/Users/ada"))),
+        "manager must come back as a reference"
+    );
+
+    // Nothing tagged is left behind anywhere in the seeded store.
+    for document_id in ["ada", "grace", "linus", "unicode-ユーザー"] {
+        let document = client
+            .get_document(GetDocumentRequest {
+                name: format!("{ROOT}/Users/{document_id}"),
+                ..Default::default()
+            })
+            .await
+            .expect("a seeded document is readable")
+            .into_inner();
+        for (field, value) in &document.fields {
+            if let Some(ValueType::MapValue(map)) = &value.value_type {
+                assert!(
+                    !map.fields.contains_key("__fireup_type__"),
+                    "{document_id}.{field} still holds a tagged map: {map:?}"
+                );
+            }
+        }
+    }
+
+    // An ordinary map is still a map: restoring the tagged ones must not have
+    // turned every object into something else.
+    let Some(ValueType::MapValue(address)) = &grace.fields["address"].value_type else {
+        panic!("address must stay a map: {:?}", grace.fields["address"]);
+    };
+    assert_eq!(address.fields["city"], string_value("New York"));
+
+    // The reference resolves: the document it names was seeded too.
+    client
+        .get_document(GetDocumentRequest {
+            name: format!("{ROOT}/Users/ada"),
+            ..Default::default()
+        })
+        .await
+        .expect("the referenced document exists");
 
     server.shutdown().await.expect("clean shutdown");
 }
