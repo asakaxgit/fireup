@@ -392,6 +392,35 @@ impl Store for PostgresStore {
         Ok(documents)
     }
 
+    async fn scan_kind(&self, documents_root: &str, kind: &str) -> StoreResult<Vec<Document>> {
+        let prefix = format!("{documents_root}/");
+        let client = self.client().await?;
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT name, fields, create_time_seconds, create_time_nanos,
+                            update_time_seconds, update_time_nanos
+                       FROM {DOCUMENTS_TABLE}
+                      WHERE collection_id = $1 AND starts_with(name, $2)"
+                ),
+                &[&kind, &prefix],
+            )
+            .await
+            .with_context(|| format!("failed to scan kind {kind} under {documents_root}"))
+            .map_err(StoreError::Backend)?;
+
+        let mut documents = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let name: String = row.try_get("name").map_err(|error| StoreError::Corrupt {
+                name: format!("{documents_root}/{kind}"),
+                reason: format!("name column is not readable: {error}"),
+            })?;
+            documents.push(row_to_document(&name, row)?);
+        }
+        documents.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+        Ok(documents)
+    }
+
     async fn child_segments(&self, parent: &str) -> StoreResult<Vec<String>> {
         let prefix = format!("{parent}/");
         // 1-based, and one past the prefix: the first segment of what is left.

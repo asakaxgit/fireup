@@ -346,6 +346,14 @@ pub trait Store: Send + Sync + 'static {
         collection_id: &str,
     ) -> StoreResult<Vec<Document>>;
 
+    /// Every document whose collection id is `kind` anywhere under
+    /// `documents_root`, ordered by resource name.
+    ///
+    /// Datastore kind queries return entities of that kind regardless of
+    /// ancestry; Firestore collection reads do not. This is the store shape
+    /// that makes the two APIs share one table without lying about either.
+    async fn scan_kind(&self, documents_root: &str, kind: &str) -> StoreResult<Vec<Document>>;
+
     /// The distinct first path segments of every document name beneath
     /// `prefix`, sorted in UTF-8 byte order.
     ///
@@ -536,6 +544,30 @@ impl Store for MemoryStore {
             .filter(|(name, _)| !name[prefix.len()..].contains('/'))
             .map(|(_, document)| document.clone())
             .collect())
+    }
+
+    async fn scan_kind(&self, documents_root: &str, kind: &str) -> StoreResult<Vec<Document>> {
+        let prefix = format!("{documents_root}/");
+        let documents = self.documents.read().expect("document store lock poisoned");
+
+        let mut found: Vec<Document> = documents
+            .range(prefix.clone()..)
+            .take_while(|(name, _)| name.starts_with(&prefix))
+            .filter_map(|(name, document)| {
+                // Collection id is the second-to-last path segment after the
+                // documents root — the same rule `parse_document_name` uses.
+                let rest = name.strip_prefix(&prefix)?;
+                let segments: Vec<&str> = rest.split('/').collect();
+                if segments.len() >= 2 && segments.len() % 2 == 0 && segments[segments.len() - 2] == kind
+                {
+                    Some(document.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        found.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+        Ok(found)
     }
 
     async fn child_segments(&self, parent: &str) -> StoreResult<Vec<String>> {

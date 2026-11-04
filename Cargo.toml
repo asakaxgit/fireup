@@ -104,6 +104,10 @@ name = "local_firestore_tests"
 path = "tests/local_firestore_tests.rs"
 
 [[test]]
+name = "local_datastore_tests"
+path = "tests/local_datastore_tests.rs"
+
+[[test]]
 name = "local_postgres_store_tests"
 path = "tests/local_postgres_store_tests.rs"
 

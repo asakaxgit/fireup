@@ -1,0 +1,13 @@
+{
+  "name": "fireup-local-datastore-smoke",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Smoke test that drives `fireup local` with Google's official Datastore client library.",
+  "scripts": {
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "@google-cloud/datastore": "^9.2.1"
+  }
+}

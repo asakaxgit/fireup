@@ -1,9 +1,10 @@
-//! `fireup local` — a local Firestore-compatible data plane.
+//! `fireup local` — a local Firestore-, Datastore-, and Auth-compatible data plane.
 //!
-//! Fireup serves the **published** `google.firestore.v1` gRPC contract and a
-//! subset of the **published** Identity Toolkit REST contract on a single port,
-//! so official client SDKs can point at it with the documented
-//! `FIRESTORE_EMULATOR_HOST` and `FIREBASE_AUTH_EMULATOR_HOST` environment
+//! Fireup serves the **published** `google.firestore.v1` and
+//! `google.datastore.v1` gRPC contracts plus a subset of the **published**
+//! Identity Toolkit REST contract on a single port, so official client SDKs can
+//! point at it with the documented `FIRESTORE_EMULATOR_HOST`,
+//! `DATASTORE_EMULATOR_HOST`, and `FIREBASE_AUTH_EMULATOR_HOST` environment
 //! variables. The same port answers HTTP/1.1 `GET /` (service discovery) and
 //! `GET /health`.
 //!
@@ -21,12 +22,17 @@
 //!   transforms, and aggregation queries are not served; those RPCs answer
 //!   `UNIMPLEMENTED` with a message saying so, and `docs/local/README.md` has
 //!   the full fidelity matrix.
+//! * **Datastore** — Lookup/RunQuery/Commit/BeginTransaction/AllocateIds on the
+//!   same store Firestore uses (kinds map to collections). GQL, aggregations,
+//!   namespaces, and property transforms answer `UNIMPLEMENTED`.
 //! * **Auth** — email/password and anonymous sign-in, emulator-style ID tokens,
 //!   token refresh, and admin account CRUD. See [`auth`] for what is and is not
 //!   served.
 
 pub mod auth;
 pub mod config;
+pub mod datastore;
+pub mod entity_map;
 pub mod firestore;
 pub mod http;
 pub mod names;
@@ -45,10 +51,12 @@ use tracing::{debug, info, warn};
 
 pub use auth::{AuthApi, MemoryUserStore, PostgresUserStore, SharedUserStore, UserStore};
 pub use config::{LocalConfig, Service, DEFAULT_PORT};
+pub use datastore::DatastoreApi;
 pub use firestore::FirestoreApi;
 pub use postgres_store::PostgresStore;
 pub use store::{MemoryStore, SharedStore, Store};
 
+use crate::protos::google::datastore::v1::datastore_server::DatastoreServer;
 use crate::protos::google::firestore::v1::firestore_server::FirestoreServer;
 
 /// First bytes of the HTTP/2 connection preface (RFC 9113 §3.4). gRPC clients
@@ -170,18 +178,29 @@ pub async fn spawn_with_stores(
         tokio::sync::mpsc::channel::<Result<TcpStream, std::io::Error>>(32);
 
     let grpc = {
-        let api = FirestoreApi::new(store.clone());
+        let firestore_api = FirestoreApi::new(store.clone());
+        let datastore_api = DatastoreApi::new(
+            store.clone(),
+            config.project_id.clone(),
+            config.database_id.clone(),
+        );
         let mut shutdown_rx = shutdown_rx.clone();
         let serve_firestore = config.enables(Service::Firestore);
+        let serve_datastore = config.enables(Service::Datastore);
 
         tokio::spawn(async move {
             let mut builder = tonic::transport::Server::builder();
             // A disabled service is not routed at all, so a client calling it
             // gets `UNIMPLEMENTED` from tonic rather than a served response.
             let router = if serve_firestore {
-                builder.add_service(FirestoreServer::new(api))
+                builder.add_service(FirestoreServer::new(firestore_api))
             } else {
                 builder.add_optional_service(None::<FirestoreServer<FirestoreApi>>)
+            };
+            let router = if serve_datastore {
+                router.add_service(DatastoreServer::new(datastore_api))
+            } else {
+                router.add_optional_service(None::<DatastoreServer<DatastoreApi>>)
             };
 
             router

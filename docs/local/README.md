@@ -1,16 +1,14 @@
-# `fireup local` — local Firestore + Firebase Auth data plane
+# `fireup local` — local Firestore, Datastore, and Firebase Auth data plane
 
-Fireup serves two of Google's **published** API contracts on one local port:
+Fireup serves Google's **published** `google.firestore.v1` and
+`google.datastore.v1` gRPC APIs plus a subset of the **published** Identity
+Toolkit REST API on one local port. Official client SDKs can point at them with
+`FIRESTORE_EMULATOR_HOST`, `DATASTORE_EMULATOR_HOST`, and
+`FIREBASE_AUTH_EMULATOR_HOST`. Firestore and Datastore share the same in-memory
+or PostgreSQL document store (kinds map to collections). Auth accounts live in a
+separate store. The [fidelity matrix](#fidelity-matrix) says exactly what is
+served and what is refused.
 
-- `google.firestore.v1` over gRPC, for official Firestore client SDKs
-  (`FIRESTORE_EMULATOR_HOST`) — document CRUD, `StructuredQuery` reads,
-  collection listings, and transactions;
-- a subset of the Identity Toolkit REST API, for official Firebase Auth client
-  and Admin SDKs (`FIREBASE_AUTH_EMULATOR_HOST`).
-
-Both are reached through the documented emulator-host environment variables, so
-pointing an app at Fireup needs no code change. The [fidelity
-matrix](#fidelity-matrix) says exactly what is served and what is refused.
 
 This is an independent implementation of public API contracts. It is **not** the
 Firebase Emulator Suite, is **not** affiliated with Google, and contains no code
@@ -34,6 +32,7 @@ Then, in your app:
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=127.0.0.1:4589
+export DATASTORE_EMULATOR_HOST=127.0.0.1:4589
 export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:4589   # same port
 ```
 
@@ -48,12 +47,13 @@ will talk plaintext to Fireup instead of production.
 | `--port` | `4589` | The one port. gRPC and HTTP share it. |
 | `--postgres-url` | *(unset)* | Store documents **and accounts** in PostgreSQL instead of memory. |
 | `--project-id` | `fireup-local` | Project the data plane answers for. |
-| `--database-id` | `(default)` | Firestore's default database is literally `(default)`. |
-| `--enable` | `firestore`, `auth` | Services to serve. Repeatable; closed set, so a typo is an error. |
+| `--database-id` | `(default)` | Firestore's default database is literally `(default)`. Datastore clients use `""` for the same database. |
+| `--enable` | `firestore`, `datastore`, `auth` | Services to serve. Repeatable; closed set, so a typo is an error. |
 | `--max-connections` | `5` | PostgreSQL pool size. |
 
-Both services are on by default. `--enable firestore` alone serves no auth, and
-a request to a disabled service says so rather than answering a bare `404`.
+All three services are on by default. `--enable firestore` alone serves neither
+Datastore nor Auth, and a request to a disabled service says so rather than
+answering a bare `404`.
 
 An unreachable `--postgres-url` is a **hard error**, not a fallback to memory:
 silently serving an empty in-memory store would be indistinguishable from data
@@ -218,6 +218,22 @@ wrong. Fireup implements the published Firestore behaviour for each:
   Firestore conflicts on the scanned range.
 - **Tokens last 60 seconds**, matching the documented limit, and an expired one
   is `ABORTED`.
+
+### Datastore RPCs (Phase 3)
+
+| RPC | Status | Notes |
+|---|---|---|
+| `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
+| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`), `AND`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. |
+| `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional. |
+| `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. |
+| `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
+| `ReserveIds` | served | Acknowledged; local allocations already avoid colliding with completed keys. |
+| `RunAggregationQuery` | `UNIMPLEMENTED` | |
+
+Kinds share the Postgres/`MemoryStore` rows with Firestore: `Task/sample` is
+`…/documents/Task/sample`. Non-default namespaces, GQL, projection queries,
+cursors, property transforms, and nested property masks are refused.
 
 ### Other known limits
 
@@ -417,9 +433,11 @@ src/local/
   query.rs           StructuredQuery compilation and evaluation
   transactions.rs    transaction tokens, read sets, and the conflict check
   value_json.rs      Firestore Value ⇄ JSON, the format of data at rest
+  entity_map.rs      Datastore Key/Entity ⇄ Firestore document mapping
   http.rs            the HTTP/1.1 surface: GET /, GET /health, and auth routing
   seed.rs            export → store
   firestore.rs       the google.firestore.v1.Firestore service implementation
+  datastore.rs       the google.datastore.v1.Datastore service implementation
   auth/
     mod.rs             what the auth surface serves, and what it deliberately does not
     api.rs             the Identity Toolkit REST handlers (no socket work)
@@ -484,7 +502,7 @@ Two layers, because they prove different things:
 ```bash
 # Fast: drives the server over real gRPC and real HTTP/1.1.
 cargo test --test local_firestore_tests
-cargo test --test local_auth_tests
+cargo test --test local_datastore_tests
 cargo test --lib local::
 
 # Durable stores. Skip unless a dedicated test database is configured.
@@ -492,12 +510,21 @@ FIREUP_TEST_POSTGRES_URL=postgresql://fireup:pw@127.0.0.1:5433/fireup_dev \
   cargo test --test local_postgres_store_tests --test local_auth_postgres_tests
 
 # Slow but conclusive: drives it with Google's official client libraries.
-scripts/smoke-local-firestore.sh   # @google-cloud/firestore
-scripts/smoke-local-auth.sh        # firebase-admin + the firebase client SDK
-FIREUP_SMOKE_POSTGRES_URL=postgresql://fireup:pw@127.0.0.1:5433/fireup_dev \
-  scripts/smoke-local-firestore.sh   # …against the durable store
-FIREUP_SMOKE_POSTGRES_URL=postgresql://fireup:pw@127.0.0.1:5433/fireup_dev \
-  scripts/smoke-local-auth.sh        # …same, for accounts
+cargo test --test local_firestore_tests
+cargo test --test local_datastore_tests
+cargo test --test local_auth_tests
+cargo test --lib local::
+
+# Durable store. Skips unless a dedicated test database is configured.
+FIREUP_TEST_POSTGRES_URL=postgresql://fireup:pw@127.0.0.1:5433/fireup_dev \
+  cargo test --test local_postgres_store_tests
+
+# Slow but conclusive: drives it with Google's official client libraries.
+scripts/smoke-local-firestore.sh
+scripts/smoke-local-datastore.sh
+scripts/smoke-local-auth.sh
+```
+
 ```
 
 Both smoke scripts build the binary, start the server on a free port, run the

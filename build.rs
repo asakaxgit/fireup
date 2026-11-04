@@ -3,28 +3,31 @@ fn main() {
     let protoc_path = protoc_bin_vendored::protoc_bin_path().expect("protoc not found");
     std::env::set_var("PROTOC", protoc_path);
 
-    // Message-only codegen for the export/migration path.
+    // Message-only codegen for the Datastore Admin surface used by the migrator
+    // ledger / future admin work. The live Datastore data plane is compiled
+    // below via tonic (which also emits the entity/query message types).
     let mut config = prost_build::Config::new();
     config
         .compile_protos(
-            &[
-                "proto/google/datastore/v1/entity.proto",
-                "proto/google/datastore/v1/query.proto",
-                "proto/google/datastore/admin/v1/admin.proto",
-                "proto/google/type/latlng.proto",
-            ],
+            &["proto/google/datastore/admin/v1/datastore_admin.proto"],
             &["proto"],
         )
-        .expect("failed to compile protobufs");
+        .expect("failed to compile Datastore Admin protobufs");
 
-    // Messages + gRPC service stubs for the `fireup local` Firestore data plane.
+    // Messages + gRPC service stubs for `fireup local`.
     // Client stubs are generated too so integration tests can dial the server
     // without an external SDK.
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile(&["proto/google/firestore/v1/firestore.proto"], &["proto"])
-        .expect("failed to compile Firestore service protos");
+        .compile(
+            &[
+                "proto/google/firestore/v1/firestore.proto",
+                "proto/google/datastore/v1/datastore.proto",
+            ],
+            &["proto"],
+        )
+        .expect("failed to compile Firestore/Datastore service protos");
 
     normalize_keyword_module_names();
 
@@ -49,5 +52,3 @@ fn normalize_keyword_module_names() {
             .unwrap_or_else(|e| panic!("copy {} to {}: {e}", entry.path().display(), target.display()));
     }
 }
-
-

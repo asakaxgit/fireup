@@ -1,6 +1,6 @@
 # Fireup — Firebase / GCP local & API license ledger
 
-**Status:** current as of Phase 2 (SAK-165) and Phase L (SAK-168) — Firestore queries/transactions and Firebase Auth / Identity Platform  
+**Status:** current as of Phase 3 (SAK-166) — Datastore API on shared store; Phase L (SAK-168) Auth also landed
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -31,7 +31,10 @@ and nothing here was obtained by decompiling or analysing a binary.
 | `google/api/annotations.proto`, `client.proto`, `field_behavior.proto`, `http.proto`, `launch_stage.proto`, `routing.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [dir](https://github.com/googleapis/googleapis/tree/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/api) | Service annotations required to compile the Firestore service | Yes | Same pin |
 | `google/rpc/status.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [link](https://github.com/googleapis/googleapis/blob/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/rpc/status.proto) | Error status in batch write responses | Yes | Same pin |
 | `google/type/latlng.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [link](https://github.com/googleapis/googleapis/blob/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/type/latlng.proto) | `geoPointValue`; also used by the Datastore export parser | Yes | Re-pinned to the same commit as the Firestore protos (previously an unpinned copy) |
-| `google/datastore/v1/entity.proto`, `query.proto`, `datastore/admin/v1/admin.proto` | pre-existing copies, pin not recorded at the time | Apache-2.0 | [googleapis](https://github.com/googleapis/googleapis/tree/master/google/datastore) | Datastore export parsing (migrator path) | Yes (headers intact) | **Debt:** not yet moved onto the pinned fetch. Add them to `ROOTS` in `scripts/vendor-googleapis-protos.sh` when the Datastore surface is next touched. |
+| `google/datastore/v1/datastore.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [link](https://github.com/googleapis/googleapis/blob/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/datastore/v1/datastore.proto) | prost/tonic codegen → `fireup local` Datastore service + test client | Yes (header intact) | Public Apache-2.0 googleapis pin (Phase 3) |
+| `google/datastore/v1/entity.proto`, `query.proto`, `aggregation_result.proto`, `query_profile.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [dir](https://github.com/googleapis/googleapis/tree/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/datastore/v1) | Entity/Key/Value/Query types for Datastore service + migrator Entity decode | Yes | Debt cleared — now on the same pin as Firestore via `scripts/vendor-googleapis-protos.sh` |
+| `google/datastore/admin/v1/datastore_admin.proto`, `index.proto`, `migration.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [dir](https://github.com/googleapis/googleapis/tree/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/datastore/admin/v1) | Message stubs for admin surface (compiled; not served in Phase 3) | Yes | Same pin; replaces the unpinned `admin.proto` stub |
+| `google/longrunning/operations.proto` | googleapis @ `57aa4dbc` | Apache-2.0 | [link](https://github.com/googleapis/googleapis/blob/57aa4dbce5d23b2115b2732b10dcb7ddc8e8698d/google/longrunning/operations.proto) | Transitive import of Datastore Admin | Yes | Same pin |
 
 ### Rust dependencies added for `fireup local`
 
@@ -42,6 +45,7 @@ and nothing here was obtained by decompiling or analysing a binary.
 | `tokio-stream` | 0.1 (`net`) | MIT | [crates.io](https://crates.io/crates/tokio-stream) | `ReceiverStream` for handing multiplexed connections to tonic and for server streaming | Yes | Public OSS |
 | `async-trait` | 0.1 | MIT OR Apache-2.0 | [crates.io](https://crates.io/crates/async-trait) | async methods on the `Store` trait (`src/local/store.rs`) | Yes (crate license) | Public OSS. Added in Phase 1 as a **direct** dependency; it was already in the tree via `tonic`, so no new third-party code enters the build. |
 | `@google-cloud/firestore` (npm, **test-only**) | ^7.11.0 | Apache-2.0 | [npm](https://www.npmjs.com/package/@google-cloud/firestore) | `tests/local-smoke/` SDK smoke test only; never linked or redistributed | Yes | Google's own *open-source* client library, used as a client against our server — the documented, non-RE way to verify API compatibility. Not vendored; installed on demand by `scripts/smoke-local-firestore.sh`. |
+| `@google-cloud/datastore` (npm, **test-only**) | ^9.2.1 | Apache-2.0 | [npm](https://www.npmjs.com/package/@google-cloud/datastore) | `tests/local-smoke-datastore/` SDK smoke test only; never linked or redistributed | Yes | Same rationale as the Firestore smoke client. Installed on demand by `scripts/smoke-local-datastore.sh`. |
 | `base64` | 0.22 | MIT OR Apache-2.0 | [crates.io](https://crates.io/crates/base64) | base64url JWT segments and base64 password digests in `src/local/auth/` | Yes (crate license) | Public OSS, not Google code. Added in Phase L as a **direct** dependency; it was already in the tree transitively, so no new third-party code enters the build. |
 | `sha2` | 0.11 | MIT OR Apache-2.0 | [crates.io](https://crates.io/crates/sha2) | salted SHA-256 password digests for locally stored accounts (`src/local/auth/user.rs`) | Yes (crate license) | Public OSS (RustCrypto), not Google code. Already in the tree transitively. Chosen over hand-rolling a hash; **not** a production password-storage scheme — see the Phase L notes below. |
 | `firebase-admin` (npm, **test-only**) | ^13.0.0 | Apache-2.0 | [npm](https://www.npmjs.com/package/firebase-admin) · [source](https://github.com/firebase/firebase-admin-node) | `tests/local-smoke/auth-smoke.mjs` only — drives the privileged auth surface over `FIREBASE_AUTH_EMULATOR_HOST`; never linked or redistributed | Yes | Google's own *open-source* Admin SDK, used as a client against our server. Same precedent as `@google-cloud/firestore`: the documented, non-RE way to verify API compatibility, and explicitly permitted by `.cursor/rules/firebase-gcp-compliance.mdc`. Not vendored; installed on demand by `scripts/smoke-local-auth.sh`. |
@@ -155,6 +159,40 @@ discovery document at `GET /` carries the independent-implementation notice, and
 `identitytoolkit.googleapis.com` appears only as the name of the *public API
 contract being implemented*.
 
+### Phase 3 (SAK-166) notes — Datastore API on the shared store
+
+**New Google artefacts:** the public `google.datastore.v1.Datastore` service
+proto and its import closure, re-pinned to the same googleapis commit as
+Firestore (clears the ledger debt on the previously unpinned Datastore entity /
+query / admin copies). No new Rust crates. One new **test-only** npm package
+(`@google-cloud/datastore`).
+
+#### What the implementation was written from
+
+| Source | Status | How it was used |
+|---|---|---|
+| Public `google.datastore.v1` protos @ `57aa4dbc` | Apache-2.0 googleapis | Service RPCs, Entity/Key/Value/Mutation/Query wire types |
+| Public Cloud Datastore API reference | Published Google documentation | Lookup/RunQuery/Commit/BeginTransaction/AllocateIds behaviour |
+| `DATASTORE_EMULATOR_HOST` | Documented emulator environment variable (explicitly allowed) | Official Node client points at our port |
+| Seed mapping already in `src/local/seed.rs` | First-party | Kind/id path elements → Firestore collection/document segments |
+
+**No reverse engineering.** The Firebase Emulator Suite / Datastore emulator
+binaries were not decompiled or consulted. Kind → collection mapping reuses the
+export-seed path Fireup already owned.
+
+#### Kind mapping and fidelity limits
+
+- A Datastore key path `Kind/id` (and ancestors) becomes
+  `projects/{p}/databases/{d}/documents/{Kind}/{id}/…` in the shared store, so
+  Firestore and Datastore see the same rows.
+- Datastore's empty `database_id` is normalised to Firestore's `(default)`.
+- Non-default **namespaces** are refused (`UNIMPLEMENTED`), matching seed.
+- Digit-only document ids round-trip as numeric Datastore ids; a string name
+  that happens to be all digits is therefore indistinguishable after a store
+  round-trip.
+- GQL, aggregations, projection queries, cursors, property transforms, and
+  nested property masks answer `UNIMPLEMENTED`.
+
 ## Existing Fireup notes (pre-local-cloud)
 
 | Dependency | Version / pin | SPDX | Upstream | How we use it | Attribution OK? | Decision |
@@ -165,15 +203,15 @@ contract being implemented*.
 ## Compliance checklist, per phase
 
 The PR checklist in `.cursor/rules/firebase-gcp-compliance.mdc`, answered as each
-phase landed. A row is only "yes" if someone can check it from the repository.
+phase landed.
 
-| Checklist item | Phase 0 (SAK-163) | Phase 1 (SAK-164) | Phase L (SAK-168) |
+| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) |
 |---|---|---|---|
-| No RE of proprietary binaries | Yes | Yes | Yes — written from public REST docs, the documented `FIREBASE_AUTH_EMULATOR_HOST` convention, and Google's Apache-2.0 open-source *clients*; no emulator binary inspected |
-| New deps/protos logged in this ledger | Yes (`tonic`, `tonic-build`, `tokio-stream`, googleapis protos) | Yes (`async-trait`) | Yes (`base64`, `sha2`; no new protos — the surface is REST/JSON) |
-| Undocumented behaviours deferred / listed unsupported | Yes (queries, transactions, listeners → `UNIMPLEMENTED`) | Yes | Yes — phone auth, MFA/`v2`, federated providers, OOB email → `501` naming the gap; listed in `docs/local/README.md` |
-| Independent-implementation blurb preserved where relevant | Yes (`GET /`, CLI `--help`, module docs) | Yes | Yes (`src/local/auth/mod.rs`, CLI `--help`, startup log, README) |
-| No production key material | n/a | n/a | Yes — tokens are unsigned; nothing in the repo is or generates a signing key, certificate, or API key |
+| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` |
+| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) |
+| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated/OOB → `501` | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` |
+| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes |
+| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a |
 
 ## How to add a row
 
