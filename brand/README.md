@@ -1,6 +1,6 @@
 # Fireup brand guide
 
-**Status: the mark is approved; the lockup around it is round 12 and is not.**
+**Status: the mark is approved; the lockup around it is round 13 and is not.**
 The round-5 mark — the F with the fire on the end of its bar, no muzzle — came
 back as *"A is perfect"*, so the drawing in `logo/mark.svg` is settled and does
 not change again without going back through the CEO. Everything since is the
@@ -19,8 +19,11 @@ to **2**, the i's dot down to **3** so the word keeps one accent clearance
 instead of two, and the capital U's stems up to the cap line so the two
 capitals align. Round 12 is the first horizontal note — *"align left start of
 arrow and U's start"* — and moves the accent one unit right, so the tail's cap
-and the U's left stem share one edge. The lockup is in use on the marketing
-site in `site/`, but **sign-off on it has not been given** and is still open.
+and the U's left stem share one edge. Round 13 is the first to **redraw** the
+accent rather than move it: the chord comes in from 30 to 28.55 so the arrow is
+exactly as wide as the U, flush at both ends. The lockup is in use on the
+marketing site in `site/`, but **sign-off on it has not been given** and is
+still open.
 
 This directory is in the public repository so the direction can be reviewed in a
 pull request. That is not approval. Until the mark is signed off, do not use it
@@ -208,6 +211,83 @@ arrow by the rule the round was drawn to, which is now a horizontal rule as
 well as a vertical one. A pinned coordinate would have worked today and gone
 stale at the next horizontal note.
 
+Round 13 is where that stops being enough. A rule can absorb a drawing being
+*moved*; it cannot absorb the drawing being *redrawn*, and round 13 shortened
+the chord. So `align.mjs` and `edge.mjs` now pin the arrow itself — `round-11`
+and `round-12` in `HISTORY`, one per round they document — and both directories
+still come back byte-identical.
+
+### Round 13: the accent is the width of the letter
+
+Two answers came back on round 12's card — *"back to round 7's centring"* on the
+lockup, and *"draw it"* on whether to make both ends flush, which costs a redraw
+of the chord. `npm run flush` renders it (`flush/`).
+
+**Those two answers stop disagreeing once the arrow is the right width.** An
+object the same width as the letter is centred on it exactly when its edges line
+up, so round 13's drawing satisfies round 7's centring rule, round 12's
+flush-left rule and flush-right, all at once. There is no horizontal placement
+question left to have.
+
+The arrow was **39.4 wide against the U's 38.0**, because the head's corner
+overhangs the chord. Only two things can give up that 1.4: the chord, or the
+head. Taking it off the head puts it at 2.4 shafts, under the 2.5 this guide
+already names as the floor where a head reads as a comma — so it comes off the
+chord, which gives up 5% of its length and nothing else. The rise and the head's
+length were both scanned and neither reaches flush in either direction, because
+the rightmost ink is the head's *corner*: flattening or steepening the curve
+only swings that corner further out.
+
+The chord is **28.55**, not 28.5. It is solved rather than subtracted: every
+coordinate goes into the master at a tenth of a unit, so the head's corner moves
+in steps, and 28.55 is the run that lands it *on* x=154 instead of near it.
+
+#### Two defects this round found
+
+**Round 12's sheets are drawn one unit right of their own captions.**
+`edge.mjs` took the arrow's position from a constant, `arrowLeft: 115`, and
+built each option as an offset from it; transcribing the answer moved the tail
+to 116, and re-running the script re-rendered all thirteen sheets a unit right
+of their labels. Measured on the committed `edge/detail-dark.png`: row A's tail
+is +1.30 units from the guide against a caption of *flush*, and row C's is
++0.26 against a caption of *1 unit left*. So the row that lines up in the
+picture is the one labelled C. **Those sheets are left exactly as they were
+rendered** — they are what was actually reviewed, and correcting them would
+delete the evidence the answer was given against; the arrow is pinned to round
+12's drawing so they keep reproducing byte-for-byte. The note is at the top of
+`edge.mjs`.
+
+**Round 13's own first cut was a tenth of a unit off flush.** The placement was
+taken from a raster probe, and `contentBox` rounds outward to whole sample
+pixels — 0.166 units at that viewBox, sixteen times coarser than the tenth it
+was then snapped to. The tail came out at 116.1 against the U's 116, in the
+round whose entire subject is being flush. Nothing on any sheet showed it; the
+built-asset check below is what caught it.
+
+Both have the same shape, and the rule that comes out of them is: **an option is
+built from its rule, and the raster is the check on the geometry rather than its
+source.** A sheet composed from "the master, plus an offset" is only correct
+until the master moves, which is exactly when it is being looked at. Measuring
+is still the right instinct — measuring at a resolution coarser than the claim
+is the mistake.
+
+#### The asset is checked, not just the master
+
+`npm run flush` asserts that `logo/wordmark.svg` draws what the script printed,
+and then isolates the accent and the U *in the built*
+`site/assets/fireup-lockup-dark.svg`, renders them, and reads the edges off the
+alpha. Left **+0.00**, right **+0.00**, vertical slot **1.96** — round 11's
+answer, unmoved by a horizontal round. It throws on any of those. Every round
+since 7 has claimed a number about the shipped lockup in a comment; this is the
+first that fails when the claim stops being true, and it is what caught the
+116.1.
+
+**What it costs downstream: nothing.** The arrow's ends sit well inside the word
+and it got *narrower*, so the lockup's viewBox is unchanged and the header
+sizing, the clear-space rule and the social card are exactly as they were. The
+mark, both favicons, every app icon and all three mark variants are byte-for-byte
+unchanged, as are all 108 historical exploration sheets.
+
 ### Round 12: where the accent starts
 
 The note was **"bit fix. align left start of arrow and U's start"**.
@@ -215,10 +295,15 @@ The note was **"bit fix. align left start of arrow and U's start"**.
 
 It is a change of rule rather than a correction. Round 7 placed the accent by
 centring its *measured box* on the U's, and because the head overhangs the
-chord the arrow is 1.5 units the wider of the two — so centring left it 1 unit
-outside the letter on the left and 0.5 on the right. Both of those edges are
-flat verticals, and two flat verticals a single unit apart read as a near miss
-rather than as an overhang.
+chord the arrow is the wider of the two — so centring left it 1 unit outside the
+letter on the left and 0.5 on the right. Both of those edges are flat verticals,
+and two flat verticals a single unit apart read as a near miss rather than as an
+overhang.
+
+*(Round 12 put that extra width at 1.5 units throughout, from the raster. Round
+13 computed it as **1.40**: `contentBox` rounds outward to whole sample pixels
+and was inflating it. The 1-unit left overhang the note was about is unaffected
+— the tail is a butt cap on a whole coordinate either way.)*
 
 Flush, the accent starts where the letter starts and the whole 1.5 hangs off
 the right, which is the direction it already points. The other reading of the
@@ -252,12 +337,15 @@ What the accent is, and why each number is what it is:
   one device pixel, so the renderer is deciding and the drawing is not; that
   cost was costed on round 10's sheet and accepted. Taken to 0 the tail fuses
   with the U's left stem and the letter grows a hook.
-- **The chord is 30 across and 12.9 up**, stem to stem on the U. It is sized to
-  the letter it sits over, which is what makes it an accent rather than a second
-  object.
-- **It starts where the letter starts** (round 12): the tail's butt cap and the
-  U's left stem share one vertical edge at x=116, and the 1.5 units by which the
-  arrow is the wider of the two hang off the right, the way it points.
+- **The chord is 28.55 across and 12.28 up** (round 13; it was the U's 30-unit
+  stem pitch from round 7 to round 12). It is sized to the letter it sits over,
+  which is what makes it an accent rather than a second object.
+- **It is exactly as wide as the letter, and starts where the letter starts**
+  (round 13): the arrow's ink box and the U's are the same box, x=116 to x=154.
+  Rounds 7 to 11 centred a drawing 1.4 units too wide, which left it hanging off
+  both ends; round 12 aligned the left edges and sent all 1.4 off the right.
+  Round 13 took the width off the chord instead, so all three alignment rules —
+  flush left, flush right, centred — now give the same answer.
 - **The head is 2.8 shafts wide and 1.7 long**, square to the arc's end tangent.
   Below about 2.5 it reads as a comma.
 - **It bows like a growth curve** — flat out of the tail, turning up at the

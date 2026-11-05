@@ -103,9 +103,12 @@
 
   <!-- The accent over the U: a curved arrow, up and to the right, the way the
        fire blows off the mark's bar. Round 7, round 9 after a detour, round 10
-       four units lower, round 11 three units higher than that, and round 12
-       one unit to the right. The drawing itself is round 7's throughout: four
-       notes have moved it and none has redrawn it.
+       four units lower, round 11 three units higher than that, round 12 one
+       unit to the right, and ROUND 13 THE FIRST TO REDRAW IT — the chord comes
+       in from 30 to 28.5 so the accent can be flush with the U at both ends.
+       Rounds 7 to 12 all drew round 7's arrow and argued about where to put it;
+       round 13 is the one that changed the drawing, and it changed exactly one
+       number in it.
 
        ROUND 11 MOVES IT UP IN ORDER TO TIGHTEN IT, which is worth a sentence
        because it looks like a contradiction. The U's stems were raised 4 units
@@ -161,37 +164,79 @@
            parallel, so its mean air is its minimum. Equal minimums would not
            have read as equal air. Matching the number instead — the dot at 2 —
            is drawn as 11a-E.
-         * The chord runs stem to stem across the U, 30 across and 12.9 up.
-           Narrower and the head is as long as the shaft, with no curve left to
-           read; out to the p and it stops being an accent and becomes a second
-           ember object the size of the fire (7c). Round 8 drew exactly that and
-           measured it: the arc tipped 12.9 units above the fire, which handed
-           the lockup's envelope to the arrow instead of the mark and moved the
-           site header with it.
-         * Horizontally it STARTS WHERE THE LETTER STARTS — the tail's butt cap
-           and the U's left stem share one vertical edge at x=116. Round 12.
-           Rounds 7 to 11 centred the arrow's measured box on the U's instead,
-           and because the head overhangs the chord the arrow is 1.5 units the
-           wider of the two, so centring left it 1 unit outside the letter on
-           the left and 0.5 on the right. Two flat vertical edges a single unit
-           apart read as a near miss rather than as an overhang; flush, the
-           whole 1.5 hangs off the right, the way the arrow points. The note was
-           "align left start of arrow and U's start". `npm run edge` renders the
-           two rules side by side with a guide dropped down the U's own edge,
-           and reads both edges off the raster.
-           The shape did not change: every x in both paths below moved by the
-           same whole +1, and both of the arrow's own ends are still well inside
-           the word, so the lockup's envelope is unmoved and nothing downstream
-           follows it.
+         * The chord is 28.55 across and 12.28 up — a rise of 43% of the run,
+           which is the proportion round 7 drew and every round since has kept.
+           It was 30, the U's stem pitch, until round 13 took 1.45 off it; see
+           the horizontal rule below, which is what spends it. The arrow's
+           overhang is 1.40 and the chord gives up 1.45, because every
+           coordinate here is written to a tenth: the head's corner moves in
+           steps, and 28.55 is the run that lands it ON 154 rather than near it.
+           `npm run flush` scans for that run rather than subtracting.
+           It cannot go much under this. Narrower and the head is as long as the
+           shaft, with no curve left to read; out to the p and it stops being an
+           accent and becomes a second ember object the size of the fire (7c).
+           Round 8 drew exactly that and measured it: the arc tipped 12.9 units
+           above the fire, which handed the lockup's envelope to the arrow
+           instead of the mark and moved the site header with it.
+         * Horizontally it IS THE WIDTH OF THE LETTER AND STARTS WHERE IT
+           STARTS — the arrow's measured ink box and the U's are the same box,
+           x=116 to x=154, 38.0 units. Round 13, and the reason the chord is no
+           longer the stem pitch.
+           Rounds 7 to 11 centred the arrow's box on the U's. The head's corner
+           overhangs the chord, so the arrow was 39.4 against the U's 38.0, and
+           centring an object 1.4 wider than the letter leaves it hanging off
+           BOTH ends — 1 unit left, 0.5 right. Round 12 aligned the left edges
+           instead and sent the whole 1.4 off the right. Both of those are
+           placements of a drawing that is the wrong width; the question round 13
+           was asked is whether to make it the right width, and the answer was
+           to draw it.
+           There are only two places that width can come off: the chord, or the
+           head. Taking it off the head puts it at 2.4 shafts, under the 2.5
+           this identity wrote down as the floor where a head starts reading as
+           a comma — so it comes off the chord, which gives up 5% of its length
+           and nothing else. The rise, and the head's length along its own axis,
+           were both measured and neither can do it at all: the rightmost ink is
+           the head's CORNER, and flattening or steepening the curve only swings
+           that corner further out. `npm run flush` prints that scan, renders
+           all four options, and reads both edges off the raster.
+           What this buys beyond tidiness: the three alignment rules that have
+           been argued over since round 7 — flush left, flush right, and centred
+           — now give the same answer, because an object the same width as the
+           letter is centred on it when its edges line up. There is no horizontal
+           placement question left to have.
+           The envelope is unmoved: both of the arrow's ends are well inside the
+           word, the p's bowl is still the rightmost ink, so the header sizing,
+           the clear-space rule and the social card do not follow.
          * The head is 2.8 shafts wide and 1.7 long, square to the arc's end
            tangent — below about 2.5 it reads as a comma. Its base is wider than
            the shaft's end cap, so the join is covered rather than butted.
        The curve bows like a growth curve, flat out of the tail and turning up
        at the head: the control point is level with the tail, 72% along. Bowed
        the other way it reads as arriving and flattening out.
-       The numbers come from `npm run arrow`, which prints them. -->
+
+       The coordinates come from `npm run flush`, which builds the arrow from
+       the rules above and prints the two paths to transcribe. It then CHECKS
+       that this file draws what it printed, and throws if it does not — so the
+       script and the drawing cannot drift apart. They did in round 12, in both
+       directions at once, and that is the whole reason the check exists: a
+       sheet composed from "the master, plus an offset" is only correct until
+       the master moves, which is exactly when it is being looked at.
+
+       Why there are tenths here when the letters are whole units: the chord has
+       to land the head's corner on the U's right edge, and the corner is the
+       far end of a triangle set square to a tangent, so it does not fall on a
+       whole unit. The two ends that the round is about ARE whole — the tail
+       starts on 116 and the head's corner lands on 154, both exactly. -->
+  <!-- ROUND 13 FIRST DREW THIS WITH THE TAIL AT 116.1, which is worth keeping a
+       note of. The placement was taken from a raster probe, and `contentBox`
+       rounds outward to whole sample pixels — 0.166 units at the probe's
+       viewBox, sixteen times coarser than the tenth of a unit it was then
+       snapped to. So the drawing came out a tenth off flush in the round whose
+       whole subject is being flush, and it was the built-asset check at the
+       foot of flush.mjs that caught it rather than any sheet. The geometry is
+       closed form now and the raster is the check on it, not its source. -->
   <g data-glyph="arrow">
-    <path d="M116 -6 Q138 -6 146 -19" stroke="currentColor" stroke-width="8" stroke-linecap="butt"/>
-    <path d="M155.5 -13.1 L153.1 -30.6 L136.5 -24.9 Z" fill="currentColor" stroke="none"/>
+    <path d="M116 -6 Q136.6 -6 144.6 -18.3" stroke="currentColor" stroke-width="8" stroke-linecap="butt"/>
+    <path d="M154 -12.2 L152 -29.7 L135.2 -24.4 Z" fill="currentColor" stroke="none"/>
   </g>
 </svg>
