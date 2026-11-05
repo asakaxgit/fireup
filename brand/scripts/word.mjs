@@ -95,14 +95,68 @@ export const DOT = { cx: Number(tittle[1]), cy: Number(tittle[2]), r: Number(tit
 // scripts/tighten.mjs, which reads both edges off the raster every run.
 export const ACCENT_CLEARANCE = W.xTop - W.stroke / 2 - (DOT.cy + DOT.r)
 
+// The same quantity as a past round computed it. Rounds 7 and 8 *placed the
+// arrow* with this number, so it is geometry in their sheets and not just a
+// caption: left reading the live tittle, round 11's dot would move their
+// drawings. Defined below HISTORY, which it reads.
+export const accentClearanceAsOf = (round) => {
+  const dot = dotAsOf(round)
+  return W.xTop - W.stroke / 2 - (dot.cy + dot.r)
+}
+
+// --- letters as earlier rounds drew them --------------------------------------
+// An exploration sheet is the evidence for a decision that has already been
+// made, so it has to keep showing what was shown. But every one of those
+// scripts composes the word by asking this module for letters, which means an
+// edit to the master silently re-renders the record: round 11 moved the i's
+// dot and the U, and re-running the round 7 to 10 scripts rewrote 108 of their
+// sheets with letters those rounds never saw. Round 10's own sheet came back
+// measuring 3 units of air under a tittle it had captioned as keeping 7.
+//
+// So a script that documents a past round pins itself to that round, and the
+// letters it pins to live here, written out in full rather than described. A
+// pin is a literal copy of a drawing that is no longer in the master — it is
+// not derived from the current one, because then it would move with it again.
+const HISTORY = {
+  // Rounds 7 to 10. The U's stems stop on the ascender line, the i's tittle
+  // sits 4 units higher, and the accent over the U is 3 units lower. All three
+  // moved in round 11; nothing else in the word has changed since round 7.
+  'round-10': {
+    U: '<path d="M120 4 V35 A15 15 0 0 0 150 35 V4"/>',
+    tittle: '<circle cx="34" cy="9" r="4" fill="#FFFFFF" stroke="none"/>',
+    arrow: [
+      '<path d="M115 -3 Q137 -3 145 -16" stroke="#FF5A2B" stroke-width="8" stroke-linecap="butt"/>',
+      '<path d="M154.5 -10.1 L152.1 -27.6 L135.5 -21.9 Z" fill="#FF5A2B" stroke="none"/>',
+    ].join('\n    '),
+  },
+}
+
+const glyphsAsOf = (round) => {
+  if (round === undefined) return GLYPHS
+  const pinned = HISTORY[round]
+  if (!pinned) throw new Error(`no pinned glyphs for "${round}" (have: ${Object.keys(HISTORY).join(', ')})`)
+  return new Map([...GLYPHS, ...Object.entries(pinned)])
+}
+
+// The i's tittle as of a given round, for the scripts that measure against it
+// rather than just drawing it.
+export const dotAsOf = (round) => {
+  const found = glyphsAsOf(round).get('tittle').match(/cx="([\d.]+)"[^>]*cy="([\d.]+)"[^>]*r="([\d.]+)"/)
+  return { cx: Number(found[1]), cy: Number(found[2]), r: Number(found[3]) }
+}
+
 // Markup for a named set of glyphs, shifted horizontally and painted. Unknown
 // names throw: asking for a letter the master does not draw is a bug, not an
 // empty string.
-export const spell = (names, { shift = 0, fg = '#FFFFFF', accent = '#FF5A2B' } = {}) => {
+//
+// `asOf` pins the letters to a past round — see HISTORY above. Scripts that
+// document a decision pass it; the build does not.
+export const spell = (names, { shift = 0, fg = '#FFFFFF', accent = '#FF5A2B', asOf } = {}) => {
+  const available = glyphsAsOf(asOf)
   const body = names
     .map((name) => {
-      const found = GLYPHS.get(name)
-      if (!found) throw new Error(`wordmark has no glyph "${name}" (has: ${[...GLYPHS.keys()].join(', ')})`)
+      const found = available.get(name)
+      if (!found) throw new Error(`wordmark has no glyph "${name}" (has: ${[...available.keys()].join(', ')})`)
       return found
     })
     .join('\n    ')

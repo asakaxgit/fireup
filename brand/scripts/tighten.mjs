@@ -51,12 +51,24 @@
 // top edge is the ascender line less half a stroke, y=0.
 // Mark construction (logo/mark.svg): F foot y=60, cap top y=16, bar weight 12,
 // middle arm ends x=28, bar ends x=36, fire tip y=1, fire out to x=56.
-import { Resvg } from '@resvg/resvg-js'
 import { renderPng, contentBox, pixelMap } from './render.mjs'
-import { master, innerOf, recolour, spell, W, DOT, ACCENT_CLEARANCE } from './word.mjs'
+import { inkGap, slotRun } from './measure.mjs'
+import { master, innerOf, recolour, spell as spellNow, W, dotAsOf, accentClearanceAsOf } from './word.mjs'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+
+// This script is the record of round 10, so it draws round 10's letters. Round
+// 11 moved the i's tittle and the U; unpinned, re-running this would re-render
+// every sheet below with letters round 10 never saw, and the captions here —
+// which measure the tittle at 7 — would stop being true of what the sheet
+// shows. See HISTORY in word.mjs.
+const AS_OF = 'round-10'
+const spell = (names, options = {}) => spellNow(names, { ...options, asOf: AS_OF })
+const DOT = dotAsOf(AS_OF)
+// Rounds 7 and 8 placed the arrow with this, so it is geometry here, not a
+// caption: left reading the live tittle it would move these drawings.
+const ACCENT_CLEARANCE = accentClearanceAsOf(AS_OF)
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
@@ -164,60 +176,9 @@ const arrowAt = (air, { shifted = true, below = U_TOP } = {}) => {
   }
 }
 
-// --- how much background is actually left between the two shapes --------------
-// Render the arrow and the letters as separate layers through the same viewBox
-// at the width in question, then take the shortest distance from any arrow
-// pixel to any letter pixel. A two-pass chamfer transform, weights 1 and
-// sqrt(2) — within a few percent of true Euclidean, far inside what matters.
-//
-// The answer comes back in device pixels at that width, which is the only unit
-// the question is really asked in: 0 means the two shapes have fused into one
-// silhouette, and anything under about 1 means the renderer has nothing left to
-// put the slot in.
-const inkGap = (viewBox, a, b, width) => {
-  const layer = (body) => {
-    const { pixels, width: w, height: h } = new Resvg(
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}">${body}</svg>`,
-      { fitTo: { mode: 'width', value: width } },
-    ).render()
-    const ink = new Uint8Array(w * h)
-    for (let i = 0; i < w * h; i += 1) ink[i] = pixels[i * 4 + 3] > 8 ? 1 : 0
-    return { ink, w, h }
-  }
-  const A = layer(a)
-  const B = layer(b)
-  if (A.w !== B.w || A.h !== B.h) throw new Error('inkGap: layers disagree on size')
-  const { w, h } = A
-  const FAR = 1e9
-  const dist = new Float64Array(w * h)
-  for (let i = 0; i < w * h; i += 1) dist[i] = A.ink[i] ? 0 : FAR
-  const D = Math.SQRT2
-  const relax = (to, from, cost) => {
-    const candidate = dist[from] + cost
-    if (candidate < dist[to]) dist[to] = candidate
-  }
-  for (let y = 0; y < h; y += 1) {
-    for (let x = 0; x < w; x += 1) {
-      const i = y * w + x
-      if (x > 0) relax(i, i - 1, 1)
-      if (y > 0) relax(i, i - w, 1)
-      if (y > 0 && x > 0) relax(i, i - w - 1, D)
-      if (y > 0 && x < w - 1) relax(i, i - w + 1, D)
-    }
-  }
-  for (let y = h - 1; y >= 0; y -= 1) {
-    for (let x = w - 1; x >= 0; x -= 1) {
-      const i = y * w + x
-      if (x < w - 1) relax(i, i + 1, 1)
-      if (y < h - 1) relax(i, i + w, 1)
-      if (y < h - 1 && x < w - 1) relax(i, i + w + 1, D)
-      if (y < h - 1 && x > 0) relax(i, i + w - 1, D)
-    }
-  }
-  let best = FAR
-  for (let i = 0; i < w * h; i += 1) if (B.ink[i] && dist[i] < best) best = dist[i]
-  return best
-}
+// How much background is actually left between the two shapes — `inkGap` and
+// `slotRun`, in scripts/measure.mjs. Round 11 wanted both unchanged, so they
+// moved out of this file rather than being copied into that one.
 
 // --- compositions -------------------------------------------------------------
 const PAINT = 'fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="butt" stroke-linejoin="round"'
@@ -386,35 +347,19 @@ const slotOf = (opt) => {
   const row = framed(opt, PAPER, EMBER)
   const arrowLayer = opt.arrow.draw(EMBER)
   const letterLayer = letters(PAPER, EMBER, { uTop: opt.uTop })
-  const width = 1400
-  const layer = (body) => {
-    const { pixels, width: w, height: h } = new Resvg(
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${row.viewBox}">${body}</svg>`,
-      { fitTo: { mode: 'width', value: width } },
-    ).render()
-    return { pixels, w, h }
-  }
-  const A = layer(arrowLayer)
-  const B = layer(letterLayer)
-  const unit = row.box.w / A.w
-  const limit = W.stroke / unit
-  const gaps = []
-  for (let x = 0; x < A.w; x += 1) {
-    let lowestArrow = -1
-    let highestLetter = -1
-    for (let y = 0; y < A.h; y += 1) if (A.pixels[(y * A.w + x) * 4 + 3] > 8) lowestArrow = y
-    if (lowestArrow < 0) continue
-    for (let y = B.h - 1; y >= 0; y -= 1) if (B.pixels[(y * B.w + x) * 4 + 3] > 8) highestLetter = y
-    if (highestLetter < 0) continue
-    const air = highestLetter - lowestArrow
-    if (air > 0 && air <= limit) gaps.push(air * unit)
-  }
+  const slot = slotRun({
+    viewBox: row.viewBox,
+    boxWidth: row.box.w,
+    upper: arrowLayer,
+    lower: letterLayer,
+    limit: W.stroke,
+  })
   return {
     row,
     arrowLayer,
     letterLayer,
-    run: gaps.length * unit,
-    mean: gaps.length ? gaps.reduce((sum, g) => sum + g, 0) / gaps.length : 0,
+    run: slot.run,
+    mean: slot.mean,
     px: (w) => inkGap(row.viewBox, arrowLayer, letterLayer, w),
   }
 }
@@ -462,33 +407,13 @@ console.log(
 // stem, so its slot pinches at one point and opens out on both sides — the same
 // measured minimum, more background around it. That is the reason the two can
 // read differently at the same number, and it is measured rather than asserted.
-const tittleSlot = (() => {
-  const row = TODAY
-  const width = 1400
-  const layer = (body) => {
-    const { pixels, width: w, height: h } = new Resvg(
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${row.viewBox}">${body}</svg>`,
-      { fitTo: { mode: 'width', value: width } },
-    ).render()
-    return { pixels, w, h }
-  }
-  const A = layer(DOT_LAYER)
-  const B = layer(STEM_LAYER)
-  const unit = row.box.w / A.w
-  const limit = (W.stroke * 2) / unit
-  const gaps = []
-  for (let x = 0; x < A.w; x += 1) {
-    let lowestDot = -1
-    let highestStem = -1
-    for (let y = 0; y < A.h; y += 1) if (A.pixels[(y * A.w + x) * 4 + 3] > 8) lowestDot = y
-    if (lowestDot < 0) continue
-    for (let y = B.h - 1; y >= 0; y -= 1) if (B.pixels[(y * B.w + x) * 4 + 3] > 8) highestStem = y
-    if (highestStem < 0) continue
-    const air = highestStem - lowestDot
-    if (air > 0 && air <= limit) gaps.push(air * unit)
-  }
-  return { run: gaps.length * unit, mean: gaps.reduce((sum, g) => sum + g, 0) / gaps.length, min: Math.min(...gaps) }
-})()
+const tittleSlot = slotRun({
+  viewBox: TODAY.viewBox,
+  boxWidth: TODAY.box.w,
+  upper: DOT_LAYER,
+  lower: STEM_LAYER,
+  limit: W.stroke * 2,
+})
 console.log(
   `the tittle's slot: ${tittleSlot.run.toFixed(1)} units long, ${tittleSlot.min.toFixed(1)} at its tightest, ` +
     `${tittleSlot.mean.toFixed(1)} on average — it pinches and opens out. The arrow's is parallel, so its mean is its minimum.`,

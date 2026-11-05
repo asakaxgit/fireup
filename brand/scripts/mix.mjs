@@ -27,10 +27,19 @@
 // to x=56.
 import { Resvg } from '@resvg/resvg-js'
 import { renderPng, contentBox, pixelMap } from './render.mjs'
-import { master, innerOf, recolour, spell, W as WORDMARK, DOT } from './word.mjs'
+import { master, innerOf, recolour, spell as spellNow, W as WORDMARK, dotAsOf } from './word.mjs'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+
+
+// The record of round 6, pinned to the letters that round drew. Round 11
+// moved the i's tittle, the capital U and the accent over it; unpinned, every
+// sheet below would silently re-render with letters this round never saw. See
+// HISTORY in word.mjs.
+const AS_OF = 'round-10'
+const spell = (names, options = {}) => spellNow(names, { ...options, asOf: AS_OF })
+const DOT = dotAsOf(AS_OF)
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')

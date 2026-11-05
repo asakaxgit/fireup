@@ -49,10 +49,22 @@
 // middle arm ends x=28, bar ends x=36, fire tip y=1, fire out to x=56.
 import { Resvg } from '@resvg/resvg-js'
 import { renderPng, contentBox, pixelMap } from './render.mjs'
-import { master, innerOf, recolour, spell, W, DOT, ACCENT_CLEARANCE } from './word.mjs'
+import { master, innerOf, recolour, spell as spellNow, W, dotAsOf, accentClearanceAsOf } from './word.mjs'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+
+
+// The record of round 8, pinned to the letters that round drew. Round 11
+// moved the i's tittle, the capital U and the accent over it; unpinned, every
+// sheet below would silently re-render with letters this round never saw. See
+// HISTORY in word.mjs.
+const AS_OF = 'round-10'
+const spell = (names, options = {}) => spellNow(names, { ...options, asOf: AS_OF })
+const DOT = dotAsOf(AS_OF)
+// Rounds 7 and 8 placed the arrow with this, so it is geometry here, not a
+// caption: left reading the live tittle it would move these drawings.
+const ACCENT_CLEARANCE = accentClearanceAsOf(AS_OF)
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
