@@ -46,11 +46,18 @@ const MUTED = tokens.color['paper-muted']
 
 const MARK = innerOf(master('mark'))
 
-// The letters this round was drawn with, named. It used to take "ireup" as
-// every path after the first two, which quietly means "whatever the master
-// happens to draw next" — and round 7 adds a glyph. Naming them keeps these
-// sheets showing the round-6 question: how the F mixes into the word.
-const IREUP_GLYPHS = ['i', 'r', 'e', 'u', 'p']
+// The letters this round compares, named. It used to take "ireup" as every
+// path after the first two, which quietly means "whatever the master happens to
+// draw next" — and round 7 added a glyph. Naming them keeps these sheets on the
+// round-6 question: how the F mixes into the word, and where the i's tittle
+// goes. The round-7 arrow is deliberately not in the list; it is an accent over
+// the U at the other end of the word and has no bearing on any of this.
+//
+// These sheets do re-render against the current master, so they carry round 7's
+// capital letters. That is on purpose: a sheet frozen against a drawing we no
+// longer ship is worse than one that moves. The conclusions — nested, 1.5x,
+// gap 8 — are about the F and are untouched by the case of the U.
+const IREUP_GLYPHS = ['i', 'r', 'e', 'U', 'p']
 
 // Geometry constants of the two drawings. The word's come off its own master
 // via word.mjs; the mark's are named here.
@@ -295,7 +302,7 @@ const riserOf = (option) => (fg) => {
 
 const bodyOf = (option) => {
   const parts = [option.mark.place]
-  if (option.keepF) parts.push((fg) => spell(['f'], { shift: option.wx - W.ireupL, fg }))
+  if (option.keepF) parts.push((fg) => spell(['F'], { shift: option.wx - W.ireupL, fg }))
   parts.push(ireupAt(option.wx, { tittle: option.tittle }))
   if (option.riser) parts.push(riserOf(option))
   return compose(parts)

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="-6 -2 212 76" role="img" aria-label="fireup"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -38 214 114" role="img" aria-label="FireUp"
      fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="butt" stroke-linejoin="round"
      data-baseline="50" data-x-top="20" data-asc-top="4" data-descender="66" data-stroke="8"
      data-ireup-left="30" data-letter-gap="8">
@@ -18,11 +18,23 @@
        measured off it: the i's stem ends at 38 and the r's begins at 46. The
        lockup spaces the mark like a letter, so it uses the same 8.
 
+       The word is FireUp — round 7. The capital U is the note's; the capital F
+       is its consequence, because the lockup's F is the mark and a word that
+       spelled itself "fireUp" on its own would be a second spelling of the
+       name. See brand/scripts/arrow.mjs sheet 7d.
+
        Colour variants and lockups are generated from this file and mark.svg —
        see brand/scripts/build.mjs. -->
-  <g data-glyph="f">
-    <path d="M12 50 V13 A8 8 0 0 1 20 5"/>
-    <path d="M4 20 H23"/>
+
+  <!-- F. Not drawn in the lockup: there the mark is this letter. 24 units
+       across against a 46-unit cap, which a capital needs and the lowercase f's
+       slot did not have — so it is set back into the left margin instead, and
+       every other letter stays where it was. Squeezed into the f's old slot it
+       comes out 15 wide and still reads as an f (7d-B). Middle arm at 73% of
+       the top one, the proportion the mark's own F uses. -->
+  <g data-glyph="F">
+    <path d="M2 50 V4 H22"/>
+    <path d="M2 27 H15.5"/>
   </g>
   <g data-glyph="i">
     <path d="M34 20 V50"/>
@@ -35,9 +47,14 @@
     <path d="M104 35 A15 15 0 1 0 96.5 48"/>
     <path d="M74 35 H104"/>
   </g>
-  <g data-glyph="u">
-    <path d="M120 20 V35 A15 15 0 0 0 150 35"/>
-    <path d="M150 20 V50"/>
+  <!-- U. The capital stands on the lowercase u's own stems, so the word's
+       rhythm is untouched and only the height changes: both stems run from the
+       ascender line to the bowl and the right one stops there instead of
+       carrying on to the baseline. This drawing does not overshoot its round
+       letters — the e's bowl tops out on the x-height line, not above it — so
+       the U does not either. -->
+  <g data-glyph="U">
+    <path d="M120 4 V35 A15 15 0 0 0 150 35 V4"/>
   </g>
   <g data-glyph="p">
     <path d="M166 20 V66"/>
@@ -48,5 +65,33 @@
        clearance, and anything else set over a letter uses the same 3. -->
   <g data-glyph="tittle">
     <circle cx="34" cy="9" r="4" fill="currentColor" stroke="none"/>
+  </g>
+
+  <!-- The accent over the U: a curved arrow, up and to the right, the way the
+       fire blows off the mark's bar. Round 7.
+
+       Nothing here is a free choice:
+         * The shaft is 8, the same as every letter. The word is a monoline and
+           its one existing accent, the tittle, is an 8-unit circle; an accent
+           at any other weight is a second voice. It does not scale with the
+           arrow's length.
+         * Its lowest ink sits 3 units above the U's cap — the gap the tittle
+           keeps over the i's stem, which is this drawing's own accent
+           clearance.
+         * The chord runs stem to stem across the U, 30 across and 12.9 up, and
+           the arrow is centred on the letter. Narrower and the head is as long
+           as the shaft, with no curve left to read; out to the p and it stops
+           being an accent and becomes a second ember object the size of the
+           fire (7c).
+         * The head is 2.8 shafts wide and 1.7 long, square to the arc's end
+           tangent — below about 2.5 it reads as a comma. Its base is wider than
+           the shaft's end cap, so the join is covered rather than butted.
+       The curve bows like a growth curve, flat out of the tail and turning up
+       at the head: the control point is level with the tail, 72% along. Bowed
+       the other way it reads as arriving and flattening out.
+       The numbers come from `npm run arrow`, which prints them. -->
+  <g data-glyph="arrow">
+    <path d="M115 -7 Q137 -7 145 -20" stroke="currentColor" stroke-width="8" stroke-linecap="butt"/>
+    <path d="M154.5 -14.1 L152.1 -31.6 L135.5 -25.9 Z" fill="currentColor" stroke="none"/>
   </g>
 </svg>

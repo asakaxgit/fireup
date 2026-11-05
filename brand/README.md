@@ -1,13 +1,15 @@
 # Fireup brand guide
 
-**Status: the mark is approved; the lockup around it is round 6 and is not.**
+**Status: the mark is approved; the lockup around it is round 7 and is not.**
 The round-5 mark — the F with the fire on the end of its bar, no muzzle — came
 back as *"A is perfect"*, so the drawing in `logo/mark.svg` is settled and does
-not change again without going back through the CEO. The same note continued
-*"mix this F into fireup instead of locating next"*, which is about the lockup,
-and round 6 answers it: the mark is now the word's initial letter rather than an
-object standing beside the word. The lockup is in use on the marketing site in
-`site/`, but **sign-off on it has not been given** and is still open.
+not change again without going back through the CEO. Everything since is the
+lockup and the word around that frozen mark: round 6 made the mark the word's
+initial letter rather than an object standing beside it, and round 7 answers
+*"add accent curve arrow above the u or up. U can be capitalized"* — the word is
+now **FireUp**, with an ember curved arrow over the U. The lockup is in use on
+the marketing site in `site/`, but **sign-off on it has not been given** and is
+still open.
 
 This directory is in the public repository so the direction can be reviewed in a
 pull request. That is not approval. Until the mark is signed off, do not use it
@@ -29,10 +31,10 @@ stops it being an F.
 
 ## The lockup
 
-The lockup is not the mark plus the word. It is the word, with the mark as its
-**F**: the mark stands on the wordmark's baseline at 1.5x, its bar and fire
-overhang the lowercase, and the wordmark's own monoline `f` is not drawn,
-because that letter is now the mark. One object, read once.
+The lockup is not the mark plus the word. It is the word **FireUp**, with the
+mark as its **F**: the mark stands on the wordmark's baseline at 1.5x, its bar
+and fire overhang the lowercase, and the wordmark's own monoline `F` is not
+drawn, because that letter is now the mark. One object, read once.
 
 The three numbers that make it work, all in `scripts/build.mjs`:
 
@@ -64,13 +66,71 @@ The lockup's aspect went from 3.09:1 to 2.01:1, which is why the site header
 grew from a 52px to a 64px logo — at 52 the lowercase landed at a 14.9px
 x-height, smaller than the 16px body text next to it.
 
+## The arrow over the U
+
+Round 7, on the note *"add accent curve arrow above the u or up. U can be
+capitalized"*. It is `scripts/arrow.mjs` and `arrow/`. The mark is untouched:
+every favicon, app icon and mark variant in `site/assets/` is byte-for-byte what
+round 6 shipped, and so is the lockup's viewBox — the arrow fits inside the
+envelope the fire already set, so nothing downstream had to move.
+
+What the arrow is, and why each number is what it is:
+
+- **The shaft is 8 — the same as every letter.** The word is a monoline, and
+  its one existing accent, the i's tittle, is an 8-unit circle. An accent at any
+  other weight is a second voice in a one-voice drawing. The weight does not
+  scale with the arrow's length.
+- **It clears the U by 3 units.** That is the gap the tittle keeps over the i's
+  stem — the word's own accent clearance, read off the master rather than
+  chosen. Taking it to 0 so the arrow grows out of the letter (7a-C) makes the
+  U look like it has sprouted a hook at 96px.
+- **The chord runs stem to stem across the U, 30 across and 12.9 up.** Narrower
+  and the head is as long as the shaft, with no curve left to read. Out to the
+  p and it stops being an accent: a second ember object the size of the fire, at
+  the other end of the lockup.
+- **The head is 2.8 shafts wide and 1.7 long**, square to the arc's end tangent.
+  Below about 2.5 it reads as a comma.
+- **It bows like a growth curve** — flat out of the tail, turning up at the
+  head — and points up and to the right, the way the fire blows off the bar.
+  Bowed the other way it reads as arriving and flattening out.
+
+**The U is capitalised and so is the F.** The note allowed the capital U; the
+capital F is its consequence rather than a second idea. The lockup's F is the
+mark, which is a capital letterform, so the lockup already said *FireUp*. Had
+the word's own drawing kept its lowercase `f`, the wordmark variant in
+`site/assets/` would have said *fireUp* — two spellings of one name in one
+identity. The F needed 24 units against its 46-unit cap, which the lowercase
+f's slot did not have, so it takes them out of the left margin and every other
+letter stays exactly where it was (`arrow/initial-*.png`). Squeezed into the old
+slot instead, it comes out 15 units wide and still reads as an `f`.
+
+Rejected on the sheets, with the reason each one died:
+
+- **Over "Up" rather than over the U** — the arc runs the length of both
+  letters. It reads, but it rises past the fire's tip and takes the lockup from
+  2.01:1 to 1.80:1, and the accent becomes the largest object in the drawing.
+  If the gesture is what you want rather than the accent, this is the one to
+  ask for; it costs the header sizing again.
+- **Touching the letter, no clearance** — the mark's own rule is *nothing
+  floats*, so this was worth drawing. At 96px the tail fuses with the U's left
+  stem and the letter grows a hook.
+- **A chord inside the stems** — the head ends up as long as the shaft.
+
+**This is a logotype decision, not a spelling decision.** The site copy and the
+CLI still say "Fireup" in prose, which is normal — a logotype styles the name,
+it does not rename it. If the product name itself should become "FireUp"
+everywhere, that is the CEO's call and a separate change.
+
 ### How the mark got here
 
-The direction is the CEO's, in four steps: round 2's lifted-arm F came back as
+The direction is the CEO's, in six steps: round 2's lifted-arm F came back as
 *"use fire"*, round 3's burning top bar came back as *"treat F as a lighter gun
 and blow fire from right top side"*, round 4's lighter came back as *"4a is
-almost good. Omit nozzle entirely"*, and round 5 came back as *"A is perfect.
-Mix this F into fireup instead of locating next"*.
+almost good. Omit nozzle entirely"*, round 5 came back as *"A is perfect. Mix
+this F into fireup instead of locating next"*, and round 6 came back as
+*"almost good. Add accent curve arrow above the u or up. U can be
+capitalized"*. The mark has been frozen since round 5; everything after it is
+the word around it.
 
 Round 5 is two sheets — `scripts/plain.mjs` and `plain/`. Taking the muzzle out
 reopened the one question it had been answering, because the fire used to sit on
@@ -143,7 +203,7 @@ and is not mine to give — see the open flags at the bottom of this file.
 | File | What it is |
 |---|---|
 | `logo/mark.svg` | **Master.** The mark, 64-unit grid. |
-| `logo/wordmark.svg` | **Master.** "fireup", drawn as paths, not set in a font. |
+| `logo/wordmark.svg` | **Master.** "FireUp" and the arrow over its U, drawn as paths, not set in a font. |
 | `logo/favicon-16.svg` | **Master.** Its own drawing, cut to a 16×16 pixel grid. |
 | `logo/favicon-32.svg` | **Master.** Its own drawing, cut to a 32×32 pixel grid. |
 | `tokens/brand.json` | **Master.** Colour, type scale, spacing, radii. |
@@ -154,6 +214,7 @@ and is not mine to give — see the open flags at the bottom of this file.
 | `lighter/` | Round 4. The lighter reading: how literal, the jet, the muzzle, and which cues survive. |
 | `plain/` | Round 5. With the muzzle gone: where the fire meets the bar, and how far the bar runs. |
 | `mix/` | Round 6. Mixing the F into the word: the three directions, how big the F is, and how tight the word tucks. |
+| `arrow/` | Round 7. The arrow over the U: what it sits over, the case of the U, how big it is, and the word's own initial. |
 | `preview/` | What actually ships, at the sizes it ships at. Rendered from `site/assets/`, not from the masters. |
 | `../site/assets/` | Generated. Every variant, lockup, favicon, app icon and the social card. |
 
@@ -173,7 +234,10 @@ npm run check      # smoke test the pipeline, verify contrast, rebuild all asset
 
 - `npm run smoke` renders a known SVG and asserts the PNG really is the
   requested size with the expected pixels. It is there because "the export
-  script ran without erroring" is not evidence that it rendered anything.
+  script ran without erroring" is not evidence that it rendered anything. It
+  also widens each master's viewBox, re-measures, and fails if the drawing runs
+  outside the box it declares — round 4 shipped a flame that did, and the
+  renderer silently cut it flat.
 - `npm run contrast` computes every palette pair the brand uses and fails if one
   misses its WCAG AA threshold. Nothing is eyeballed.
 - `npm run build` regenerates `tokens/brand.css` and all of `site/assets/`.
@@ -183,11 +247,18 @@ npm run check      # smoke test the pipeline, verify contrast, rebuild all asset
 - `npm run lighter` re-renders the round 4 sheets in `lighter/`.
 - `npm run plain` re-renders the round 5 sheets in `plain/`.
 - `npm run mix` re-renders the round 6 lockup sheets in `mix/`.
+- `npm run arrow` re-renders the round 7 arrow sheets in `arrow/`, and prints
+  the shipping arrow's geometry so the numbers in the master are transcribed
+  rather than worked out twice.
 - `npm run preview` re-renders `preview/` from the built assets.
 
-`explore`, `tune`, `fire`, `lighter`, `plain` and `mix` are deliberately outside
-`check`: they are the record of a decision, not shipped assets, and they should
-only change when the question being asked changes. `preview` is outside it because looking at the
+`explore`, `tune`, `fire`, `lighter`, `plain`, `mix` and `arrow` are
+deliberately outside `check`: they are the record of a decision, not shipped
+assets, and they should only change when the question being asked changes.
+`fire` and `tune` hold their own copy of the drawings they compare; `mix` and
+`arrow` read the masters, so they re-render when a letterform changes — on
+purpose, because a sheet frozen against a drawing we no longer ship is worse
+than one that moves. `preview` is outside it because looking at the
 result is a human step, not a gate.
 
 ## Deciding by looking, not by arguing
@@ -259,11 +330,15 @@ Each of these breaks something specific, not just taste:
   renderer clips it flat.
 - **Do not** let the middle arm grow to the width of the top bar. The counter
   closing on the right is what turned earlier drawings into a P.
-- **Do not** set the wordmark in a font. It is drawn. Typing "fireup" in Inter
-  is not the wordmark.
+- **Do not** set the wordmark in a font. It is drawn. Typing "FireUp" in Inter
+  is not the wordmark, and neither is typing it with a Unicode arrow after it.
 - **Do not** write the mark and the word next to each other as two objects, and
-  do not draw an `f` in front of the word. The mark *is* the F; a lockup with
+  do not draw an `F` in front of the word. The mark *is* the F; a lockup with
   both says the name twice.
+- **Do not** redraw the arrow at a different weight, or let it scale with its
+  own length. It is 8 units because every letter is, and because the tittle is.
+- **Do not** lift the arrow off the U and use it on its own as an icon. It is an
+  accent on a letter; the mark is the F.
 - **Do not** shrink the F in the lockup to the word's own height, or close the
   gap after its middle arm. Either puts the i's tittle back under the fire,
   where the two merge into one blob by 128px.
