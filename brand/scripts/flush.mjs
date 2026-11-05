@@ -630,7 +630,9 @@ emit(
     ...DARK,
     width: MIN,
     scale: 5,
-    caption: `Round 13a at ${MIN}px wide — the stated lockup minimum — magnified 5x, real pixels, no resampling. 1.5 units is 0.9 of a device pixel here; the decision is made at 320.`,
+    caption:
+      `Round 13a at ${MIN}px wide — the stated lockup minimum — magnified 5x, real pixels, no resampling. ` +
+      `${OVER} units is ${((Number(OVER) / TODAY.box.w) * MIN).toFixed(2)} of a device pixel here; the decision is made at 320.`,
   }),
 )
 
