@@ -1,6 +1,6 @@
 # Fireup brand guide
 
-**Status: the mark is approved; the lockup around it is round 10 and is not.**
+**Status: the mark is approved; the lockup around it is round 11 and is not.**
 The round-5 mark — the F with the fire on the end of its bar, no muzzle — came
 back as *"A is perfect"*, so the drawing in `logo/mark.svg` is settled and does
 not change again without going back through the CEO. Everything since is the
@@ -14,7 +14,10 @@ decision rather than by default. Round 10 answered *"tighten the gap of arrow
 and U"* and found a measurement error doing it — the accent had been clearing
 the letter by **7 units while every comment said 3** — so the same drawing now
 sits 4 units lower, at a gap that is measured off the ink rather than off a
-construction line. The lockup is in use on the marketing site in `site/`, but
+construction line. Round 11 took the three answers on round 10's card: the gap
+to **2**, the i's dot down to **3** so the word keeps one accent clearance
+instead of two, and the capital U's stems up to the cap line so the two
+capitals align. The lockup is in use on the marketing site in `site/`, but
 **sign-off on it has not been given** and is still open.
 
 This directory is in the public repository so the direction can be reviewed in a
@@ -128,21 +131,73 @@ minimum — at 2 the tail and the U's left stem share a pixel there, and at 0 th
 accent stops floating and grows a hook off the letter. It is also, for the
 first time, the number the drawing has been claiming since round 7.
 
-Two things this round leaves open rather than settles:
+Round 10 left two things open rather than settling them — the tittle still
+keeping 7 where the arrow kept 3, and the capital U's ink stopping 4 units
+below the capital F's. Both were answered on its card, and both are round 11.
 
-- **The word's two accents no longer match.** The tittle still keeps 7. The
-  slots are close to the same shape (the tittle's runs 8.1 units, 7.1 at its
-  tightest and 7.9 on average; the arrow's is parallel, so its mean is its
-  minimum), so there is no optical account on which 3 and 7 are the same air.
-  Bringing the tittle down to 3 is one line and moves a letter — the CEO's
-  call, not mine.
-- **The capital U's ink stops 4 units below the capital F's.** Same cause: the
-  F's cap is a horizontal bar centred on y=4, so its ink runs to y=0. In the
-  lockup the F is the mark and nothing shows, but the standalone wordmark in
-  `site/assets/` draws both capitals and they do not align. Running the U's
-  stems to y=0 would fix that *and* close the accent gap to 3 on its own —
-  `tighten/mech-*.png` draws it beside the shipped option. It changes an
-  approved letter, so it is a question.
+### Round 11: the three answers, and the one that was not free
+
+The card came back with *"tighter still — take it to 2"*, *"bring the dot down
+to 3 too"* and *"raise the U's stems to the cap line"*. `npm run align`
+renders them (`align/`) and measures the result.
+
+**Tightening the gap moved the accent up, which is worth stating because it
+reads as a contradiction.** Raising the U's stems to the cap line removes
+exactly the 4 units round 10 found: the letter grows upward into the slot. Had
+the arrow held still it would have ended up 1 unit *inside* the letter. So it
+follows the letter up 4 and comes back down 1 for the tighter gap — net 3 units
+higher, 1 unit closer. The drawing itself is unchanged: every y in both of its
+paths moved by the same whole −3, so this is round 7's approved arrow at a
+different height rather than a redrawing of it.
+
+The gap is now **2 units exactly**, by construction rather than approximately —
+the tail is a butt cap on a horizontal, so its ink runs to −2, and the U's
+stems terminate on 0. Measured independently on the built
+`site/assets/fireup-lockup-dark.svg` it comes back at **2.01**; the dot's own
+gap at **3.01**.
+
+**The two accents are deliberately not the same number.** The tittle is a
+circle over a flat stem, so its slot pinches at one point and opens out on both
+sides — 3.0 at its tightest, 3.9 averaged over its run. The arrow's tail is
+flat over a flat cap, so its slot is parallel and its mean air *is* its
+minimum. Equal minimums would not have read as equal air. Matching the number
+instead, the dot at 2, is drawn as `align/accents-dark.png` E.
+
+**The dot was not a free line, and this is the part worth reading.** The lockup
+sizes the mark by clearing that dot: `scripts/build.mjs` scaled the F until its
+bar underside cleared the tittle by 3. Dropping the dot 4 units would have had
+that rule return a mark **8% smaller** — a 2.01:1 lockup gone to 2.14:1, taking
+the site header, the clear-space unit and the social card with it. Rendered at
+the 96px minimum the smaller mark is also simply worse: the F's counter muddies
+and the bar loses its edge (`align/zoom-size.png`).
+
+So the 3 units are now a **floor the mark has to clear, not a size to re-derive
+from every time a letter moves**. `SCALE` is frozen at the approved 1.5 and the
+equation is asserted instead of solved — it still catches a drawing change that
+puts the dot into the fire, and it no longer resizes an approved mark as a side
+effect of moving a dot. The bar now clears the dot by 7.
+
+**What it costs downstream: nothing.** The lockup's viewBox is unchanged, so
+the header sizing, the clear-space rule and the social card layout are exactly
+as they were. The mark, both favicons, every app icon and all three mark
+variants are byte-for-byte unchanged. The word-alone variant's own viewBox
+followed the accent up 3, which reaches nothing else.
+
+### Exploration sheets are pinned to their own round
+
+Round 11 is the round that proved they had to be. Moving the tittle and the U
+re-rendered **108 sheets** across `arrow/`, `gesture/`, `mix/` and `tighten/`
+with letters those rounds never drew — round 10's own sheet came back measuring
+3 units of air under a tittle it captions as keeping 7. A sheet is the evidence
+for a decision that has already been made, so it has to keep showing what was
+shown.
+
+`word.mjs` now carries a `HISTORY` of letters as earlier rounds drew them, and
+each of those scripts pins itself with `const AS_OF = 'round-10'`. Two things
+leaked and had to be pinned as well as the glyphs: `ACCENT_CLEARANCE`, which
+rounds 7 and 8 used to *place* the arrow rather than merely to describe it, and
+the round-10 rows inside `align.mjs` itself, which read the live dot and so
+stopped depicting round 10 the moment the master was edited.
 
 What the accent is, and why each number is what it is:
 
@@ -151,10 +206,11 @@ What the accent is, and why each number is what it is:
   is a second voice in a one-voice drawing. It does **not** scale with the
   arc's length: in the first cut of round 7 it did, which quietly made a longer
   arc a heavier drawing rather than a bigger one.
-- **It clears the U's ink by 3 units** (round 10; rounds 7 to 9 drew 7 and
-  called it 3 — see below). That is the tightest air that still holds a slot of
-  background at the 96px minimum. Taken to 0 the tail fuses with the U's left
-  stem and the letter grows a hook.
+- **It clears the U's ink by 2 units** (round 11; round 10 drew 3, and rounds 7
+  to 9 drew 7 while calling it 3 — see below). At the 96px minimum that slot is
+  one device pixel, so the renderer is deciding and the drawing is not; that
+  cost was costed on round 10's sheet and accepted. Taken to 0 the tail fuses
+  with the U's left stem and the letter grows a hook.
 - **The chord is 30 across and 12.9 up**, stem to stem on the U, centred on the
   letter. It is sized to the letter it sits over, which is what makes it an
   accent rather than a second object.
@@ -303,6 +359,7 @@ and is not mine to give — see the open flags at the bottom of this file.
 | `arrow/` | Round 7. The arrow over the U: what it sits over, the case of the U, how big it is, and the word's own initial. |
 | `gesture/` | Round 8. How long the arc is: four chords from the accent to the full "Up", and how much air each leaves the fire. The gesture was chosen here and then declined on cost; round 9 is row D. |
 | `tighten/` | Round 10. How much air the accent keeps over the U, in units measured off the ink: six values, and which end of the gap moves. |
+| `align/` | Round 11. The three answers applied one at a time; what the dot's new height does to the mark's size; and the two capitals against the F's own cap line. |
 | `preview/` | What actually ships, at the sizes it ships at. Rendered from `site/assets/`, not from the masters. |
 | `../site/assets/` | Generated. Every variant, lockup, favicon, app icon and the social card. |
 
@@ -345,10 +402,16 @@ npm run check      # smoke test the pipeline, verify contrast, rebuild all asset
   air between accent and letter in device pixels at every width the lockup is
   really used at, and prints the shipping arrow's geometry. `SHIP_AIR=<units>`
   prints it for a different gap without changing what the sheets show.
+- `npm run align` re-renders the round 11 sheets in `align/`, measures both
+  accents in device pixels at every real width, and prints what goes into the
+  master. It places the arrow by reading the glyph out of the master and
+  measuring it, so its sheets come out **byte-identical whether it is run
+  against round 10's master or round 11's** — which is a standing check that
+  the transcription into the drawing landed where the sheet said it would.
 - `npm run preview` re-renders `preview/` from the built assets.
 
-`explore`, `tune`, `fire`, `lighter`, `plain`, `mix`, `arrow`, `gesture` and
-`tighten` are
+`explore`, `tune`, `fire`, `lighter`, `plain`, `mix`, `arrow`, `gesture`,
+`tighten` and `align` are
 deliberately outside `check`: they are the record of a decision, not shipped
 assets, and they should only change when the question being asked changes.
 `fire` and `tune` hold their own copy of the drawings they compare; `mix` and
