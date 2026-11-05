@@ -50,6 +50,6 @@
     <path d="M150 20 V50"/>
     <path d="M166 20 V66"/>
     <path d="M166 20 H181 A15 15 0 0 1 181 50 H166"/>
+    <circle cx="34" cy="9" r="4" fill="#0B1220" stroke="none"/>
   </g>
-  <circle cx="45.00" cy="9" r="4" fill="#0B1220"/>
 </svg>

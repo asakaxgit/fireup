@@ -27,6 +27,7 @@
 // to x=56.
 import { Resvg } from '@resvg/resvg-js'
 import { renderPng, contentBox, pixelMap } from './render.mjs'
+import { master, innerOf, recolour, spell, W as WORDMARK, DOT } from './word.mjs'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -41,32 +42,25 @@ const EMBER = tokens.color.ember
 const EMBER_DEEP = tokens.color['ember-deep']
 const MUTED = tokens.color['paper-muted']
 
-const master = (name) => readFileSync(join(root, 'logo', `${name}.svg`), 'utf8')
-const recolour = (svg, fg, accent) => svg.replaceAll('#FFFFFF', fg).replaceAll('#FF5A2B', accent)
-const innerOf = (svg) => svg.replace(/^[\s\S]*?<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '')
-
 // --- the two masters, taken apart only as far as this round needs -------------
 
 const MARK = innerOf(master('mark'))
 
-// The wordmark's letters in drawing order: the f is the first two paths, so
-// "ireup" is everything after them. Read out of the master rather than retyped,
-// so a change to the wordmark reaches these sheets.
-const WORD = master('wordmark')
-const WORD_PATHS = WORD.match(/<path [^>]*\/>/g)
-const WORD_DOT = WORD.match(/<circle [^>]*\/>/)[0]
-const IREUP = WORD_PATHS.slice(2).join('\n    ')
-const F_PATHS = WORD_PATHS.slice(0, 2).join('\n    ')
+// The letters this round was drawn with, named. It used to take "ireup" as
+// every path after the first two, which quietly means "whatever the master
+// happens to draw next" — and round 7 adds a glyph. Naming them keeps these
+// sheets showing the round-6 question: how the F mixes into the word.
+const IREUP_GLYPHS = ['i', 'r', 'e', 'u', 'p']
 
-// Geometry constants of the two drawings, named once.
-const W = { baseline: 50, xTop: 20, ascTop: 4, desc: 66, stroke: 8, ireupL: 30, ireupR: 200 }
+// Geometry constants of the two drawings. The word's come off its own master
+// via word.mjs; the mark's are named here.
+const W = { ...WORDMARK, desc: WORDMARK.descender, ireupR: 200 }
 const M = { foot: 60, capTop: 16, bar: 12, armEnd: 28, barEnd: 36, fireTip: 1, fireEnd: 56, stemL: 6 }
-const DOT = { cx: 34, cy: 9, r: 4 } // the i's tittle, in wordmark units
 
 // The wordmark's own whitespace between letters, measured off the master: the
 // i's stem spans x=30..38 and the r's spans 46..54, so eight units of air.
 // I had this at 14 — the stem-to-stem pitch — until 6c was rendered.
-const LETTER_GAP = 8
+const LETTER_GAP = W.letterGap
 
 // Place the mark in wordmark coordinates: its foot on the word's baseline, its
 // stem's left edge at `mx`, scaled by `s`.
@@ -80,12 +74,8 @@ const markAt = (s, mx) => ({
 })
 
 // "ireup", moved so its left edge lands on `wx`. `tittle` false drops the dot.
-const ireupAt = (wx, { tittle = true } = {}) => (fg) => `
-    <g fill="none" stroke="${fg}" stroke-width="${W.stroke}" stroke-linecap="butt" stroke-linejoin="round"
-       transform="translate(${(wx - W.ireupL).toFixed(2)} 0)">
-    ${IREUP}
-    </g>
-    ${tittle ? `<circle cx="${(DOT.cx + wx - W.ireupL).toFixed(2)}" cy="${DOT.cy}" r="${DOT.r}" fill="${fg}"/>` : ''}`
+const ireupAt = (wx, { tittle = true } = {}) => (fg) =>
+  spell(tittle ? [...IREUP_GLYPHS, 'tittle'] : IREUP_GLYPHS, { shift: wx - W.ireupL, fg })
 
 // --- the options --------------------------------------------------------------
 // Each is a composition in wordmark units. `clearance` is the vertical gap
@@ -305,12 +295,7 @@ const riserOf = (option) => (fg) => {
 
 const bodyOf = (option) => {
   const parts = [option.mark.place]
-  if (option.keepF) {
-    parts.push((fg) => `<g fill="none" stroke="${fg}" stroke-width="${W.stroke}" stroke-linecap="butt" stroke-linejoin="round"
-       transform="translate(${(option.wx - W.ireupL).toFixed(2)} 0)">
-    ${F_PATHS}
-    </g>`)
-  }
+  if (option.keepF) parts.push((fg) => spell(['f'], { shift: option.wx - W.ireupL, fg }))
   parts.push(ireupAt(option.wx, { tittle: option.tittle }))
   if (option.riser) parts.push(riserOf(option))
   return compose(parts)

@@ -1,29 +1,52 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="-6 -2 212 76" role="img" aria-label="fireup">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-6 -2 212 76" role="img" aria-label="fireup"
+     fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="butt" stroke-linejoin="round"
+     data-baseline="50" data-x-top="20" data-asc-top="4" data-descender="66" data-stroke="8"
+     data-ireup-left="30" data-letter-gap="8">
   <!-- MASTER. Hand-drawn geometric monoline wordmark. Drawn rather than set, so
        the identity carries no webfont licence and does not depend on a font
        file being present to render. Construction: baseline y=50, x-height top
-       y=20, ascender y=4, descender y=66, stroke 8, bowl radius 15.
-       Colour variants and lockups are generated from this file and
-       mark.svg — see brand/scripts/build.mjs. -->
-  <g fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="butt" stroke-linejoin="round">
-    <!-- f -->
+       y=20, ascender y=4, descender y=66, stroke 8, bowl radius 15 — carried on
+       the root as data-* so the scripts read them rather than repeating them.
+
+       The monoline paint sits on the root and inherits, so every letter below is
+       a flat, self-contained group addressed by data-glyph. The lockup composes
+       itself by naming the glyphs it wants (brand/scripts/word.mjs); it does not
+       count paths. Counting is how a change here silently reaches the wrong
+       letter there.
+
+       data-letter-gap is the whitespace this drawing keeps between two letters,
+       measured off it: the i's stem ends at 38 and the r's begins at 46. The
+       lockup spaces the mark like a letter, so it uses the same 8.
+
+       Colour variants and lockups are generated from this file and mark.svg —
+       see brand/scripts/build.mjs. -->
+  <g data-glyph="f">
     <path d="M12 50 V13 A8 8 0 0 1 20 5"/>
     <path d="M4 20 H23"/>
-    <!-- i -->
+  </g>
+  <g data-glyph="i">
     <path d="M34 20 V50"/>
-    <!-- r -->
+  </g>
+  <g data-glyph="r">
     <path d="M50 20 V50"/>
     <path d="M50 32 Q50 20 63 20"/>
-    <!-- e -->
+  </g>
+  <g data-glyph="e">
     <path d="M104 35 A15 15 0 1 0 96.5 48"/>
     <path d="M74 35 H104"/>
-    <!-- u -->
+  </g>
+  <g data-glyph="u">
     <path d="M120 20 V35 A15 15 0 0 0 150 35"/>
     <path d="M150 20 V50"/>
-    <!-- p -->
+  </g>
+  <g data-glyph="p">
     <path d="M166 20 V66"/>
     <path d="M166 20 H181 A15 15 0 0 1 181 50 H166"/>
   </g>
-  <!-- dot of the i, drawn solid so it keeps its weight at small sizes -->
-  <circle cx="34" cy="9" r="4" fill="currentColor"/>
+  <!-- dot of the i, drawn solid so it keeps its weight at small sizes. It sits
+       3 units above the i's stem; that gap is this drawing's own diacritic
+       clearance, and anything else set over a letter uses the same 3. -->
+  <g data-glyph="tittle">
+    <circle cx="34" cy="9" r="4" fill="currentColor" stroke="none"/>
+  </g>
 </svg>

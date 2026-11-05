@@ -9,6 +9,7 @@
 //   site/assets/*.svg        colour variants and lockups, composed from masters
 //   site/assets/*.png        favicons, app icons, social card
 import { renderPng, contentBox } from './render.mjs'
+import { master, innerOf, recolour, spell, W, DOT } from './word.mjs'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -19,7 +20,6 @@ const assets = join(brand, '..', 'site', 'assets')
 const tokens = JSON.parse(readFileSync(join(brand, 'tokens', 'brand.json'), 'utf8'))
 const c = tokens.color
 
-const master = (name) => readFileSync(join(brand, 'logo', `${name}.svg`), 'utf8')
 const write = (name, text) => {
   writeFileSync(join(assets, name), text)
   return name
@@ -58,9 +58,6 @@ written.push(write('tokens.css', css))
 
 // --- colour variants of the two masters -------------------------------------
 // Substitution, not re-drawing, so the geometry has exactly one definition.
-const recolour = (svg, fg, accent) =>
-  svg.replaceAll('#FFFFFF', fg).replaceAll('#FF5A2B', accent)
-
 const VARIANTS = {
   dark: [c.paper, c.ember], // for ink backgrounds
   light: [c.ink, c['ember-deep']], // for white backgrounds
@@ -84,17 +81,13 @@ for (const [variant, [fg, accent]] of Object.entries(VARIANTS)) {
 // paths with the first two (the f) left out.
 const MARK_BOX = contentBox(master('mark'))
 
-// Construction numbers of the two drawings. These are decisions, not ink, so
-// they are named here rather than measured: wordmark baseline, x-height top,
-// the i's tittle, and the F's foot and cap line inside the mark.
-const BASELINE = 50
-const DOT = { cx: 34, cy: 9, r: 4 }
-const IREUP_LEFT = 30 // the i's stem starts here in the wordmark's own units
-const STROKE = 8
-// The whitespace the wordmark already keeps between two letters: the i's stem
-// ends at 38 and the r's begins at 46. The F is spaced like a letter, so the
-// word starts this far after the F's middle arm.
-const LETTER_GAP = 8
+// The word's construction numbers — baseline, the i's tittle, where "ireup"
+// starts, and the letter gap — come from the wordmark master itself via
+// word.mjs. They used to be retyped here, which is how round 6 shipped a
+// letter gap of 14 against a drawing that uses 8.
+const BASELINE = W.baseline
+const IREUP_LEFT = W.ireupL
+const LETTER_GAP = W.letterGap
 
 const capLine = (name) => {
   const svg = master(name)
@@ -127,18 +120,12 @@ const markY = (v) => BASELINE + (v - MARK_FOOT) * SCALE
 const WORD_X = markX(ARM_END) + LETTER_GAP // where "ireup" starts
 const SHIFT = WORD_X - IREUP_LEFT
 
-const innerOf = (svg) => svg.replace(/^[\s\S]*?<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '')
-
-// The word without its f. The master draws the letters in reading order, so the
-// f is the first two paths; the circle is the i's tittle.
-const WORD_SRC = master('wordmark')
-const IREUP = WORD_SRC.match(/<path [^>]*\/>/g).slice(2).join('\n    ')
+// The letters the lockup spells, named rather than counted. The f is absent
+// because the mark is that letter.
+const IREUP = ['i', 'r', 'e', 'u', 'p', 'tittle']
 
 const lockupBody = (fg, accent) => `<g transform="translate(${(-STEM_LEFT * SCALE).toFixed(2)} ${(BASELINE - MARK_FOOT * SCALE).toFixed(2)}) scale(${SCALE.toFixed(4)})">${innerOf(recolour(master('mark'), fg, accent))}</g>
-  <g fill="none" stroke="${fg}" stroke-width="${STROKE}" stroke-linecap="butt" stroke-linejoin="round" transform="translate(${SHIFT.toFixed(2)} 0)">
-    ${IREUP}
-  </g>
-  <circle cx="${(DOT.cx + SHIFT).toFixed(2)}" cy="${DOT.cy}" r="${DOT.r}" fill="${fg}"/>`
+  ${spell(IREUP, { shift: SHIFT, fg, accent })}`
 
 // The viewBox is the rendered alpha's own box, so the flame's overshoot above
 // the cap and the p's descender below the baseline both set it. A hand-counted

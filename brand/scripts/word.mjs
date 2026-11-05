@@ -1,0 +1,102 @@
+#!/usr/bin/env node
+// The wordmark master, taken apart by name.
+//
+// Everything that composes a lockup needs the same two things: the word's
+// construction numbers, and some subset of its letters. Both used to be
+// retyped in every script that wanted them — build.mjs had its own copy of the
+// baseline and the i's tittle, and both build.mjs and mix.mjs selected "ireup"
+// as "every path after the first two". That is fine until a letter is added or
+// reordered, at which point the lockup quietly draws the wrong thing. Round 6
+// already cost one wrong constant that way.
+//
+// So: the numbers live on the root of logo/wordmark.svg as data-*, the letters
+// live in flat groups tagged data-glyph, and this module is the only thing that
+// knows how to read either.
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+
+const logo = join(dirname(fileURLToPath(import.meta.url)), '..', 'logo')
+
+export const master = (name) => readFileSync(join(logo, `${name}.svg`), 'utf8')
+
+export const innerOf = (svg) => svg.replace(/^[\s\S]*?<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '')
+
+export const recolour = (svg, fg, accent) => svg.replaceAll('#FFFFFF', fg).replaceAll('#FF5A2B', accent)
+
+const number = (svg, attr) => {
+  const found = svg.match(new RegExp(`data-${attr}="([-\\d.]+)"`))
+  if (!found) throw new Error(`master is missing data-${attr}`)
+  return Number(found[1])
+}
+
+const rootTag = (svg) => svg.match(/<svg[^>]*>/)[0]
+
+// The presentation attributes on the master's root, which every letter group
+// inherits. A composer that lifts groups out of the master has to carry these
+// with them or the letters come out unpainted.
+const PAINT = ['fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin']
+const paintOf = (svg) => {
+  const tag = rootTag(svg)
+  return PAINT.map((name) => {
+    const found = tag.match(new RegExp(`\\s${name}="([^"]*)"`))
+    return found ? `${name}="${found[1]}"` : null
+  })
+    .filter(Boolean)
+    .join(' ')
+}
+
+// name -> markup, in drawing order.
+const glyphsOf = (svg) => {
+  const found = new Map()
+  const groups = svg.match(/<g data-glyph="[^"]+">[\s\S]*?<\/g>/g) ?? []
+  for (const group of groups) {
+    const name = group.match(/data-glyph="([^"]+)"/)[1]
+    found.set(name, group.replace(/^<g [^>]*>/, '').replace(/<\/g>$/, '').trim())
+  }
+  return found
+}
+
+const WORDMARK = master('wordmark')
+
+// Construction numbers, read once from the drawing that defines them.
+export const W = {
+  baseline: number(WORDMARK, 'baseline'),
+  xTop: number(WORDMARK, 'x-top'),
+  ascTop: number(WORDMARK, 'asc-top'),
+  descender: number(WORDMARK, 'descender'),
+  stroke: number(WORDMARK, 'stroke'),
+  ireupL: number(WORDMARK, 'ireup-left'),
+  letterGap: number(WORDMARK, 'letter-gap'),
+}
+
+export const GLYPHS = glyphsOf(WORDMARK)
+export const WORD_PAINT = paintOf(WORDMARK)
+
+// The i's tittle, read off its own drawing rather than retyped. It is also the
+// reference for any other accent over a letter: its underside sits
+// `W.xTop - W.stroke / 2 - (cy + r)` above the stem it floats over.
+const tittle = GLYPHS.get('tittle').match(/cx="([\d.]+)"[^>]*cy="([\d.]+)"[^>]*r="([\d.]+)"/)
+export const DOT = { cx: Number(tittle[1]), cy: Number(tittle[2]), r: Number(tittle[3]) }
+
+// The gap the word keeps between a floating accent and the letter under it.
+export const ACCENT_CLEARANCE = W.xTop - W.stroke / 2 - (DOT.cy + DOT.r)
+
+// Markup for a named set of glyphs, shifted horizontally and painted. Unknown
+// names throw: asking for a letter the master does not draw is a bug, not an
+// empty string.
+export const spell = (names, { shift = 0, fg = '#FFFFFF', accent = '#FF5A2B' } = {}) => {
+  const body = names
+    .map((name) => {
+      const found = GLYPHS.get(name)
+      if (!found) throw new Error(`wordmark has no glyph "${name}" (has: ${[...GLYPHS.keys()].join(', ')})`)
+      return found
+    })
+    .join('\n    ')
+  const move = shift === 0 ? '' : ` transform="translate(${shift.toFixed(2)} 0)"`
+  // The paint carries the monoline's own #FFFFFF, so it is recoloured with the
+  // glyphs rather than after them.
+  return `<g ${recolour(WORD_PAINT, fg, accent)}${move}>
+    ${recolour(body, fg, accent)}
+  </g>`
+}

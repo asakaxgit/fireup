@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // Proves the raster pipeline end to end: render a known SVG, then assert the
 // PNG is a real PNG of the requested size with the expected pixel colours.
+// Also asserts no master draws outside its own viewBox.
 // Run with `npm run smoke` in brand/.
-import { renderPng } from './render.mjs'
+import { renderPng, contentBox } from './render.mjs'
+import { master } from './word.mjs'
 import { inflateSync } from 'node:zlib'
 
 const SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
@@ -108,6 +110,42 @@ check('background pixel is the ink colour', () => {
 check('foreground pixel is the ember colour', () => {
   const [r, g, b, a] = pixelAt(png512, 512, 256, 256)
   if (r !== 0xff || g !== 0x5a || b !== 0x2b || a !== 255) throw new Error(`got ${r},${g},${b},${a}`)
+})
+
+// Round 4 shipped a flame that ran past its own viewBox. The renderer cut the
+// outer lobe flat and nothing below 512px showed it, because a master is only
+// ever rendered through its own viewBox — so ink outside it is invisible rather
+// than wrong-looking. Measuring the drawing through a *widened* viewBox is the
+// only way to see it, and that is what this does. It fails the build.
+const MASTERS = ['mark', 'wordmark', 'favicon-16', 'favicon-32']
+
+check('no master draws outside its own viewBox', () => {
+  const clipped = []
+  for (const name of MASTERS) {
+    const svg = master(name)
+    const [x, y, w, h] = svg
+      .match(/viewBox="([^"]+)"/)[1]
+      .trim()
+      .split(/[\s,]+/)
+      .map(Number)
+    const pad = { x: w / 2, y: h / 2 }
+    const wide = svg.replace(
+      /viewBox="[^"]+"/,
+      `viewBox="${x - pad.x} ${y - pad.y} ${w + pad.x * 2} ${h + pad.y * 2}"`,
+    )
+    const box = contentBox(wide)
+    // The box comes off a raster, so an edge sitting exactly on the viewBox
+    // edge lands within one sampled pixel of it. One pixel of slack.
+    const slack = (w + pad.x * 2) / 1024
+    const over = [
+      box.x < x - slack && `left by ${(x - box.x).toFixed(1)}`,
+      box.y < y - slack && `top by ${(y - box.y).toFixed(1)}`,
+      box.x + box.w > x + w + slack && `right by ${(box.x + box.w - x - w).toFixed(1)}`,
+      box.y + box.h > y + h + slack && `bottom by ${(box.y + box.h - y - h).toFixed(1)}`,
+    ].filter(Boolean)
+    if (over.length) clipped.push(`${name}.svg overflows ${over.join(', ')}`)
+  }
+  if (clipped.length) throw new Error(clipped.join('; '))
 })
 
 for (const [status, name] of checks) console.log(`${status.padEnd(4)} ${name}`)
