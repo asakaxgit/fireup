@@ -13,6 +13,7 @@
     "plain": "node scripts/plain.mjs",
     "mix": "node scripts/mix.mjs",
     "arrow": "node scripts/arrow.mjs",
+    "gesture": "node scripts/gesture.mjs",
     "preview": "node scripts/preview.mjs",
     "check": "npm run smoke && npm run contrast && npm run build"
   },

@@ -1,15 +1,16 @@
 # Fireup brand guide
 
-**Status: the mark is approved; the lockup around it is round 7 and is not.**
+**Status: the mark is approved; the lockup around it is round 8 and is not.**
 The round-5 mark — the F with the fire on the end of its bar, no muzzle — came
 back as *"A is perfect"*, so the drawing in `logo/mark.svg` is settled and does
 not change again without going back through the CEO. Everything since is the
 lockup and the word around that frozen mark: round 6 made the mark the word's
-initial letter rather than an object standing beside it, and round 7 answers
+initial letter rather than an object standing beside it, round 7 answered
 *"add accent curve arrow above the u or up. U can be capitalized"* — the word is
-now **FireUp**, with an ember curved arrow over the U. The lockup is in use on
-the marketing site in `site/`, but **sign-off on it has not been given** and is
-still open.
+now **FireUp** — and round 8 took the arrow from an accent over the U to the big
+arc over the whole *"Up"*, which is what the note on round 7 asked for. The
+lockup is in use on the marketing site in `site/`, but **sign-off on it has not
+been given** and is still open.
 
 This directory is in the public repository so the direction can be reviewed in a
 pull request. That is not approval. Until the mark is signed off, do not use it
@@ -64,35 +65,53 @@ rejected against this one:
 
 The lockup's aspect went from 3.09:1 to 2.01:1, which is why the site header
 grew from a 52px to a 64px logo — at 52 the lowercase landed at a 14.9px
-x-height, smaller than the 16px body text next to it.
+x-height, smaller than the 16px body text next to it. Round 8's arc moved it
+again, to 1.80:1, and the header went 64px -> 72px and the phone header
+52px -> 58px for the same reason: the box grew, the letters did not, so the
+height has to follow or the word shrinks. Both heights are the ones that hold
+the word at 0.61px per unit, exactly the size it was before.
 
-## The arrow over the U
+## The arc over "Up"
 
-Round 7, on the note *"add accent curve arrow above the u or up. U can be
-capitalized"*. It is `scripts/arrow.mjs` and `arrow/`. The mark is untouched:
-every favicon, app icon and mark variant in `site/assets/` is byte-for-byte what
-round 6 shipped, and so is the lockup's viewBox — the arrow fits inside the
-envelope the fire already set, so nothing downstream had to move.
+Rounds 7 and 8, on the note *"add accent curve arrow above the u or up. U can be
+capitalized"*. Round 7 drew it as an **accent** — a 30-unit chord, stem to stem
+on the U, sized to sit in the word the way the tittle does. Round 7's own sheets
+offered the other reading beside it and the answer took it: *"use the big arc
+over the whole 'Up' instead — I accept that it takes the lockup to 1.80:1 and
+moves the header sizing again."* So the shipped arc is deliberately **not** a
+diacritic. It is `scripts/arrow.mjs` + `arrow/` for round 7 and
+`scripts/gesture.mjs` + `gesture/` for round 8.
 
-What the arrow is, and why each number is what it is:
+The mark is untouched in both rounds. Every favicon, app icon and mark variant
+in `site/assets/` is byte-for-byte what round 6 shipped.
+
+What the arc is, and why each number is what it is:
 
 - **The shaft is 8 — the same as every letter.** The word is a monoline, and
-  its one existing accent, the i's tittle, is an 8-unit circle. An accent at any
-  other weight is a second voice in a one-voice drawing. The weight does not
-  scale with the arrow's length.
-- **It clears the U by 3 units.** That is the gap the tittle keeps over the i's
-  stem — the word's own accent clearance, read off the master rather than
-  chosen. Taking it to 0 so the arrow grows out of the letter (7a-C) makes the
-  U look like it has sprouted a hook at 96px.
-- **The chord runs stem to stem across the U, 30 across and 12.9 up.** Narrower
-  and the head is as long as the shaft, with no curve left to read. Out to the
-  p and it stops being an accent: a second ember object the size of the fire, at
-  the other end of the lockup.
+  its one existing accent, the i's tittle, is an 8-unit circle. A second weight
+  is a second voice in a one-voice drawing. It does **not** scale with the
+  arc's length: in the first cut of round 7 it did, which quietly made a longer
+  arc a heavier drawing rather than a bigger one.
+- **It clears the U's cap by 3 units.** That is the gap the tittle keeps over
+  the i's stem — the word's own accent clearance, read off the master rather
+  than chosen. Taken to 0 the tail fuses with the U's left stem at 96px.
+- **The chord is 76 across and 32.7 up**, from the U's left edge to the end of
+  the p's bowl, centred on "Up". It is the width of what it spans.
 - **The head is 2.8 shafts wide and 1.7 long**, square to the arc's end tangent.
   Below about 2.5 it reads as a comma.
 - **It bows like a growth curve** — flat out of the tail, turning up at the
   head — and points up and to the right, the way the fire blows off the bar.
   Bowed the other way it reads as arriving and flattening out.
+
+**What the gesture costs, measured rather than argued.** The arc is now the
+largest object in the identity and the thing that sets the lockup's envelope:
+it tips **12.9 units above the fire**, taking the lockup from 2.01:1 to
+**1.80:1**, so the wordmark master's viewBox grew upward and the site header
+was resized a second time (below). It keeps **55 units of air** from the fire —
+`scripts/gesture.mjs` measures that distance off the two rendered layers rather
+than eyeballing it — so the two ember objects do not crowd. And at the 96px
+minimum it is the **most legible** of the four chords drawn, simply because it
+is the largest: `gesture/zoom-chord.png` is those four as real pixels.
 
 **The U is capitalised and so is the F.** The note allowed the capital U; the
 capital F is its consequence rather than a second idea. The lockup's F is the
@@ -106,20 +125,20 @@ slot instead, it comes out 15 units wide and still reads as an `f`.
 
 Rejected on the sheets, with the reason each one died:
 
-- **Over "Up" rather than over the U** — the arc runs the length of both
-  letters. It reads, but it rises past the fire's tip and takes the lockup from
-  2.01:1 to 1.80:1, and the accent becomes the largest object in the drawing.
-  If the gesture is what you want rather than the accent, this is the one to
-  ask for; it costs the header sizing again.
+- **The 30-unit accent** (round 7 as shipped, `gesture/` row D) — correct as a
+  diacritic and wrong as the brief. It was replaced by direction, not by a
+  defect.
+- **A 48-unit chord**, the midpoint, centred over "Up" or over the U
+  (`gesture/` rows B and C). Centred over the U it has no anchor: it starts
+  above the `e` and ends over the gap, pointing at nothing in particular.
 - **Touching the letter, no clearance** — the mark's own rule is *nothing
   floats*, so this was worth drawing. At 96px the tail fuses with the U's left
   stem and the letter grows a hook.
 - **A chord inside the stems** — the head ends up as long as the shaft.
 
-**This is a logotype decision, not a spelling decision.** The site copy and the
-CLI still say "Fireup" in prose, which is normal — a logotype styles the name,
-it does not rename it. If the product name itself should become "FireUp"
-everywhere, that is the CEO's call and a separate change.
+**This is a logotype decision, not a spelling decision**, and that was confirmed
+rather than assumed: the product stays **"Fireup"** in prose, in the site copy,
+the README and the CLI. A logotype styles a name; it does not rename it.
 
 ### How the mark got here
 
@@ -203,7 +222,7 @@ and is not mine to give — see the open flags at the bottom of this file.
 | File | What it is |
 |---|---|
 | `logo/mark.svg` | **Master.** The mark, 64-unit grid. |
-| `logo/wordmark.svg` | **Master.** "FireUp" and the arrow over its U, drawn as paths, not set in a font. |
+| `logo/wordmark.svg` | **Master.** "FireUp" and the arc over its "Up", drawn as paths, not set in a font. |
 | `logo/favicon-16.svg` | **Master.** Its own drawing, cut to a 16×16 pixel grid. |
 | `logo/favicon-32.svg` | **Master.** Its own drawing, cut to a 32×32 pixel grid. |
 | `tokens/brand.json` | **Master.** Colour, type scale, spacing, radii. |
@@ -215,6 +234,7 @@ and is not mine to give — see the open flags at the bottom of this file.
 | `plain/` | Round 5. With the muzzle gone: where the fire meets the bar, and how far the bar runs. |
 | `mix/` | Round 6. Mixing the F into the word: the three directions, how big the F is, and how tight the word tucks. |
 | `arrow/` | Round 7. The arrow over the U: what it sits over, the case of the U, how big it is, and the word's own initial. |
+| `gesture/` | Round 8. How long the arc is, once the answer chose the gesture over the accent — and how much air it leaves the fire. |
 | `preview/` | What actually ships, at the sizes it ships at. Rendered from `site/assets/`, not from the masters. |
 | `../site/assets/` | Generated. Every variant, lockup, favicon, app icon and the social card. |
 
@@ -250,9 +270,12 @@ npm run check      # smoke test the pipeline, verify contrast, rebuild all asset
 - `npm run arrow` re-renders the round 7 arrow sheets in `arrow/`, and prints
   the shipping arrow's geometry so the numbers in the master are transcribed
   rather than worked out twice.
+- `npm run gesture` re-renders the round 8 chord sheets in `gesture/`, measures
+  the distance between the arc and the fire off the two rendered layers, and
+  prints the shipping arc's geometry for the same reason.
 - `npm run preview` re-renders `preview/` from the built assets.
 
-`explore`, `tune`, `fire`, `lighter`, `plain`, `mix` and `arrow` are
+`explore`, `tune`, `fire`, `lighter`, `plain`, `mix`, `arrow` and `gesture` are
 deliberately outside `check`: they are the record of a decision, not shipped
 assets, and they should only change when the question being asked changes.
 `fire` and `tune` hold their own copy of the drawings they compare; `mix` and

@@ -99,12 +99,19 @@ code {
 }
 
 .brand { display: flex; }
-/* Sized by height, so the lockup's aspect sets how big the word comes out. The
-   round-6 lockup is 2.01:1 where the old one was 3.09:1, and the flame's
-   overshoot is 37 of its 105 units — so at the old 52px the lowercase landed at
-   a 14.9px x-height, under the 16px body text beside it. 64px puts the
-   x-height back at 18.3px and the F's cap at 40px. */
-.brand img { display: block; height: 64px; width: auto; }
+/* Sized by height, so the lockup's aspect sets how big the word comes out — and
+   round 8 moved it again: 2.01:1 -> 1.80:1, because the arc over "Up" tips 12.9
+   units above the fire and the envelope grew upward to hold it.
+   The letters did not get bigger; the box did. So the height goes up by what
+   the box did and the word stays the size it is today: 64px of a 105-unit box
+   and 72px of a 117.66-unit one are both 0.61px per unit — an 18.3px x-height,
+   against the 16px body text beside it. Holding 64px would instead shrink the
+   lowercase to 16.3px to make room for the arrow.
+   Clear space is now the tight one here: one bar of the mark is 18 of the
+   lockup's 117.66 units, so 11.0px at 72px, against the 12px of block padding
+   above. It clears, by 1px. Anything taller than this needs the padding to go
+   up with it. */
+.brand img { display: block; height: 72px; width: auto; }
 
 .nav {
   display: flex;
@@ -390,13 +397,16 @@ code {
 }
 
 @media (max-width: 40rem) {
-  /* 42px was fine against the old 3.09:1 lockup. Against the round-6 one it is
-     84.6px wide — under our own 96px minimum, below which the rule says use the
-     mark alone. 52px is 104.7px wide, the first height that clears it.
-     Clear space: one bar of the mark is 18 of the lockup's 105 units, so 8.9px
-     here; s (16px) of block padding clears it. */
+  /* Two things force this height and they agree. The round-8 lockup at the old
+     52px is 93.8px wide — under our own 96px minimum again, below which the
+     rule says use the mark alone. And 58px is what keeps the word the same
+     optical size it has here today, for the same reason as the desktop rule
+     above. 58px is 104.7px wide, which is also exactly what 52px gave before:
+     the envelope grew upward, not sideways.
+     Clear space: one bar of the mark is 18 of the lockup's 117.66 units, so
+     8.9px here — unchanged, and s (16px) of block padding still clears it. */
   .bar-inner { padding-block: var(--fu-space-s); }
-  .brand img { height: 52px; }
+  .brand img { height: 58px; }
   .nav { gap: var(--fu-space-s); }
   .band { padding-block: var(--fu-space-xl); }
   .hero { padding-block: var(--fu-space-xl) var(--fu-space-2xl); }
