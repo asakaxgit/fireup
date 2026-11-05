@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -38 214 114" role="img" aria-label="FireUp"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -34 214 110" role="img" aria-label="FireUp"
      fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="butt" stroke-linejoin="round"
      data-baseline="50" data-x-top="20" data-asc-top="4" data-descender="66" data-stroke="8"
      data-ireup-left="30" data-letter-gap="8">
@@ -26,7 +26,9 @@
 
        The viewBox clears the ink by 6 units left, top and right and 9.9 below
        — measured off the rendered alpha, not counted. The topmost ink is the
-       arrow's head, not the ascender. If a drawing here grows past the box,
+       arrow's head, not the ascender, so the box came down 4 with it in round
+       10: the clearance over the head is the same 6.3 it was. If a drawing
+       here grows past the box,
        `npm run smoke` fails rather than the renderer quietly cutting the ink
        flat, which is what happened in round 4 and is invisible at every size
        because a master is only ever rendered through its own box.
@@ -68,15 +70,20 @@
     <path d="M166 20 V66"/>
     <path d="M166 20 H181 A15 15 0 0 1 181 50 H166"/>
   </g>
-  <!-- dot of the i, drawn solid so it keeps its weight at small sizes. It sits
-       3 units above the i's stem; that gap is this drawing's own diacritic
-       clearance, and anything else set over a letter uses the same 3. -->
+  <!-- dot of the i, drawn solid so it keeps its weight at small sizes. Its
+       underside is 3 units above the x-height line and 7 units above the
+       stem's actual ink, because the stem is butt-capped and terminates on
+       that line rather than straddling it. Rounds 7 to 9 read the 3 as the
+       gap and gave the arrow over the U the same number, which put the arrow
+       7 clear of the letter; round 10 measures both edges off the raster
+       instead. See the accent note at the bottom of this file. -->
   <g data-glyph="tittle">
     <circle cx="34" cy="9" r="4" fill="currentColor" stroke="none"/>
   </g>
 
   <!-- The accent over the U: a curved arrow, up and to the right, the way the
-       fire blows off the mark's bar. Round 7, and round 9 after a detour.
+       fire blows off the mark's bar. Round 7, round 9 after a detour, and
+       round 10 four units lower.
 
        Round 8 drew the other reading of the same note — the arc spanning the
        whole of "Up", a 76-unit chord, the largest object in the identity. It
@@ -85,15 +92,39 @@
        drawing by decision, not by default, and round 8 was not a defect. Its
        four chords are kept in gesture/ as the record of that comparison.
 
+       Round 10 is the same drawing moved down 4 units, and nothing about its
+       shape changed. "Tighten the gap of arrow and U" turned out to be a
+       correction rather than an adjustment: rounds 7 and 9 placed the arrow 3
+       units above y=0, where `ascTop - stroke / 2` says a capital's ink begins.
+       The U's stems are butt-capped verticals, so they *terminate* on the
+       ascender line and its topmost ink is at y=4 — the arrow was clearing the
+       letter by 7. Measured, not reasoned: `npm run tighten` renders the
+       options and prints both edges off the raster every run.
+
        Nothing here is a free choice:
          * The shaft is 8, the same as every letter. The word is a monoline and
            its one existing accent, the tittle, is an 8-unit circle; an accent
            at any other weight is a second voice. It does not scale with the
            arrow's length — in the first cut of round 7 it did, which makes a
            longer arc a heavier drawing rather than a bigger one.
-         * Its lowest ink sits 3 units above the U's cap — the gap the tittle
-           keeps over the i's stem, which is this drawing's own accent
-           clearance.
+         * Its lowest ink now sits 3 units above the U's topmost ink — the
+           number this drawing has claimed since round 7, true for the first
+           time. 3.07 in the built lockup, not 3.00: the tail anchor is carried
+           here rounded to whole units, `115 -3` for a computed `115.33 -3.17`,
+           so that this file stays a drawing someone can read and correct.
+           3 is the tightest value that still holds a slot of background
+           at the 96px lockup minimum: at 2 the tail and the U's left stem
+           share a pixel there (10a-D), and at 0 the accent stops floating and
+           grows a hook off the letter (10a-E).
+         * The i's tittle keeps 7 units of air over its own stem, measured the
+           same way, for the same butt-cap reason — so the word's two accents
+           no longer carry the same clearance, and that is a real cost of this
+           round rather than something the drawing argues away. The two slots
+           are close to the same shape (the tittle's is 8.1 units long, 7.1 at
+           its tightest and 7.9 on average; the arrow's is parallel, so its
+           mean is its minimum), so there is no optical account on which 3 and
+           7 are the same air. If the rule should be one number again, the
+           tittle comes down to 3 as well: one line, and it moves a letter.
          * The chord runs stem to stem across the U, 30 across and 12.9 up, and
            the arrow is centred on the letter. Narrower and the head is as long
            as the shaft, with no curve left to read; out to the p and it stops
@@ -109,7 +140,7 @@
        the other way it reads as arriving and flattening out.
        The numbers come from `npm run arrow`, which prints them. -->
   <g data-glyph="arrow">
-    <path d="M115 -7 Q137 -7 145 -20" stroke="currentColor" stroke-width="8" stroke-linecap="butt"/>
-    <path d="M154.5 -14.1 L152.1 -31.6 L135.5 -25.9 Z" fill="currentColor" stroke="none"/>
+    <path d="M115 -3 Q137 -3 145 -16" stroke="currentColor" stroke-width="8" stroke-linecap="butt"/>
+    <path d="M154.5 -10.1 L152.1 -27.6 L135.5 -21.9 Z" fill="currentColor" stroke="none"/>
   </g>
 </svg>

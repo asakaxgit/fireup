@@ -79,7 +79,20 @@ export const WORD_PAINT = paintOf(WORDMARK)
 const tittle = GLYPHS.get('tittle').match(/cx="([\d.]+)"[^>]*cy="([\d.]+)"[^>]*r="([\d.]+)"/)
 export const DOT = { cx: Number(tittle[1]), cy: Number(tittle[2]), r: Number(tittle[3]) }
 
-// The gap the word keeps between a floating accent and the letter under it.
+// How far the tittle's underside sits above the x-height LINE — not above the
+// i's ink.
+//
+// Rounds 7 to 9 used this as "the gap the word keeps between a floating accent
+// and the letter under it", and placed the arrow over the U with it. It is not
+// that gap. The i's stem is a butt-capped vertical: it terminates on y=20
+// rather than straddling it, so its topmost ink is 4 units below where
+// `W.xTop - W.stroke / 2` puts it, and the tittle really keeps 7. The capital U
+// is built the same way, so the arrow ended up 7 clear of the letter while
+// every comment in the identity said 3.
+//
+// The value is kept because it is what rounds 7 and 8 drew against, and their
+// sheets have to keep reproducing. Anything new measures the ink instead — see
+// scripts/tighten.mjs, which reads both edges off the raster every run.
 export const ACCENT_CLEARANCE = W.xTop - W.stroke / 2 - (DOT.cy + DOT.r)
 
 // Markup for a named set of glyphs, shifted horizontally and painted. Unknown

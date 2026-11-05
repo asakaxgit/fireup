@@ -51,7 +51,7 @@
     <path d="M166 20 V66"/>
     <path d="M166 20 H181 A15 15 0 0 1 181 50 H166"/>
     <circle cx="34" cy="9" r="4" fill="#FFFFFF" stroke="none"/>
-    <path d="M115 -7 Q137 -7 145 -20" stroke="#FF5A2B" stroke-width="8" stroke-linecap="butt"/>
-    <path d="M154.5 -14.1 L152.1 -31.6 L135.5 -25.9 Z" fill="#FF5A2B" stroke="none"/>
+    <path d="M115 -3 Q137 -3 145 -16" stroke="#FF5A2B" stroke-width="8" stroke-linecap="butt"/>
+    <path d="M154.5 -10.1 L152.1 -27.6 L135.5 -21.9 Z" fill="#FF5A2B" stroke="none"/>
   </g>
 </svg>
