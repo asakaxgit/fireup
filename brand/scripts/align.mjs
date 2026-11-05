@@ -49,6 +49,11 @@
 // re-running this script has to produce the same sheets — it re-measures the
 // glyph it is given — which is a free check that the transcription landed.
 //
+// Round 12 then moved the accent sideways, and the same mechanism absorbs that:
+// the glyph is placed horizontally by round 7's centring rule as well as
+// vertically by its air, so these sheets go on showing round 11's drawing
+// without pinning a copy of it. See ARROW_DX below.
+//
 // Wordmark construction (logo/wordmark.svg, via word.mjs): baseline y=50,
 // x-height top y=20, ascender top y=4, descender y=66, stroke 8.
 // Mark construction (logo/mark.svg): F foot y=60, cap top y=16, bar weight 12,
@@ -137,9 +142,27 @@ const ARROW_BOX = inkOf(ARROW)
 // the tail's butt cap reads about 0.14 low.
 GEO.arrowBottom = Math.round(ARROW_BOX.y + ARROW_BOX.h)
 
+// And where it sits horizontally — which round 11 did not have to think about,
+// because no round before 12 had moved the accent sideways.
+//
+// Round 12 did: the note was "align left start of arrow and U's start", so the
+// master now starts the tail on the U's left ink edge instead of centring the
+// arrow's box on the letter's. These sheets are the evidence for round 11's
+// three answers, so they have to keep showing round 11's drawing — and the way
+// to do that is the way the height already does it, by placing the glyph under
+// the rule the round was drawn to rather than by reading a coordinate out of a
+// master that has since moved on. That rule was round 7's: the arrow's measured
+// box centred on the U's, snapped to the whole unit the master carries.
+//
+// A hardcoded x would have worked today and gone stale at the next horizontal
+// note. Computed, this is dx=0 against round 11's master and dx=-1 against
+// round 12's, and the 24 sheets below come out byte-identical either way.
+const U_INK = inkOf(capU(0))
+const CENTRED_LEFT = Math.round(U_INK.x + U_INK.w / 2 - ARROW_BOX.w / 2)
+const ARROW_DX = CENTRED_LEFT - Math.round(ARROW_BOX.x)
+
 // The same glyph with `air` units of background between its lowest ink and the
-// top of whichever U it sits over. Horizontally it does not move at all — the
-// master already centres it on the letter.
+// top of whichever U it sits over, and at the x round 11 drew it at.
 //
 // The offset is a whole number of units, so every option is the approved
 // drawing moved by an integer and the master keeps readable coordinates. The
@@ -157,7 +180,7 @@ const arrowAt = (air, uTop) => {
     bottom: ARROW_BOX.y + ARROW_BOX.h + dy,
     top: ARROW_BOX.y + dy,
     draw: (accent, shift = 0) =>
-      `<g ${recolour(PAINT, '#FFFFFF', accent)} transform="translate(${shift.toFixed(2)} ${dy.toFixed(2)})">${recolour(ARROW, '#FFFFFF', accent)}</g>`,
+      `<g ${recolour(PAINT, '#FFFFFF', accent)} transform="translate(${(shift + ARROW_DX).toFixed(2)} ${dy.toFixed(2)})">${recolour(ARROW, '#FFFFFF', accent)}</g>`,
   }
 }
 
@@ -757,6 +780,10 @@ for (const opt of [...ANSWERS, MATCH, SHIP_DERIVED]) {
 // is the approved glyph moved vertically, so what matters is one offset, not a
 // new path: every y in the arrow's two paths shifts by the same amount, which
 // keeps the drawing bit-identical in shape.
+//
+// This is round 11's transcription, and round 12 has since moved the glyph one
+// unit right, so the x values are put back where round 11 left them — otherwise
+// this would print an instruction that silently undoes a later round.
 console.log(`\n--- what goes into logo/wordmark.svg ---`)
 console.log(`U:      stems to y=0       <path d="M120 0 V35 A15 15 0 0 0 150 35 V0"/>`)
 console.log(`tittle: cy ${DOT.cy} -> ${DOT_SHIPPED}         <circle cx="${DOT.cx}" cy="${DOT_SHIPPED}" r="${DOT.r}" fill="#FFFFFF" stroke="none"/>`)
@@ -767,8 +794,8 @@ console.log(
 console.log(
   ARROW.split('\n')
     .map((line) =>
-      line.replace(/([ML])([-\d.]+) ([-\d.]+)/g, (_, cmd, x, y) => `${cmd}${x} ${Number(y) + SHIP.arrow.dy}`)
-        .replace(/([QL]) ?([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)/g, (_, cmd, x1, y1, x2, y2) => `${cmd}${x1} ${Number(y1) + SHIP.arrow.dy} ${x2} ${Number(y2) + SHIP.arrow.dy}`)
+      line.replace(/([ML])([-\d.]+) ([-\d.]+)/g, (_, cmd, x, y) => `${cmd}${Number(x) + ARROW_DX} ${Number(y) + SHIP.arrow.dy}`)
+        .replace(/([QL]) ?([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)/g, (_, cmd, x1, y1, x2, y2) => `${cmd}${Number(x1) + ARROW_DX} ${Number(y1) + SHIP.arrow.dy} ${Number(x2) + ARROW_DX} ${Number(y2) + SHIP.arrow.dy}`)
         .trim(),
     )
     .map((line) => `  ${line}`)
