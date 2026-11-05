@@ -32,9 +32,44 @@
 // opens mark.svg. The arrow is not redrawn either: every option is the approved
 // round 7 glyph at a whole-unit horizontal offset, so its shape, weight, chord
 // and head are not in question and cannot drift.
+//
+// ---------------------------------------------------------------------------
+// ROUND 13, READ THIS BEFORE THE SHEETS: EVERY ROW BELOW IS DRAWN ONE UNIT
+// RIGHT OF ITS OWN CAPTION.
+//
+// `GEO.arrowLeft` below is 115 — the x the tail sat on while this script was
+// being written. Every option is an offset from that constant. Transcribing the
+// answer into the master moved the tail to 116, at which point the constant was
+// a unit stale, and re-running the script (which round 12 did, to prove the
+// assets regenerate) re-rendered all thirteen sheets a unit right of their
+// labels:
+//
+//   row A, captioned "edges flush"          -> drawn 1 unit RIGHT of the U's edge
+//   row C, captioned "centred, 1 unit left" -> drawn exactly ON the U's edge
+//
+// Measured on the committed edge/detail-dark.png rather than reasoned about:
+// A's tail is +1.30 units from the guide, B's +5.46, C's +0.26, against captions
+// of flush, +4 and -1. The ~0.3 is the dashed guide's own width; the relative
+// spacing is exactly the one-unit stale constant.
+//
+// So the row that lines up in the picture is the row labelled C, and C is also
+// what round 12 shipped. Read by its caption the round 12 answer ("back to C")
+// says move the accent a unit left; read by the picture it says keep what is
+// shipped. Both readings are honest and they disagree. That is this script's
+// fault and not the reader's, and round 13 exists partly because of it.
+//
+// THE SHEETS ARE LEFT AS THEY WERE RENDERED, deliberately — they are what was
+// actually reviewed, and quietly correcting them would delete the evidence of
+// what the answer was given against. The arrow is pinned to round 12's drawing
+// below so they keep reproducing byte-for-byte now that round 13 has redrawn
+// it. scripts/flush.mjs draws the same question again with every row built from
+// its own rule, which is the fix: an option is never "the master, plus an
+// offset", because that is only correct until the master moves — which is
+// exactly when it is being looked at.
+// ---------------------------------------------------------------------------
 import { renderPng, contentBox, pixelMap } from './render.mjs'
 import { inkGap, slotRun } from './measure.mjs'
-import { master, innerOf, recolour, spell, GLYPHS, W } from './word.mjs'
+import { master, innerOf, recolour, spell, glyphAsOf, GLYPHS, W } from './word.mjs'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -65,13 +100,20 @@ const inkOf = (markup) => contentBox(alone(markup), 2048)
 // `contentBox` rounds outward to whole sample pixels, which puts a measured
 // edge about 0.02 units outside the geometry at this sample size.
 const U_BOX = inkOf(GLYPHS.get('U'))
-const ARROW_BOX = inkOf(GLYPHS.get('arrow'))
+// Pinned as of round 13, which shortened the chord to 28.5. Round 12 argued
+// about where a 39.5-wide arrow starts, so its sheets have to keep showing one.
+const ARROW_AS_DRAWN = glyphAsOf('arrow', 'round-12')
+const ARROW_BOX = inkOf(ARROW_AS_DRAWN)
 
 const GEO = {
   uLeft: 120 - W.stroke / 2, // the left stem, butt-capped, centred on x=120
   uRight: 150 + W.stroke / 2,
   uStem: 120, // the stem's centre line — the other reading of "the U's start"
-  arrowLeft: 115, // the tail's butt cap, on a horizontal, so its ink stops here
+  // STALE BY ONE UNIT — see the note at the top of this file. Round 12's master
+  // ended at 116, and this is why every row renders right of its caption. Left
+  // at 115 on purpose: correcting it would re-render the sheets that were
+  // reviewed.
+  arrowLeft: 115,
 }
 
 // Every option is the same glyph at a whole-unit offset. Named by the rule it
@@ -100,7 +142,8 @@ const variant = ({ id, label, short, note, dx }) => {
   // The arrow paints itself — both its paths name the ember explicitly — but the
   // group it sits in is painted anyway, so a future glyph that inherits cannot
   // come out the wrong colour on the light sheet.
-  const arrowLayer = (accent, fg = PAPER) => spell(['arrow'], { shift: SHIFT + dx, fg, accent })
+  const arrowLayer = (accent, fg = PAPER) =>
+    spell(['arrow'], { shift: SHIFT + dx, fg, accent, asOf: 'round-12' })
   return {
     id,
     label,
@@ -453,18 +496,25 @@ for (const opt of OPTIONS) {
   }
 }
 
-// --- what goes into the master ------------------------------------------------
-// Printed so the master is transcribed rather than worked out twice. The arrow
-// is the approved glyph moved horizontally, so what matters is one offset and
+// --- what round 12 put into the master ------------------------------------------
+// Printed so the master was transcribed rather than worked out twice. The arrow
+// is the approved glyph moved horizontally, so what mattered was one offset and
 // not a new path: every x in its two paths shifts by the same whole number,
 // which keeps the drawing bit-identical in shape.
-console.log(`\n--- what goes into logo/wordmark.svg ---`)
+//
+// Reading the LIVE master here was the other half of round 12's defect. The
+// output is "wherever the arrow is now, plus one", so it printed the right
+// answer exactly once — before the answer was transcribed — and drifted a unit
+// further right on every run after. Round 13 would have had it printing a
+// shortened chord shifted off the letter. It reads round 11's pinned drawing
+// now, so it keeps printing what was actually transcribed: 115 + 1 = 116.
+console.log(`\n--- what round 12 put into logo/wordmark.svg ---`)
 console.log(
   `arrow: every x + ${SHIP.dx}, exactly — the approved glyph moved by a whole unit, so its shape, weight, chord and ` +
     `head are untouched. Left edge flush with the U's at x=${GEO.uLeft}:`,
 )
 console.log(
-  GLYPHS.get('arrow')
+  glyphAsOf('arrow', 'round-11')
     .split('\n')
     .map((line) =>
       line

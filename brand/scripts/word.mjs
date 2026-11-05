@@ -129,6 +129,30 @@ const HISTORY = {
       '<path d="M154.5 -10.1 L152.1 -27.6 L135.5 -21.9 Z" fill="#FF5A2B" stroke="none"/>',
     ].join('\n    '),
   },
+  // Round 11, and round 12 below it. Both draw the arrow round 7 drew: a chord
+  // of 30, stem to stem across the U. Round 13 shortens that chord to 28.5 so
+  // the accent can be flush with the letter at BOTH ends, which is the first
+  // time since round 7 that the accent has been redrawn rather than moved — and
+  // therefore the first time a pin here has had to carry a shape rather than a
+  // position.
+  //
+  // The two entries differ by one unit of x and nothing else. That looks like
+  // duplication worth collapsing, and it is not: a pin is a literal copy of what
+  // a round drew, so deriving round 12 from round 11 by "+1" would put the
+  // arithmetic of a past round back into live code, which is the class of bug
+  // round 12 shipped. See scripts/edge.mjs.
+  'round-11': {
+    arrow: [
+      '<path d="M115 -6 Q137 -6 145 -19" stroke="#FF5A2B" stroke-width="8" stroke-linecap="butt"/>',
+      '<path d="M154.5 -13.1 L152.1 -30.6 L135.5 -24.9 Z" fill="#FF5A2B" stroke="none"/>',
+    ].join('\n    '),
+  },
+  'round-12': {
+    arrow: [
+      '<path d="M116 -6 Q138 -6 146 -19" stroke="#FF5A2B" stroke-width="8" stroke-linecap="butt"/>',
+      '<path d="M155.5 -13.1 L153.1 -30.6 L136.5 -24.9 Z" fill="#FF5A2B" stroke="none"/>',
+    ].join('\n    '),
+  },
 }
 
 const glyphsAsOf = (round) => {
@@ -136,6 +160,16 @@ const glyphsAsOf = (round) => {
   const pinned = HISTORY[round]
   if (!pinned) throw new Error(`no pinned glyphs for "${round}" (have: ${Object.keys(HISTORY).join(', ')})`)
   return new Map([...GLYPHS, ...Object.entries(pinned)])
+}
+
+// One glyph's markup as of a given round. `spell` is the usual way in, but a
+// script that measures a letter before it places it needs the drawing itself —
+// align.mjs and edge.mjs both lift the arrow out, read its box, and position it
+// by their own round's rule.
+export const glyphAsOf = (name, round) => {
+  const found = glyphsAsOf(round).get(name)
+  if (!found) throw new Error(`wordmark has no glyph "${name}"`)
+  return found
 }
 
 // The i's tittle as of a given round, for the scripts that measure against it

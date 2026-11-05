@@ -60,7 +60,7 @@
 // middle arm ends x=28, bar ends x=36, fire tip y=1.
 import { renderPng, contentBox, pixelMap } from './render.mjs'
 import { inkGap, slotRun } from './measure.mjs'
-import { master, innerOf, recolour, spell, GLYPHS, W, DOT } from './word.mjs'
+import { master, innerOf, recolour, spell, glyphAsOf, GLYPHS, W, DOT } from './word.mjs'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -123,11 +123,17 @@ const DOT_ROUND10 = dotFor(7) // the before-state: the dot where it kept 7
 const DOT_SHIPPED = dotFor(3) // the answer, literally: "bring the dot down to 3"
 const DOT_MATCH = dotFor(2) // the other reading: match the arrow's new number
 
-// --- the arrow, which is not redrawn ------------------------------------------
-// The approved glyph, lifted out of the master and measured. Only its height
-// changes in this round; its shape, weight, chord and head are round 7's and are
-// not in question.
-const ARROW = GLYPHS.get('arrow')
+// --- the arrow, which is not redrawn in THIS round -----------------------------
+// Round 7's glyph: chord 30, stem to stem across the U. Only its height changes
+// in round 11; its shape, weight, chord and head are not in question here.
+//
+// Pinned, as of round 13. Everything below places this drawing by a RULE rather
+// than by a coordinate read out of the master, which is what made these sheets
+// survive rounds 11 and 12 — both of which only moved the arrow. Round 13 is the
+// first to redraw it: the chord comes in to 28.5 so the accent can be flush with
+// the U at both ends. A rule cannot absorb that, because the shape itself is
+// what changed, so from here the drawing is pinned as well as the placement.
+const ARROW = glyphAsOf('arrow', 'round-11')
 const ARROW_BOX = inkOf(ARROW)
 
 // Where the glyph's lowest ink sits in the master, as a whole unit. Read from
