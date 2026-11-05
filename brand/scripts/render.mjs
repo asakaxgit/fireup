@@ -14,18 +14,20 @@ export const renderPng = (svg, width) => {
   return resvg.render().asPng()
 }
 
-// The actual raster at `size`, re-expressed as one SVG rect per pixel at `scale`.
+// The actual raster at `size` wide, re-expressed as one SVG rect per pixel at
+// `scale`. The height follows the source's aspect, so this works on a wide
+// lockup as well as on a square mark.
 //
 // Magnifying a PNG would need an image decoder and a resampler. Drawing the
 // decoded pixels back out as unit squares needs neither, and it cannot lie about
 // what the renderer produced: every square is one real pixel at its real colour.
 export const pixelMap = (svg, size, scale) => {
-  const { pixels } = new Resvg(svg, { fitTo: { mode: 'width', value: size } }).render()
+  const { pixels, width, height } = new Resvg(svg, { fitTo: { mode: 'width', value: size } }).render()
   const hex = (n) => n.toString(16).padStart(2, '0')
   const squares = []
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const at = (y * size + x) * 4
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const at = (y * width + x) * 4
       const [r, g, b, a] = [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
       if (a === 0) continue
       squares.push(

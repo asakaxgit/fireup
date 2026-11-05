@@ -1,12 +1,13 @@
 # Fireup brand guide
 
-**Status: proposed, redrawn to the CEO's note, still not approved.** The mark in
-this directory is round 5 for SAK-173. Round 4 drew the F as a trigger lighter
-on the note *"treat F as a lighter gun and blow fire from right top side"*; the
-note back on it was *"4a is almost good. Omit nozzle entirely"*, so the muzzle
-is gone and what is left is the F and the fire. It is in use on the marketing
-site in `site/`, but **approval has not been given** — identity direction is the
-CEO's sign-off and it is still open.
+**Status: the mark is approved; the lockup around it is round 6 and is not.**
+The round-5 mark — the F with the fire on the end of its bar, no muzzle — came
+back as *"A is perfect"*, so the drawing in `logo/mark.svg` is settled and does
+not change again without going back through the CEO. The same note continued
+*"mix this F into fireup instead of locating next"*, which is about the lockup,
+and round 6 answers it: the mark is now the word's initial letter rather than an
+object standing beside the word. The lockup is in use on the marketing site in
+`site/`, but **sign-off on it has not been given** and is still open.
 
 This directory is in the public repository so the direction can be reviewed in a
 pull request. That is not approval. Until the mark is signed off, do not use it
@@ -26,12 +27,50 @@ It is a monogram first. That is what lets it still say the name at 16px, where a
 picture cannot — the counter stays open on the right, so nothing about the fire
 stops it being an F.
 
-### How it got here
+## The lockup
 
-The direction is the CEO's, in three steps: round 2's lifted-arm F came back as
+The lockup is not the mark plus the word. It is the word, with the mark as its
+**F**: the mark stands on the wordmark's baseline at 1.5x, its bar and fire
+overhang the lowercase, and the wordmark's own monoline `f` is not drawn,
+because that letter is now the mark. One object, read once.
+
+The three numbers that make it work, all in `scripts/build.mjs`:
+
+- **How big the F is — cap 1.43x the word's ascender.** Not a taste decision.
+  The bar and fire occupy the whole band above x-height, and the one thing
+  reaching up into that band is the **i's tittle**. The F is scaled until the
+  bar's underside clears the top of the tittle by 3 units; below a 0 clearance
+  the dot lands inside the fire and the two merge into one blob by 128px.
+- **Where the word starts — 8 units after the F's middle arm.** That is the
+  whitespace the wordmark already keeps between its own letters (the i's stem
+  ends at 38, the r's begins at 46), so the F is spaced like a letter and not
+  like a mark. The word cannot start earlier: below the arm, the arm and the
+  lowercase x-height band want the same nine units of height.
+- **The box is measured, not counted.** The viewBox comes from the rendered
+  alpha, so the flame's overshoot above the cap and the `p`'s descender below
+  the baseline both set it.
+
+Round 6 is `scripts/mix.mjs` and `mix/`. Two directions were drawn and
+rejected against this one:
+
+- **Inline**, the F at exactly the word's ascender height. Reads as one
+  logotype at 320px, but the fire and the tittle end up side by side with
+  nothing between them and merge by 128px.
+- **Ligature**, the tittle dropped and the i's stem run up into the bar's
+  underside. An undotted stem that tall is an **l**: the word reads *Flreup*,
+  at 320px as clearly as at 96.
+
+The lockup's aspect went from 3.09:1 to 2.01:1, which is why the site header
+grew from a 52px to a 64px logo — at 52 the lowercase landed at a 14.9px
+x-height, smaller than the 16px body text next to it.
+
+### How the mark got here
+
+The direction is the CEO's, in four steps: round 2's lifted-arm F came back as
 *"use fire"*, round 3's burning top bar came back as *"treat F as a lighter gun
-and blow fire from right top side"*, and round 4's lighter came back as *"4a is
-almost good. Omit nozzle entirely"*.
+and blow fire from right top side"*, round 4's lighter came back as *"4a is
+almost good. Omit nozzle entirely"*, and round 5 came back as *"A is perfect.
+Mix this F into fireup instead of locating next"*.
 
 Round 5 is two sheets — `scripts/plain.mjs` and `plain/`. Taking the muzzle out
 reopened the one question it had been answering, because the fire used to sit on
@@ -114,6 +153,7 @@ and is not mine to give — see the open flags at the bottom of this file.
 | `fire/` | Round 3. The fire concepts, where the fire goes, and the shape of the tongue. |
 | `lighter/` | Round 4. The lighter reading: how literal, the jet, the muzzle, and which cues survive. |
 | `plain/` | Round 5. With the muzzle gone: where the fire meets the bar, and how far the bar runs. |
+| `mix/` | Round 6. Mixing the F into the word: the three directions, how big the F is, and how tight the word tucks. |
 | `preview/` | What actually ships, at the sizes it ships at. Rendered from `site/assets/`, not from the masters. |
 | `../site/assets/` | Generated. Every variant, lockup, favicon, app icon and the social card. |
 
@@ -142,9 +182,10 @@ npm run check      # smoke test the pipeline, verify contrast, rebuild all asset
 - `npm run fire` re-renders the round 3 sheets in `fire/`.
 - `npm run lighter` re-renders the round 4 sheets in `lighter/`.
 - `npm run plain` re-renders the round 5 sheets in `plain/`.
+- `npm run mix` re-renders the round 6 lockup sheets in `mix/`.
 - `npm run preview` re-renders `preview/` from the built assets.
 
-`explore`, `tune`, `fire`, `lighter` and `plain` are deliberately outside
+`explore`, `tune`, `fire`, `lighter`, `plain` and `mix` are deliberately outside
 `check`: they are the record of a decision, not shipped assets, and they should
 only change when the question being asked changes. `preview` is outside it because looking at the
 result is a human step, not a gate.
@@ -157,7 +198,7 @@ resampling — rendered at 16, read back out of the renderer, redrawn as one
 square per pixel. A magnified preview that disagrees with the real output is
 worse than no preview.
 
-That has now reversed a stated opinion nine times, which is the whole point:
+That has now reversed a stated opinion eleven times, which is the whole point:
 
 - At a 4-unit counter the arm **fused with the top bar at 16px** — the mark
   stopped being an F at the size it is used at most.
@@ -173,6 +214,11 @@ That has now reversed a stated opinion nine times, which is the whole point:
 - The first round-4 flame ran past the 64-unit viewBox and the renderer **cut
   its outer lobe flat**. Nothing below 512px showed it, which is why the app
   icon is now on the preview sheet at 1:1.
+- Running the i's stem up into the F's bar to make a ligature produces an **l**,
+  not a dotted i: the word reads *Flreup*. The note calling it "the tightest
+  mix" was written before it was rendered.
+- The wordmark's letter gap is **8** units, not the 14 of its stem-to-stem
+  pitch. Round 6c was built on the wrong number until the sheet was looked at.
 
 ## Clear space and minimum sizes
 
@@ -182,7 +228,10 @@ That has now reversed a stated opinion nine times, which is the whole point:
 - **Mark minimum:** 16px. At 16 and 32 the browser must be given
   `favicon-16.png` / `favicon-32.png`, which are their own drawings; the 64-unit
   mark scaled to 16 turns the gap and the overhang into grey mush.
-- **Lockup minimum:** 96px wide. Below that, drop the wordmark and use the mark.
+- **Lockup minimum:** 96px wide. Below that, use the mark alone. At 96 the
+  lockup's lowercase is a 13.6px x-height on a 3.6px stroke — the round-6
+  lockup is squarer than the one it replaces, so it is *more* legible at that
+  width, not less. The site header is 129px wide and the phone header 105px.
 
 ## Misuse
 
@@ -212,6 +261,12 @@ Each of these breaks something specific, not just taste:
   closing on the right is what turned earlier drawings into a P.
 - **Do not** set the wordmark in a font. It is drawn. Typing "fireup" in Inter
   is not the wordmark.
+- **Do not** write the mark and the word next to each other as two objects, and
+  do not draw an `f` in front of the word. The mark *is* the F; a lockup with
+  both says the name twice.
+- **Do not** shrink the F in the lockup to the word's own height, or close the
+  gap after its middle arm. Either puts the i's tittle back under the fire,
+  where the two merge into one blob by 128px.
 - **Do not** place the mark on a busy photograph. Use the mono variant on a flat
   field instead.
 

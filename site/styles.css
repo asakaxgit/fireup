@@ -99,7 +99,12 @@ code {
 }
 
 .brand { display: flex; }
-.brand img { display: block; height: 52px; width: auto; }
+/* Sized by height, so the lockup's aspect sets how big the word comes out. The
+   round-6 lockup is 2.01:1 where the old one was 3.09:1, and the flame's
+   overshoot is 37 of its 105 units — so at the old 52px the lowercase landed at
+   a 14.9px x-height, under the 16px body text beside it. 64px puts the
+   x-height back at 18.3px and the F's cap at 40px. */
+.brand img { display: block; height: 64px; width: auto; }
 
 .nav {
   display: flex;
@@ -385,12 +390,13 @@ code {
 }
 
 @media (max-width: 40rem) {
-  /* The lockup's box includes the flame's overshoot, so the clear-space rule
-     bites at the top of the bar: one bar of the mark is 13.4 of the lockup's
-     82.0 units, which is 6.9px at a 42px logo. 2xs (8px) cleared that on paper
-     but read as crowding against the viewport edge; s (16px) does not. */
+  /* 42px was fine against the old 3.09:1 lockup. Against the round-6 one it is
+     84.6px wide — under our own 96px minimum, below which the rule says use the
+     mark alone. 52px is 104.7px wide, the first height that clears it.
+     Clear space: one bar of the mark is 18 of the lockup's 105 units, so 8.9px
+     here; s (16px) of block padding clears it. */
   .bar-inner { padding-block: var(--fu-space-s); }
-  .brand img { height: 42px; }
+  .brand img { height: 52px; }
   .nav { gap: var(--fu-space-s); }
   .band { padding-block: var(--fu-space-xl); }
   .hero { padding-block: var(--fu-space-xl) var(--fu-space-2xl); }

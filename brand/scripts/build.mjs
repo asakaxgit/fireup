@@ -73,53 +73,93 @@ for (const [variant, [fg, accent]] of Object.entries(VARIANTS)) {
 }
 
 // --- lockup -----------------------------------------------------------------
-// Composed from the two masters by cropping each to its content box, so the
-// lockup inherits any change to a master instead of being a third drawing.
-// Both boxes are measured from the rendered alpha, not hand-counted, so a
-// change of stroke weight or a flame that overshoots the cap line moves the
-// lockup with it rather than getting clipped by a stale constant.
+// The mark is not placed beside the word. It *is* the word's F: the lockup is
+// "Fireup" with the approved mark as the initial letter and the wordmark's own
+// monoline f dropped, because that letter is now drawn twice otherwise.
+// Decided in round 6 — brand/scripts/mix.mjs holds the three directions that
+// were drawn and the two that were rejected.
+//
+// Composed from the masters, never re-drawn, so a change to either reaches the
+// lockup. The mark is read whole and transformed; the word is read as its own
+// paths with the first two (the f) left out.
 const MARK_BOX = contentBox(master('mark'))
-const WORD_BOX = contentBox(master('wordmark'))
 
-// The two construction numbers that cannot be measured, because they are
-// decisions rather than ink: the wordmark's baseline, and the F's own cap line
-// inside the mark. The flame deliberately overshoots the cap, the way a
-// diacritic does, so the lockup aligns the F and lets the flame rise clear.
+// Construction numbers of the two drawings. These are decisions, not ink, so
+// they are named here rather than measured: wordmark baseline, x-height top,
+// the i's tittle, and the F's foot and cap line inside the mark.
 const BASELINE = 50
+const DOT = { cx: 34, cy: 9, r: 4 }
+const IREUP_LEFT = 30 // the i's stem starts here in the wordmark's own units
+const STROKE = 8
+// The whitespace the wordmark already keeps between two letters: the i's stem
+// ends at 38 and the r's begins at 46. The F is spaced like a letter, so the
+// word starts this far after the F's middle arm.
+const LETTER_GAP = 8
+
 const capLine = (name) => {
   const svg = master(name)
   const read = (attr) => Number(svg.match(new RegExp(`data-${attr}="([-\\d.]+)"`))[1])
   return { top: read('cap-top'), bottom: read('cap-bottom') }
 }
-
 const MARK_CAP = capLine('mark')
-const CAP_HEIGHT = BASELINE - WORD_BOX.y // wordmark ascender-to-baseline
-const SCALE = CAP_HEIGHT / (MARK_CAP.bottom - MARK_CAP.top) // mark units -> lockup units
-const MARK_W = MARK_BOX.w * SCALE
-const MARK_H = MARK_BOX.h * SCALE
-// Where the mark's content box starts, once its cap line is sitting on the
-// wordmark's. Negative: that is the flame's overshoot above the ascender.
-const MARK_Y = WORD_BOX.y + (MARK_BOX.y - MARK_CAP.top) * SCALE
-const TOP = Math.min(WORD_BOX.y, MARK_Y)
-const HEIGHT = Math.max(WORD_BOX.y + WORD_BOX.h, MARK_Y + MARK_H) - TOP
-const CLEAR = 12 * SCALE // one bar of the mark — the clear-space unit
-const GAP = CLEAR * 1.7 // mark-to-wordmark; at 1.0 the mark's F crowded the word's f
-const LOCKUP_W = MARK_W + GAP + WORD_BOX.w
+const MARK_FOOT = MARK_CAP.bottom // the F stands on the word's baseline
+const FIRE_FOOT = 28 // the underside of the bar, and of the fire sitting on it
+const ARM_END = 28 // how far the F's middle arm runs
+const STEM_LEFT = 6
+
+// How big the F is, derived rather than picked. The whole bar and fire overhang
+// the lowercase, and the one thing under them that reaches up into that band is
+// the i's tittle. Scale the mark until the bar's underside clears the top of
+// the tittle by CLEARANCE, and that is the size:
+//
+//   bar underside = BASELINE - (MARK_FOOT - FIRE_FOOT) * SCALE
+//   tittle top    = DOT.cy - DOT.r
+//
+// Below a 0 clearance the dot lands inside the fire and the two merge into one
+// blob by 128px. 3 units — a quarter of a bar — is the first value where the
+// dot is still its own pixel at the 96px minimum, checked on the magnified
+// raster in brand/mix/zoom-size.png rather than by eye.
+const CLEARANCE = 3
+const SCALE = (BASELINE - (DOT.cy - DOT.r) + CLEARANCE) / (MARK_FOOT - FIRE_FOOT)
+
+const markX = (u) => (u - STEM_LEFT) * SCALE // mark units -> lockup units, stem on x=0
+const markY = (v) => BASELINE + (v - MARK_FOOT) * SCALE
+const WORD_X = markX(ARM_END) + LETTER_GAP // where "ireup" starts
+const SHIFT = WORD_X - IREUP_LEFT
 
 const innerOf = (svg) => svg.replace(/^[\s\S]*?<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '')
 
-const lockup = (fg, accent) => {
-  const markInner = innerOf(recolour(master('mark'), fg, accent))
-  const wordInner = innerOf(recolour(master('wordmark'), fg, accent))
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 ${TOP.toFixed(2)} ${LOCKUP_W.toFixed(2)} ${HEIGHT.toFixed(2)}" role="img" aria-label="Fireup">
+// The word without its f. The master draws the letters in reading order, so the
+// f is the first two paths; the circle is the i's tittle.
+const WORD_SRC = master('wordmark')
+const IREUP = WORD_SRC.match(/<path [^>]*\/>/g).slice(2).join('\n    ')
+
+const lockupBody = (fg, accent) => `<g transform="translate(${(-STEM_LEFT * SCALE).toFixed(2)} ${(BASELINE - MARK_FOOT * SCALE).toFixed(2)}) scale(${SCALE.toFixed(4)})">${innerOf(recolour(master('mark'), fg, accent))}</g>
+  <g fill="none" stroke="${fg}" stroke-width="${STROKE}" stroke-linecap="butt" stroke-linejoin="round" transform="translate(${SHIFT.toFixed(2)} 0)">
+    ${IREUP}
+  </g>
+  <circle cx="${(DOT.cx + SHIFT).toFixed(2)}" cy="${DOT.cy}" r="${DOT.r}" fill="${fg}"/>`
+
+// The viewBox is the rendered alpha's own box, so the flame's overshoot above
+// the cap and the p's descender below the baseline both set it. A hand-counted
+// box is what clipped the flame in round 4.
+const LOCK_BOX = contentBox(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="-80 -100 480 240">${lockupBody('#FFFFFF', '#FF5A2B')}</svg>`)
+const TOP = LOCK_BOX.y
+const HEIGHT = LOCK_BOX.h
+const LOCKUP_W = LOCK_BOX.w
+const CLEAR = 12 * SCALE // one bar of the mark — the clear-space unit
+
+const lockup = (fg, accent) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${LOCK_BOX.x.toFixed(2)} ${TOP.toFixed(2)} ${LOCKUP_W.toFixed(2)} ${HEIGHT.toFixed(2)}" role="img" aria-label="Fireup">
   <!-- GENERATED by brand/scripts/build.mjs from logo/mark.svg + logo/wordmark.svg.
-       The mark's cap line sits on the wordmark's; the flame overshoots above it.
-       Clear space on all sides: ${CLEAR.toFixed(1)} units of this viewBox. Minimum width ${tokens.logo.minSizeLockup}. -->
-  <svg viewBox="${MARK_BOX.x.toFixed(2)} ${MARK_BOX.y.toFixed(2)} ${MARK_BOX.w.toFixed(2)} ${MARK_BOX.h.toFixed(2)}" x="0" y="${MARK_Y.toFixed(2)}" width="${MARK_W.toFixed(2)}" height="${MARK_H.toFixed(2)}">${markInner}</svg>
-  <svg viewBox="${WORD_BOX.x.toFixed(2)} ${WORD_BOX.y.toFixed(2)} ${WORD_BOX.w.toFixed(2)} ${WORD_BOX.h.toFixed(2)}" x="${(MARK_W + GAP).toFixed(2)}" y="${WORD_BOX.y.toFixed(2)}" width="${WORD_BOX.w.toFixed(2)}" height="${WORD_BOX.h.toFixed(2)}">${wordInner}</svg>
+       The mark is the word's F: it stands on the word's baseline at ${SCALE.toFixed(2)}x, and
+       its bar and fire overhang the lowercase, clearing the i's tittle by ${CLEARANCE}.
+       The word's own f is not drawn — the mark is that letter.
+       Clear space on all sides: ${CLEAR.toFixed(1)} units of this viewBox.
+       Minimum size: ${tokens.logo.minSizeLockup} -->
+  ${lockupBody(fg, accent)}
 </svg>
 `
-}
 
 for (const [variant, [fg, accent]] of Object.entries(VARIANTS)) {
   written.push(write(`fireup-lockup-${variant}.svg`, lockup(fg, accent)))
@@ -160,13 +200,19 @@ const og = () => {
   const w = 1200
   const h = 630
   const lock = innerOf(lockup(c.paper, c.ember))
-  const lockWidth = 660
+  const lockWidth = 560
   const lockHeight = (lockWidth * HEIGHT) / LOCKUP_W
+  // The rule hangs off the lockup's measured bottom, and the pair is centred as
+  // one block. Pinning the rule to a fraction of the card is what put it
+  // through the middle of the word when the lockup went from 3:1 to 2:1.
+  const ruleGap = 60
+  const ruleH = 4
+  const top = (h - (lockHeight + ruleGap + ruleH)) / 2
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}">
   <rect width="${w}" height="${h}" fill="${c.ink}"/>
   <rect x="0" y="0" width="${w}" height="6" fill="${c.ember}"/>
-  <svg viewBox="0 ${TOP.toFixed(2)} ${LOCKUP_W.toFixed(2)} ${HEIGHT.toFixed(2)}" x="${(w - lockWidth) / 2}" y="${((h - lockHeight) / 2 - 20).toFixed(2)}" width="${lockWidth}" height="${lockHeight.toFixed(2)}">${lock}</svg>
-  <rect x="${(w - 240) / 2}" y="${h / 2 + 90}" width="240" height="4" fill="${c['rule-dark']}"/>
+  <svg viewBox="${LOCK_BOX.x.toFixed(2)} ${TOP.toFixed(2)} ${LOCKUP_W.toFixed(2)} ${HEIGHT.toFixed(2)}" x="${(w - lockWidth) / 2}" y="${top.toFixed(2)}" width="${lockWidth}" height="${lockHeight.toFixed(2)}">${lock}</svg>
+  <rect x="${(w - 240) / 2}" y="${(top + lockHeight + ruleGap).toFixed(2)}" width="240" height="${ruleH}" fill="${c['rule-dark']}"/>
 </svg>`
 }
 
