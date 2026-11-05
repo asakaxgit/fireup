@@ -16,6 +16,7 @@
     "gesture": "node scripts/gesture.mjs",
     "tighten": "node scripts/tighten.mjs",
     "align": "node scripts/align.mjs",
+    "edge": "node scripts/edge.mjs",
     "preview": "node scripts/preview.mjs",
     "check": "npm run smoke && npm run contrast && npm run build"
   },

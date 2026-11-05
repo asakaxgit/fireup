@@ -52,7 +52,7 @@
     <path d="M166 20 V66"/>
     <path d="M166 20 H181 A15 15 0 0 1 181 50 H166"/>
     <circle cx="34" cy="13" r="4" fill="#FFFFFF" stroke="none"/>
-    <path d="M115 -6 Q137 -6 145 -19" stroke="#FF5A2B" stroke-width="8" stroke-linecap="butt"/>
-    <path d="M154.5 -13.1 L152.1 -30.6 L135.5 -24.9 Z" fill="#FF5A2B" stroke="none"/>
+    <path d="M116 -6 Q138 -6 146 -19" stroke="#FF5A2B" stroke-width="8" stroke-linecap="butt"/>
+    <path d="M155.5 -13.1 L153.1 -30.6 L136.5 -24.9 Z" fill="#FF5A2B" stroke="none"/>
   </g>
 </svg>

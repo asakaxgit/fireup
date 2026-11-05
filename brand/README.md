@@ -1,6 +1,6 @@
 # Fireup brand guide
 
-**Status: the mark is approved; the lockup around it is round 11 and is not.**
+**Status: the mark is approved; the lockup around it is round 12 and is not.**
 The round-5 mark — the F with the fire on the end of its bar, no muzzle — came
 back as *"A is perfect"*, so the drawing in `logo/mark.svg` is settled and does
 not change again without going back through the CEO. Everything since is the
@@ -17,8 +17,10 @@ sits 4 units lower, at a gap that is measured off the ink rather than off a
 construction line. Round 11 took the three answers on round 10's card: the gap
 to **2**, the i's dot down to **3** so the word keeps one accent clearance
 instead of two, and the capital U's stems up to the cap line so the two
-capitals align. The lockup is in use on the marketing site in `site/`, but
-**sign-off on it has not been given** and is still open.
+capitals align. Round 12 is the first horizontal note — *"align left start of
+arrow and U's start"* — and moves the accent one unit right, so the tail's cap
+and the U's left stem share one edge. The lockup is in use on the marketing
+site in `site/`, but **sign-off on it has not been given** and is still open.
 
 This directory is in the public repository so the direction can be reviewed in a
 pull request. That is not approval. Until the mark is signed off, do not use it
@@ -199,6 +201,45 @@ rounds 7 and 8 used to *place* the arrow rather than merely to describe it, and
 the round-10 rows inside `align.mjs` itself, which read the live dot and so
 stopped depicting round 10 the moment the master was edited.
 
+Round 12 is the first test of that: it moved the accent sideways, and the 24
+sheets in `align/` came back **byte-identical** without a pin being added.
+`align.mjs` never read the glyph's position out of the master — it places the
+arrow by the rule the round was drawn to, which is now a horizontal rule as
+well as a vertical one. A pinned coordinate would have worked today and gone
+stale at the next horizontal note.
+
+### Round 12: where the accent starts
+
+The note was **"bit fix. align left start of arrow and U's start"**.
+`npm run edge` renders it (`edge/`) and reads both edges off the raster.
+
+It is a change of rule rather than a correction. Round 7 placed the accent by
+centring its *measured box* on the U's, and because the head overhangs the
+chord the arrow is 1.5 units the wider of the two — so centring left it 1 unit
+outside the letter on the left and 0.5 on the right. Both of those edges are
+flat verticals, and two flat verticals a single unit apart read as a near miss
+rather than as an overhang.
+
+Flush, the accent starts where the letter starts and the whole 1.5 hangs off
+the right, which is the direction it already points. The other reading of the
+note — the tail's cap on the stem's *centre* line, 4 units further right — is
+drawn as `edge/detail-dark.png` B; it lines nothing up with anything and leans
+the accent to the right.
+
+**The drawing did not change**: every x in both of its paths moved by the same
+whole +1. Measured on the built `site/assets/fireup-lockup-dark.svg`, the two
+left edges differ by **0.00 units** and the right by 1.50; the vertical slot is
+still **1.96**, round 11's answer, untouched. At 320px — the largest real use —
+the old offset was 1.5 device pixels; at the 96px minimum it was 0.45, which is
+why this is decided at 320.
+
+**What it costs downstream: nothing.** The arrow's own ends sit well inside the
+word (the p's bowl is the rightmost ink), so the lockup's viewBox is unchanged
+and the header sizing, the clear-space rule and the social card are exactly as
+they were. The mark, both favicons, every app icon and all three mark variants
+are byte-for-byte unchanged. `edge.mjs` asserts both of those rather than
+claiming them: it throws if an option moves the envelope or the vertical slot.
+
 What the accent is, and why each number is what it is:
 
 - **The shaft is 8 — the same as every letter.** The word is a monoline, and
@@ -211,9 +252,12 @@ What the accent is, and why each number is what it is:
   one device pixel, so the renderer is deciding and the drawing is not; that
   cost was costed on round 10's sheet and accepted. Taken to 0 the tail fuses
   with the U's left stem and the letter grows a hook.
-- **The chord is 30 across and 12.9 up**, stem to stem on the U, centred on the
-  letter. It is sized to the letter it sits over, which is what makes it an
-  accent rather than a second object.
+- **The chord is 30 across and 12.9 up**, stem to stem on the U. It is sized to
+  the letter it sits over, which is what makes it an accent rather than a second
+  object.
+- **It starts where the letter starts** (round 12): the tail's butt cap and the
+  U's left stem share one vertical edge at x=116, and the 1.5 units by which the
+  arrow is the wider of the two hang off the right, the way it points.
 - **The head is 2.8 shafts wide and 1.7 long**, square to the arc's end tangent.
   Below about 2.5 it reads as a comma.
 - **It bows like a growth curve** — flat out of the tail, turning up at the

@@ -103,7 +103,9 @@
 
   <!-- The accent over the U: a curved arrow, up and to the right, the way the
        fire blows off the mark's bar. Round 7, round 9 after a detour, round 10
-       four units lower, and round 11 three units higher than that.
+       four units lower, round 11 three units higher than that, and round 12
+       one unit to the right. The drawing itself is round 7's throughout: four
+       notes have moved it and none has redrawn it.
 
        ROUND 11 MOVES IT UP IN ORDER TO TIGHTEN IT, which is worth a sentence
        because it looks like a contradiction. The U's stems were raised 4 units
@@ -159,13 +161,28 @@
            parallel, so its mean air is its minimum. Equal minimums would not
            have read as equal air. Matching the number instead — the dot at 2 —
            is drawn as 11a-E.
-         * The chord runs stem to stem across the U, 30 across and 12.9 up, and
-           the arrow is centred on the letter. Narrower and the head is as long
-           as the shaft, with no curve left to read; out to the p and it stops
-           being an accent and becomes a second ember object the size of the
-           fire (7c). Round 8 drew exactly that and measured it: the arc tipped
-           12.9 units above the fire, which handed the lockup's envelope to the
-           arrow instead of the mark and moved the site header with it.
+         * The chord runs stem to stem across the U, 30 across and 12.9 up.
+           Narrower and the head is as long as the shaft, with no curve left to
+           read; out to the p and it stops being an accent and becomes a second
+           ember object the size of the fire (7c). Round 8 drew exactly that and
+           measured it: the arc tipped 12.9 units above the fire, which handed
+           the lockup's envelope to the arrow instead of the mark and moved the
+           site header with it.
+         * Horizontally it STARTS WHERE THE LETTER STARTS — the tail's butt cap
+           and the U's left stem share one vertical edge at x=116. Round 12.
+           Rounds 7 to 11 centred the arrow's measured box on the U's instead,
+           and because the head overhangs the chord the arrow is 1.5 units the
+           wider of the two, so centring left it 1 unit outside the letter on
+           the left and 0.5 on the right. Two flat vertical edges a single unit
+           apart read as a near miss rather than as an overhang; flush, the
+           whole 1.5 hangs off the right, the way the arrow points. The note was
+           "align left start of arrow and U's start". `npm run edge` renders the
+           two rules side by side with a guide dropped down the U's own edge,
+           and reads both edges off the raster.
+           The shape did not change: every x in both paths below moved by the
+           same whole +1, and both of the arrow's own ends are still well inside
+           the word, so the lockup's envelope is unmoved and nothing downstream
+           follows it.
          * The head is 2.8 shafts wide and 1.7 long, square to the arc's end
            tangent — below about 2.5 it reads as a comma. Its base is wider than
            the shaft's end cap, so the join is covered rather than butted.
@@ -174,7 +191,7 @@
        the other way it reads as arriving and flattening out.
        The numbers come from `npm run arrow`, which prints them. -->
   <g data-glyph="arrow">
-    <path d="M115 -6 Q137 -6 145 -19" stroke="#C2410C" stroke-width="8" stroke-linecap="butt"/>
-    <path d="M154.5 -13.1 L152.1 -30.6 L135.5 -24.9 Z" fill="#C2410C" stroke="none"/>
+    <path d="M116 -6 Q138 -6 146 -19" stroke="#C2410C" stroke-width="8" stroke-linecap="butt"/>
+    <path d="M155.5 -13.1 L153.1 -30.6 L136.5 -24.9 Z" fill="#C2410C" stroke="none"/>
   </g>
 </svg>
