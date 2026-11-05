@@ -2,7 +2,7 @@
   "$comment": "Fireup brand tokens — single source of truth. tokens/brand.css is generated from this file by `npm run tokens`. Do not edit the CSS by hand.",
   "name": "Fireup",
   "version": "0.1.0",
-  "status": "mark approved (round 5A); lockup is round 8 — the mark as the word's F, with the arc over the Up — and sign-off on it is still open (SAK-173)",
+  "status": "mark approved (round 5A); lockup is round 9 — the mark as the word's F, with the accent over the U — and sign-off on it is still open (SAK-173)",
   "color": {
     "ink": "#0B1220",
     "ink-raised": "#141E31",

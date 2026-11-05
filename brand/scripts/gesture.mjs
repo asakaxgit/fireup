@@ -28,6 +28,18 @@
 // exists to find that out rather than assert it, and to show the two side by
 // side at 96px so one word can redirect it.
 //
+// ROUND 9, AND ONE WORD IS WHAT REDIRECTED IT. The answer on the round 8 card
+// was "go back to round 7's 30-unit accent (8a row D) — the gesture is too
+// much". So the shipped drawing is row D below, and these sheets are the record
+// of a comparison that was made properly and then went the other way: A reads,
+// and at 96px it is the most legible of the four precisely because it is the
+// largest. Legibility at the minimum is an input, not the brief.
+//
+// Nothing below is rewritten to match the outcome — the rows, their notes and
+// the captions are what was on the card, and re-running this reproduces those
+// PNGs byte for byte. Only SHIP, at the bottom, moved, because its one job is
+// to print the geometry that goes into the master.
+//
 // Wordmark construction (logo/wordmark.svg, via word.mjs): baseline y=50,
 // x-height top y=20, ascender top y=4, descender y=66, stroke 8. The U's stems
 // stand on x=120 and x=150, so with the stroke it spans x=116..154; "Up" runs
@@ -439,9 +451,18 @@ console.log(join(out, 'zoom-chord.png'))
 // Transcribed into logo/wordmark.svg by hand, which is what keeps the master a
 // drawing someone can read and correct; printed here so it is transcribed once
 // rather than worked out twice.
-const SHIP = A_BIG
+//
+// Row D after the round 8 answer. This is the same arrow round 7 transcribed,
+// so printing it is a free cross-check on the restored master: the head's three
+// offsets come out identical to `npm run arrow`'s, and the tail anchor agrees
+// to within 0.08 units (the two scripts measure the 3-unit clearance over the
+// U slightly differently). The master itself carries those numbers rounded to
+// whole units — 115 -7 for a computed 115.33 -7.18 — because it is a drawing
+// meant to be read and corrected by hand, and 0.3 of its 214 units is half a
+// pixel at the lockup's largest real use.
+const SHIP = D_NOW
 console.log(
-  `\n8a-A — chord ${SHIP.run}x${(SHIP.run * RISE).toFixed(2)}, shaft ${ARROW_W}, box ` +
+  `\n8a-D — chord ${SHIP.run}x${(SHIP.run * RISE).toFixed(2)}, shaft ${ARROW_W}, box ` +
     `${SHIP.width.toFixed(1)}x${SHIP.height.toFixed(1)} on x=${SHIP.left.toFixed(1)}..${SHIP.right.toFixed(1)}, ` +
     `y=${SHIP.top.toFixed(1)}..${SHIP.bottom.toFixed(1)}, in wordmark coordinates:`,
 )
