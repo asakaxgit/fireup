@@ -1,10 +1,12 @@
 # Fireup brand guide
 
 **Status: proposed, redrawn to the CEO's note, still not approved.** The mark in
-this directory is round 4 for SAK-173: the CEO's note was *"treat F as a lighter
-gun and blow fire from right top side"*, and that is what is drawn. It is in use
-on the marketing site in `site/`, but **approval has not been given** — identity
-direction is the CEO's sign-off and it is still open.
+this directory is round 5 for SAK-173. Round 4 drew the F as a trigger lighter
+on the note *"treat F as a lighter gun and blow fire from right top side"*; the
+note back on it was *"4a is almost good. Omit nozzle entirely"*, so the muzzle
+is gone and what is left is the F and the fire. It is in use on the marketing
+site in `site/`, but **approval has not been given** — identity direction is the
+CEO's sign-off and it is still open.
 
 This directory is in the public repository so the direction can be reviewed in a
 pull request. That is not approval. Until the mark is signed off, do not use it
@@ -15,22 +17,38 @@ external announcement, no profile or avatar.
 
 ## The mark
 
-The **F read as a trigger lighter**. The stem is the grip, the middle arm is
-where the finger sits, the top bar is the body, and it runs out into a
-half-weight muzzle with the fire blowing up and to the right off it. Fireup is
-what you run to bring a local stack up, so the mark is the moment it fires.
+An **F whose top bar runs out and catches**, the fire blowing up and to the
+right off its end. There is no muzzle and no other object: one bar weight end to
+end, and the fire takes over where the bar stops. Fireup is what you run to
+bring a local stack up, so the mark is the moment it fires.
 
 It is a monogram first. That is what lets it still say the name at 16px, where a
-picture cannot — the counter stays open on the right, so nothing about the
-lighter stops it being an F.
+picture cannot — the counter stays open on the right, so nothing about the fire
+stops it being an F.
 
 ### How it got here
 
-The direction is the CEO's, in two steps: round 2's lifted-arm F came back as
-*"use fire"*, and round 3's burning top bar came back as *"treat F as a lighter
-gun and blow fire from right top side"*. Round 4 is four sheets, each one
-answering the defect the one before it rendered — `scripts/lighter.mjs` and
-`lighter/`:
+The direction is the CEO's, in three steps: round 2's lifted-arm F came back as
+*"use fire"*, round 3's burning top bar came back as *"treat F as a lighter gun
+and blow fire from right top side"*, and round 4's lighter came back as *"4a is
+almost good. Omit nozzle entirely"*.
+
+Round 5 is two sheets — `scripts/plain.mjs` and `plain/`. Taking the muzzle out
+reopened the one question it had been answering, because the fire used to sit on
+a 6-unit nozzle and its 9-unit base was *wider* than what it sat on:
+
+- **5a, the join.** Against the bar's full 12 weight that same base is narrower
+  than what it sits on, and the join becomes a visible step — notched 2 units
+  above and 1 below. A base spanning the full bar weight has no step at all: the
+  bar's end simply is the fire. Lifting the fire onto the top half only, which
+  is the most literal reading of *"from right top side"*, leaves the bar's
+  bottom-right corner sticking out square beneath it.
+- **5b, the bar length.** At 32 the top bar ends only 4 units past the middle
+  arm and the fire becomes the widest thing in the mark; at 40 the letter
+  outweighs the fire. **36** is what ships.
+
+Round 4 is the lighter reading, kept in `scripts/lighter.mjs` and `lighter/`,
+and it is why no part of the appliance survives into round 5:
 
 - **4a, how literal.** A flared foot on the stem reads as a **lamp base**, not a
   grip. The most literal drawing — long thin nozzle, trigger wedge, flared
@@ -43,10 +61,10 @@ answering the defect the one before it rendered — `scripts/lighter.mjs` and
   invisible at 512px, let alone small. Three units of daylight between muzzle
   and flame makes the fire start to float free, which is the silhouette being
   avoided.
-- **4d, the cues.** A muzzle at **half** the bar's weight reads from 32px up and
-  costs the letter nothing. The middle arm cut as a trigger wedge does *not*
-  read as a trigger — it reads as a **fast-forward triangle**, and at 16px it
-  fills the counter. One coarse cue, not two.
+- **4d, the cues.** A muzzle at **half** the bar's weight was the one cue coarse
+  enough to read, and it is the one the CEO's note then removed. The middle arm
+  cut as a trigger wedge does *not* read as a trigger — it reads as a
+  **fast-forward triangle**, and at 16px it fills the counter.
 
 Round 3's findings still hold and are why the fire is where it is:
 fire built from stacked rows is a **pyramid**, a free-standing flame on a plinth
@@ -95,6 +113,7 @@ and is not mine to give — see the open flags at the bottom of this file.
 | `tune/` | One sheet per tuning axis of the round-2 mark, for choosing between variants by pointing at one. |
 | `fire/` | Round 3. The fire concepts, where the fire goes, and the shape of the tongue. |
 | `lighter/` | Round 4. The lighter reading: how literal, the jet, the muzzle, and which cues survive. |
+| `plain/` | Round 5. With the muzzle gone: where the fire meets the bar, and how far the bar runs. |
 | `preview/` | What actually ships, at the sizes it ships at. Rendered from `site/assets/`, not from the masters. |
 | `../site/assets/` | Generated. Every variant, lockup, favicon, app icon and the social card. |
 
@@ -122,11 +141,12 @@ npm run check      # smoke test the pipeline, verify contrast, rebuild all asset
 - `npm run tune` re-renders the four tuning sheets in `tune/`.
 - `npm run fire` re-renders the round 3 sheets in `fire/`.
 - `npm run lighter` re-renders the round 4 sheets in `lighter/`.
+- `npm run plain` re-renders the round 5 sheets in `plain/`.
 - `npm run preview` re-renders `preview/` from the built assets.
 
-`explore`, `tune`, `fire` and `lighter` are deliberately outside `check`: they are the
-record of a decision, not shipped assets, and they should only change when the
-question being asked changes. `preview` is outside it because looking at the
+`explore`, `tune`, `fire`, `lighter` and `plain` are deliberately outside
+`check`: they are the record of a decision, not shipped assets, and they should
+only change when the question being asked changes. `preview` is outside it because looking at the
 result is a human step, not a gate.
 
 ## Deciding by looking, not by arguing
@@ -178,13 +198,16 @@ Each of these breaks something specific, not just taste:
   how Firebase's mark is built, and the single flat colour is what keeps this
   one distinguishable from it. This is the one misuse rule with a legal edge.
 - **Do not** stretch, shear, rotate, outline, or add a shadow or bevel. The mark
-  is two rectangles and one path; there is nothing to decorate.
-- **Do not** detach the flame from the muzzle, or use it on its own as an icon.
-  Separated, it is a generic flame silhouette and loses both the idea and the
-  distance from the marks named above.
-- **Do not** narrow the muzzle further, or lengthen it. At six units it is half
-  the bar and reads; thinner, it lands on a pixel and a half at small sizes and
-  comes out as a grey sliver that looks like an artifact.
+  is three rectangles and one path; there is nothing to decorate.
+- **Do not** detach the fire from the end of the bar, or use it on its own as an
+  icon. Separated, it is a generic flame silhouette and loses both the idea and
+  the distance from the marks named above.
+- **Do not** inset the fire's base from the bar's edges. It spans the bar's full
+  12 weight so the join is a seam; at 9 units — which is what sat on round 4's
+  muzzle — the silhouette notches 2 units above the bar and 1 below.
+- **Do not** move where the bar stops. At 32 the fire becomes the widest thing
+  in the mark; past 40 the second tongue runs out of the 64-unit viewBox and the
+  renderer clips it flat.
 - **Do not** let the middle arm grow to the width of the top bar. The counter
   closing on the right is what turned earlier drawings into a P.
 - **Do not** set the wordmark in a font. It is drawn. Typing "fireup" in Inter

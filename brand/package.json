@@ -10,6 +10,7 @@
     "tune": "node scripts/tune.mjs",
     "fire": "node scripts/fire.mjs",
     "lighter": "node scripts/lighter.mjs",
+    "plain": "node scripts/plain.mjs",
     "preview": "node scripts/preview.mjs",
     "check": "npm run smoke && npm run contrast && npm run build"
   },

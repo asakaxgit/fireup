@@ -1,34 +1,36 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Fireup"
      data-cap-top="16" data-cap-bottom="60">
-  <!-- Fireup mark: the F read as a trigger lighter. The stem is the grip, the
-       middle arm is where the finger sits, the top bar is the body, and it runs
-       out into a half-weight muzzle with the fire blowing up and to the right
-       off it. Fireup is what you run to bring a stack up, so the mark is the
-       moment it fires.
+  <!-- Fireup mark: an F whose top bar runs out and catches, the fire blowing up
+       and to the right off its end. Fireup is what you run to bring a stack up,
+       so the mark is the moment it fires.
 
-       Why it is drawn this way, from brand/scripts/lighter.mjs:
-         * The muzzle is half the bar's weight. At 10 units against the bar's 12
-           the step is invisible at 512px, let alone small — the object only
-           reads if the cue is coarse.
-         * The middle arm stays a straight bar. Cut as a trigger wedge it reads
-           as a fast-forward triangle, not a trigger, and it fills the counter
-           at 16px.
+       Why it is drawn this way, from brand/scripts/plain.mjs (round 5) and
+       lighter.mjs (round 4):
+         * There is no muzzle. Round 4 ran a half-weight nozzle out of the bar
+           to carry the lighter read; the note on it was "omit nozzle entirely",
+           so the bar is one weight end to end.
+         * The fire's base spans the bar's full 12 weight, so the join is a seam
+           rather than a step — the bar's end is the fire. A 9-unit base, which
+           is what sat on the nozzle, notches the silhouette 2 units above the
+           bar and 1 below.
          * The fire has a belly and a second shorter tongue. A single tapered
-           jet along the barrel reads as a swoosh and a 45-degree blade reads as
-           a leaf; the notch between two tongues is what makes it fire.
-         * Nothing floats. The flame's base sits on the muzzle, because a
+           jet along the bar reads as a swoosh and a 45-degree blade reads as a
+           leaf; the notch between two tongues is what makes it fire.
+         * The bar stops at 36. At 32 it ends only 4 units past the middle arm
+           and the fire becomes the widest thing in the mark; at 40 the letter
+           outweighs the fire.
+         * Nothing floats. The fire is a terminal of the letterform, because a
            free-standing flame silhouette is Firebase's mark and Tinder's.
        The counter stays open on the right, so this is still an F at 16px, which
        is where it is used most.
 
-       Geometry on a 64-unit grid. Bar weight 12, muzzle 6, counter 6.
+       Geometry on a 64-unit grid. Bar weight 12, counter 6.
        data-cap-top/bottom mark the F's own cap line — the flame overshoots
        above it the way a diacritic does, and the lockup aligns to the cap.
-       Everything stays inside x<=60: in the first drawing the flame ran past 64
-       and the renderer clipped its outer lobe flat. -->
-  <rect x="6"  y="16" width="12" height="44" fill="#0B1220"/>
-  <rect x="6"  y="16" width="20" height="12" fill="#0B1220"/>
-  <rect x="26" y="19" width="14" height="6"  fill="#0B1220"/>
-  <rect x="6"  y="34" width="22" height="12" fill="#0B1220"/>
-  <path d="M40 18 C45 16 48 13 50 9 C52 5 53 3 54 1 C55 7 55 12 54 16 C57 14 59 12 60 10 C59 17 56 23 51 26 C47 28 43 28 40 27 Z" fill="#C2410C"/>
+       Everything stays inside x<=60 and y>=1: in round 4's first drawing the
+       flame ran past 64 and the renderer clipped its outer lobe flat. -->
+  <rect x="6" y="16" width="12" height="44" fill="#0B1220"/>
+  <rect x="6" y="16" width="30" height="12" fill="#0B1220"/>
+  <rect x="6" y="34" width="22" height="12" fill="#0B1220"/>
+  <path d="M36 16 C41 14 44 11 46 7 C48 4 49 3 50 1 C51 7 51 12 50 16 C53 14 55 12 56 10 C55 17 52 24 47 27 C43 28 39 28 36 28 Z" fill="#C2410C"/>
 </svg>

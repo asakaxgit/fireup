@@ -88,7 +88,7 @@ sheets.push(['identity-dark', identitySheet('dark')], ['identity-light', identit
 // Each favicon is its own drawing rather than the mark scaled down, so this is
 // the only place the three drawings can be compared against each other.
 const FAVICONS = [
-  ['favicon-16', 16, 'drawn for 16 — one tongue, muzzle on one pixel row'],
+  ['favicon-16', 16, 'drawn for 16 — one tongue, three steps'],
   ['favicon-32', 32, 'drawn for 32 — four steps, so the fire tapers'],
 ]
 

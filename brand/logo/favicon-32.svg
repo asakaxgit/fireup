@@ -1,16 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Fireup">
-  <!-- MASTER, drawn for 32px. Its own drawing again: at 32 the muzzle gets two
-       whole pixel rows instead of one, and the fire can step four times so it
-       tapers. The second tongue of the 64-unit mark still does not fit — the
-       notch would be 1px and reads as a nick, not as fire.
-       stem 6px, bars 6px, counter 4px, muzzle 2px. -->
+  <!-- MASTER, drawn for 32px. Its own drawing again: at 32 the fire can step
+       four times so it tapers. The second tongue of the 64-unit mark still does
+       not fit — the notch would be 1px and reads as a nick, not as fire.
+       stem 6px, bars 6px, counter 4px.
+       Round 5: no muzzle. The bar runs to 18 (the 64-unit mark's 36, halved)
+       and the fire's first block spans the bar's full 6px height. -->
   <rect width="32" height="32" fill="#0B1220"/>
   <rect x="4"  y="8"  width="6"  height="22" fill="#FFFFFF"/>
-  <rect x="4"  y="8"  width="12" height="6"  fill="#FFFFFF"/>
+  <rect x="4"  y="8"  width="14" height="6"  fill="#FFFFFF"/>
   <rect x="4"  y="18" width="10" height="6"  fill="#FFFFFF"/>
-  <rect x="16" y="10" width="4"  height="2"  fill="#FFFFFF"/>
-  <rect x="20" y="8"  width="6"  height="8"  fill="#FF5A2B"/>
-  <rect x="22" y="5"  width="5"  height="3"  fill="#FF5A2B"/>
-  <rect x="24" y="3"  width="4"  height="2"  fill="#FF5A2B"/>
-  <rect x="25" y="2"  width="2"  height="1"  fill="#FF5A2B"/>
+  <rect x="18" y="8"  width="7"  height="6"  fill="#FF5A2B"/>
+  <rect x="20" y="5"  width="6"  height="3"  fill="#FF5A2B"/>
+  <rect x="22" y="3"  width="4"  height="2"  fill="#FF5A2B"/>
+  <rect x="23" y="2"  width="2"  height="1"  fill="#FF5A2B"/>
 </svg>
