@@ -40,11 +40,35 @@ jobs:
             target
           key: ${{ runner.os }}-local-firestore-${{ hashFiles('**/Cargo.lock') }}
 
+      # First, because a workflow file GitHub cannot read makes every other job
+      # in this file unreachable — and that is not a hypothetical here, see the
+      # note on the next step. Checks that every file under .github/workflows/
+      # parses and has a name, an `on:` and jobs with steps.
+      - name: Workflow files are readable by GitHub
+        run: cargo test --test workflow_yaml_tests
+
       - name: Data plane unit tests
         # Quoted on purpose: a trailing `::` in an unquoted scalar makes YAML
         # read the line as a mapping key, and GitHub then rejects the whole
         # file — every push produced a "workflow file issue" failure until this
         # was quoted, so the job had never actually run.
+        #
+        # What that failure looks like, written down because it was misread
+        # once already: GitHub does not skip an unreadable workflow file. It
+        # manufactures a run for the *push* event even though the only trigger
+        # here is `workflow_dispatch`, concludes it `failure` with zero jobs,
+        # and titles it by **path** instead of by `name:` — it never parsed far
+        # enough to read `name:`. The annotation on that run is the real
+        # message: "Invalid workflow file: You have an error in your yaml
+        # syntax on line 44".
+        #
+        # And it hides well, because a manual `workflow_dispatch` keeps working
+        # off the last version GitHub could parse: whoever dispatches by hand
+        # sees green while every push shows a red X.
+        #
+        # tests/workflow_yaml_tests.rs now parses every file in this directory
+        # from `cargo test`, and keeps the broken line as a negative control.
+        # That test is the guard; this comment is why it exists.
         run: "cargo test --lib local::"
 
       - name: Firestore gRPC tests
