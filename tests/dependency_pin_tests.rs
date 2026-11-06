@@ -1386,6 +1386,402 @@ fn check_build_licenses_are_checked(deny: &str) -> Result<(), String> {
     }
 }
 
+/// The name of the step in `ci.yml`'s `deny` job that logs accepted advisories.
+const LOG_STEP: &str = "Accepted advisory exceptions";
+
+/// The literal that step greps `deny.toml` for, read out of `ci.yml`.
+///
+/// Read rather than written down a second time, because the string *is* the
+/// contract. The guard below enforces a shape on `ignore` entries for one
+/// reason only — that this `grep` can see them — so a test carrying its own
+/// copy of the pattern would quietly stop describing CI the first time the step
+/// changed, and would then demand a shape nobody looks for.
+///
+/// `Err` if the step is gone or its `run:` body is not the single `grep` over
+/// `deny.toml` this reader knows. Either one voids the step's promise, which is
+/// the thing the guard exists to keep true, so neither may read as a pass.
+fn log_step_pattern(ci: &str) -> Result<String, String> {
+    let lines: Vec<&str> = ci.lines().collect();
+    let needle = format!("- name: {LOG_STEP}");
+    let at = lines
+        .iter()
+        .position(|line| line.trim() == needle)
+        .ok_or_else(|| {
+            format!(
+                "ci.yml has no `- name: {LOG_STEP}` step. That step is the only \
+                 thing that puts an accepted advisory in a run's log — \
+                 cargo-deny itself prints nothing at all for one — so without \
+                 it there is no promise left for this guard to keep. If the \
+                 step was removed on purpose, remove this test with it and say \
+                 in deny.toml that accepted exceptions are invisible."
+            )
+        })?;
+
+    // The body is the next `run:` in the step, before the next step begins.
+    let body = lines[at + 1..]
+        .iter()
+        .take_while(|line| !line.trim().starts_with("- name:"))
+        .find_map(|line| line.trim().strip_prefix("run:"))
+        .ok_or_else(|| format!("the `{LOG_STEP}` step in ci.yml has no `run:` body"))?
+        .trim();
+
+    if !body.starts_with("grep ") || !body.contains("deny.toml") {
+        return Err(format!(
+            "the `{LOG_STEP}` step in ci.yml does not run a `grep` over \
+             deny.toml any more; its body is `{body}`. This guard only knows \
+             how to check that `ignore` entries are visible to a grep, so an \
+             unfamiliar step has to fail rather than be assumed equivalent."
+        ));
+    }
+
+    let (_, rest) = body.split_once('\'').ok_or_else(|| {
+        format!("the `{LOG_STEP}` step's grep in ci.yml has no single-quoted pattern: `{body}`")
+    })?;
+    let (pattern, _) = rest.split_once('\'').ok_or_else(|| {
+        format!("the `{LOG_STEP}` step's grep pattern in ci.yml is never closed: `{body}`")
+    })?;
+    if pattern.is_empty() {
+        return Err(format!(
+            "the `{LOG_STEP}` step in ci.yml greps for an empty pattern, which matches every line"
+        ));
+    }
+    Ok(pattern.to_string())
+}
+
+/// A live `[advisories] ignore` entry and the source lines it occupies.
+#[derive(Debug, PartialEq, Eq)]
+struct IgnoreEntry {
+    /// The entry's text, comments stripped and newlines flattened to spaces.
+    text: String,
+    /// The raw source lines the entry's text came from, in order.
+    ///
+    /// More than one means the entry is spread down the file, which is the
+    /// shape the log step's line-oriented `grep` cannot report whole.
+    lines: Vec<String>,
+}
+
+/// Every element of `[advisories] ignore`, one `IgnoreEntry` each.
+///
+/// `setting_array` is no use here for the same reason it was no use for
+/// `[bans.build] bypass`: it splits on commas, and an entry of this array is an
+/// inline table full of them. This reader also has to keep the *line* each
+/// character came from, which no other reader in this file needs.
+///
+/// `Some(vec![])` means there are no accepted advisories — either `ignore = []`
+/// or no key at all, which is cargo-deny's default and the same thing.
+///
+/// `None` means there is a live `ignore` line whose value this reader cannot
+/// read as an array of entries. The caller turns that into a failure rather
+/// than a pass, for the reason SAK-235 gave for `[graph] targets`. A `#` or a
+/// backslash escape inside a reason string reaches this path — comments are
+/// stripped per line, and escapes are not implemented. Failing closed on both
+/// is the right answer anyway: the log step prints the whole line, so a reason
+/// needing either one needs a reader smarter than `grep` too.
+fn ignore_entries(deny: &str) -> Option<Vec<IgnoreEntry>> {
+    let raw: Vec<&str> = deny.lines().collect();
+
+    // Every character of the array, from its `[` to the matching `]`, tagged
+    // with the line it came from.
+    let mut tagged: Vec<(char, usize)> = Vec::new();
+    let mut depth = 0usize;
+    let mut open = false;
+    let mut closed = false;
+    for (number, line) in raw.iter().enumerate() {
+        let code = line.split('#').next().unwrap_or("");
+        let chunk = if open {
+            // The line break is a separator. `bypass_entries` pushes a space
+            // for the same reason: without it two lines' text is glued.
+            tagged.push((' ', number));
+            code
+        } else {
+            let Some((candidate, value)) = code.split_once('=') else {
+                continue;
+            };
+            if candidate.trim() != "ignore" {
+                continue;
+            }
+            if !value.trim_start().starts_with('[') {
+                return None;
+            }
+            open = true;
+            value
+        };
+        for ch in chunk.chars() {
+            match ch {
+                '[' => depth += 1,
+                ']' => depth = depth.checked_sub(1)?,
+                _ => {}
+            }
+            tagged.push((ch, number));
+            if depth == 0 && ch == ']' {
+                closed = true;
+                break;
+            }
+        }
+        if closed {
+            break;
+        }
+    }
+
+    if !open {
+        return Some(Vec::new());
+    }
+    // An array that never closes is not readable either.
+    if !closed {
+        return None;
+    }
+
+    let first = tagged.iter().position(|&(ch, _)| ch == '[')?;
+    let last = tagged.iter().rposition(|&(ch, _)| ch == ']')?;
+    let inner = tagged.get(first + 1..last)?;
+
+    /// Ends the entry being collected, if there is one.
+    fn flush(
+        entries: &mut Vec<IgnoreEntry>,
+        raw: &[&str],
+        text: &mut String,
+        lines: &mut Vec<usize>,
+    ) {
+        if !text.trim().is_empty() {
+            entries.push(IgnoreEntry {
+                text: text.split_whitespace().collect::<Vec<_>>().join(" "),
+                lines: lines
+                    .iter()
+                    .map(|&number| raw[number].to_string())
+                    .collect(),
+            });
+        }
+        text.clear();
+        lines.clear();
+    }
+
+    let mut entries: Vec<IgnoreEntry> = Vec::new();
+    let mut text = String::new();
+    let mut lines: Vec<usize> = Vec::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for &(ch, number) in inner {
+        // Whitespace does not put a line in the entry's span: the newline after
+        // a one-line entry's comma belongs to no entry.
+        if !ch.is_whitespace() && !lines.contains(&number) {
+            lines.push(number);
+        }
+        // An escape would make the quote tracking below wrong, and this reader
+        // does not implement TOML's escapes. Unreadable is the honest answer.
+        if ch == '\\' {
+            return None;
+        }
+        if let Some(opening) = quote {
+            if ch == opening {
+                quote = None;
+            }
+            text.push(ch);
+            continue;
+        }
+        match ch {
+            // Both TOML string forms, so that a `'…'` value cannot hide a
+            // comma or a brace from the splitter.
+            '"' | '\'' => {
+                quote = Some(ch);
+                text.push(ch);
+            }
+            '{' | '[' => {
+                depth += 1;
+                text.push(ch);
+            }
+            '}' | ']' => {
+                depth = depth.checked_sub(1)?;
+                text.push(ch);
+            }
+            ',' if depth == 0 => flush(&mut entries, &raw, &mut text, &mut lines),
+            _ => text.push(ch),
+        }
+    }
+    if quote.is_some() || depth != 0 {
+        return None;
+    }
+    flush(&mut entries, &raw, &mut text, &mut lines);
+    Some(entries)
+}
+
+/// The quoted value of `key` in `entry`, without its quotes.
+///
+/// `None` when the key is absent or its value is not a quoted string. The key
+/// is matched with the same boundary rule as `count_key`, so `reason` cannot be
+/// satisfied by some longer name ending in it.
+fn string_value(entry: &str, key: &str) -> Option<String> {
+    let bytes = entry.as_bytes();
+    let mut from = 0;
+    while let Some(at) = entry[from..].find(key) {
+        let start = from + at;
+        let end = start + key.len();
+        let joined_to_a_longer_name = start > 0
+            && matches!(bytes[start - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-');
+        if !joined_to_a_longer_name {
+            if let Some(value) = entry[end..].trim_start().strip_prefix('=') {
+                let value = value.trim_start();
+                let quote = value.chars().next()?;
+                if quote != '"' && quote != '\'' {
+                    return None;
+                }
+                let body = &value[quote.len_utf8()..];
+                return body.find(quote).map(|close| body[..close].to_string());
+            }
+        }
+        from = end;
+    }
+    None
+}
+
+/// `Some(date)` if `text` carries an ISO-8601 calendar date, `YYYY-MM-DD`.
+///
+/// An advisory id cannot be mistaken for one. `RUSTSEC-2026-0258` is four
+/// digits, a dash and four more, so the scan runs out of shape where the day
+/// part should start — which is why this looks inside the reason string rather
+/// than at the whole line.
+fn review_date(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    for start in 0..bytes.len() {
+        if start > 0 && bytes[start - 1].is_ascii_digit() {
+            continue;
+        }
+        let Some(window) = text.get(start..start + 10) else {
+            continue;
+        };
+        let shaped = window.as_bytes().iter().enumerate().all(|(at, byte)| {
+            if at == 4 || at == 7 {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_digit()
+            }
+        });
+        if !shaped || bytes.get(start + 10).is_some_and(u8::is_ascii_digit) {
+            continue;
+        }
+        let month: u32 = window[5..7].parse().ok()?;
+        let day: u32 = window[8..10].parse().ok()?;
+        if (1..=12).contains(&month) && (1..=31).contains(&day) {
+            return Some(window.to_string());
+        }
+    }
+    None
+}
+
+/// `Err` unless every live `[advisories] ignore` entry is one line that the
+/// `deny` job's log step can `grep`, carrying its reason and reconsider date on
+/// that same line.
+///
+/// cargo-deny prints **nothing at all** for an advisory it ignored — not the
+/// id, not the reason, not a count. `ci.yml`'s `deny` job covers for that with
+/// one step whose stated purpose is to leave the accepted exceptions and their
+/// reconsider dates in every run's log rather than only in a config file, and
+/// it does that with a plain `grep` for the pattern `log_step_pattern` reads.
+///
+/// That promise holds for exactly one way of writing an entry. Rewrite the same
+/// entry in another valid TOML spelling and cargo-deny suppresses the advisory
+/// just as before while the log goes quiet. Measured on the tree that had a
+/// live entry (#77, h2 RUSTSEC-2026-0258), reading the gate and the log step
+/// independently — one alone cannot tell "the entry works" from "there is no
+/// advisory":
+///
+/// | `ignore` entry                  | `cargo deny check advisories` | log step          |
+/// |---------------------------------|-------------------------------|-------------------|
+/// | the shipped one-line table      | exit 0, suppressed            | id, reason, date  |
+/// | split across two lines          | exit 0, suppressed            | id only           |
+/// | `id` in single quotes           | exit 0, suppressed            | `none`            |
+/// | `id="RUSTSEC-…"`, no spaces     | exit 0, suppressed            | `none`            |
+/// | entry deleted (control)         | **exit 1**, advisory fires    | `none`            |
+///
+/// The control is what makes the middle rows mean anything: with no entry the
+/// gate goes red, so the green in the single-quote and no-space rows is proof
+/// the entry really is doing its job — and all three print the identical
+/// `none`, so the log cannot distinguish "one advisory accepted" from "none".
+/// The two-line row is quieter still: the id appears, so an exception is
+/// visible, but the reason and the reconsider date — the step's whole reason
+/// for existing — are on a line the grep never prints.
+///
+/// So the fix is not a cleverer `grep` in `ci.yml`. No test in this repository
+/// reads a workflow's shell (SAK-221), so a smarter step would be unguarded;
+/// and a `grep` is the right tool for a one-line entry. Instead the *shape*
+/// the grep depends on becomes the invariant, checked here, and the step stays
+/// simple.
+///
+/// Today this costs nothing: SAK-220's migration removed the h2 entry, so
+/// `ignore` is empty and this guard changes no behaviour. It bites the next
+/// person to accept an advisory, which is the moment the log is needed.
+///
+/// (This is deliberately unlike the judgement on `[licenses]
+/// confidence-threshold`, which SAK-238 left unguarded as inert. That key's
+/// value was not a contract. "A shape the log step can read" is one, and it
+/// becomes load-bearing the instant `ignore` is used.)
+fn check_ignore_entries_are_logged(deny: &str, pattern: &str) -> Result<(), String> {
+    let Some(entries) = ignore_entries(deny) else {
+        return Err(
+            "deny.toml has a live `[advisories] ignore` line this test cannot read as an array \
+             of entries, so it cannot report whether the `deny` job's log step can see them. \
+             That is a failure and not a pass: the step is the only place an accepted advisory \
+             is ever printed, because cargo-deny says nothing about one. Write the list as \
+             one-line inline tables, and keep `#` out of the reason strings."
+                .into(),
+        );
+    };
+
+    for entry in &entries {
+        if entry.lines.len() != 1 {
+            return Err(format!(
+                "an ignore entry spans more than one line, so the `deny` job's log step can \
+                 never print it whole:\n{}\n\
+                 The step greps `{pattern}` and prints the matching *line*. Split like this, \
+                 the id is logged and the reason and reconsider date are not — and those are \
+                 the step's whole purpose, since cargo-deny prints nothing at all for an \
+                 advisory it ignored. Put the entry on one line.",
+                entry
+                    .lines
+                    .iter()
+                    .map(|line| format!("    {}", line.trim_end()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+
+        let line = entry.lines[0].trim();
+        if !line.contains(pattern) {
+            return Err(format!(
+                "an ignore entry does not match the log step's grep, so accepting this advisory \
+                 is invisible in every run's log:\n    {line}\n\
+                 The step in ci.yml greps for the literal `{pattern}`. Valid TOML that misses \
+                 it includes a single-quoted id (`id = 'RUSTSEC-…'`), no spaces around the \
+                 `=` (`id=\"RUSTSEC-…\"`), and a bare string element (`\"RUSTSEC-…\"`). \
+                 cargo-deny suppresses the advisory in all of them, so nothing else goes red: \
+                 the gate stays green and the log prints `none`, exactly as it would with no \
+                 entry at all. Write the id as `{pattern}…\"`."
+            ));
+        }
+
+        let Some(reason) = string_value(&entry.text, "reason") else {
+            return Err(format!(
+                "an ignore entry has no `reason = \"…\"` string:\n    {line}\n\
+                 The reason is what the `deny` job's log step is for. cargo-deny does not \
+                 require it and prints nothing either way, so an entry without one accepts an \
+                 advisory with no recorded argument and no reconsider date anywhere."
+            ));
+        };
+
+        if review_date(&reason).is_none() {
+            return Err(format!(
+                "an ignore entry's reason carries no review date, so nothing says when the \
+                 acceptance should be re-argued:\n    {line}\n\
+                 Add an ISO-8601 date (`YYYY-MM-DD`) to the reason, on this same line — \
+                 `reason = \"… Reconsider by 2027-02-06.\"`. cargo-deny has no expiry feature \
+                 for `ignore`, so the date is a promise rather than a gate; the log step \
+                 putting it in front of someone on every run is the whole mechanism, and a \
+                 reason without one makes the acceptance permanent by default."
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -1511,6 +1907,17 @@ fn deny_toml_scans_the_binaries_the_build_runs_and_pins_every_exemption() {
 #[test]
 fn deny_toml_licence_checks_build_dependencies() {
     if let Err(reason) = check_build_licenses_are_checked(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn every_accepted_advisory_is_visible_in_the_deny_jobs_log() {
+    let pattern = match log_step_pattern(&repo_file(".github/workflows/ci.yml")) {
+        Ok(pattern) => pattern,
+        Err(reason) => panic!("{reason}"),
+    };
+    if let Err(reason) = check_ignore_entries_are_logged(&repo_file("deny.toml"), &pattern) {
         panic!("{reason}");
     }
 }
@@ -2993,5 +3400,355 @@ confidence-threshold = 0.93
 include-build = false
 ";
         assert!(check_build_licenses_are_checked(deny).is_err());
+    }
+
+    /// The pattern the real log step greps for.
+    ///
+    /// The arms below measure CI's actual `grep`, not a copy of it kept in this
+    /// file. If someone edits the step so that the entry shape this repository
+    /// documents stops matching, `the_entry_shape_the_log_step_can_read_passes`
+    /// is where it shows up.
+    fn grep() -> String {
+        log_step_pattern(&repo_file(".github/workflows/ci.yml"))
+            .expect("ci.yml must carry the log step this guard is built on")
+    }
+
+    /// `[advisories]` with `body` as the contents of the `ignore` array.
+    fn advisories_with(body: &str) -> String {
+        format!("[advisories]\nunmaintained = \"all\"\nignore = [\n{body}]\n\nyanked = \"deny\"\n")
+    }
+
+    /// The entry #77 actually shipped, copied character for character.
+    const SHIPPED_ENTRY: &str = "  { id = \"RUSTSEC-2026-0258\", reason = \"h2 0.3.27 via pinned \
+                                 tonic 0.11; local-only gRPC surface. Fix needs the tonic \
+                                 0.12/prost 0.13 migration (SAK-220). Reconsider by 2027-02-06.\" \
+                                 },\n";
+
+    /// K1. The shape the repository ships and the log step was written for: one
+    /// inline table on one line, with the id in the spelling the grep looks for
+    /// and the reason — reconsider date included — beside it. Measured on #77:
+    /// `cargo deny check advisories` exits 0 with the advisory suppressed, and
+    /// the log step prints the id, the reason and the date.
+    #[test]
+    fn the_entry_shape_the_log_step_can_read_passes() {
+        let deny = advisories_with(SHIPPED_ENTRY);
+        assert!(
+            check_ignore_entries_are_logged(&deny, &grep()).is_ok(),
+            "the shipped entry shape must pass, or this guard forbids the only \
+             shape CI can report"
+        );
+    }
+
+    /// K2. The quietest break, and the one no reader would call a mistake:
+    /// valid TOML, cargo-deny suppresses the advisory exactly as before, and
+    /// the grep still prints a line — so an exception is still visible. What is
+    /// lost is the reason and the reconsider date, which is the step's entire
+    /// purpose.
+    #[test]
+    fn an_entry_split_across_lines_fails() {
+        let deny = advisories_with(
+            "  { id = \"RUSTSEC-2026-0258\",\n    \
+             reason = \"h2 via pinned tonic 0.11. Reconsider by 2027-02-06.\" },\n",
+        );
+        let error = check_ignore_entries_are_logged(&deny, &grep())
+            .expect_err("a two-line entry must fail");
+        assert!(error.contains("spans more than one line"), "{error}");
+
+        // The brace-on-its-own-line form is the same failure.
+        let deny = advisories_with(
+            "  {\n    id = \"RUSTSEC-2026-0258\",\n    \
+             reason = \"h2 via pinned tonic 0.11. Reconsider by 2027-02-06.\",\n  },\n",
+        );
+        let error = check_ignore_entries_are_logged(&deny, &grep())
+            .expect_err("a three-line entry must fail");
+        assert!(error.contains("spans more than one line"), "{error}");
+    }
+
+    /// K3. A TOML literal string for the id. Still an id, still matched against
+    /// the advisory database, still suppresses it — measured on #77 with
+    /// `-D advisory-not-detected`, which is what rules out "the advisory simply
+    /// is not there". The grep looks for a double quote, so the log says `none`.
+    #[test]
+    fn a_single_quoted_id_fails() {
+        let deny = advisories_with(
+            "  { id = 'RUSTSEC-2026-0258', \
+             reason = \"h2 via pinned tonic 0.11. Reconsider by 2027-02-06.\" },\n",
+        );
+        let error = check_ignore_entries_are_logged(&deny, &grep())
+            .expect_err("a single-quoted id must fail");
+        assert!(
+            error.contains("does not match the log step's grep"),
+            "{error}"
+        );
+    }
+
+    /// K4. The same silence from the smallest edit in the set: two spaces
+    /// removed. TOML does not care, cargo-deny does not care — measured on #77
+    /// with `-D advisory-not-detected`, exit 0 and suppressed — and the grep
+    /// pattern has the spaces in it, so the log says `none`.
+    #[test]
+    fn an_id_without_spaces_around_the_equals_fails() {
+        let deny = advisories_with(
+            "  { id=\"RUSTSEC-2026-0258\", \
+             reason = \"h2 via pinned tonic 0.11. Reconsider by 2027-02-06.\" },\n",
+        );
+        let error =
+            check_ignore_entries_are_logged(&deny, &grep()).expect_err("`id=\"…\"` must fail");
+        assert!(
+            error.contains("does not match the log step's grep"),
+            "{error}"
+        );
+    }
+
+    /// K5. The control for K3 and K4, and the arm that makes their green mean
+    /// something. With no entry at all the log step also prints `none` — so the
+    /// log cannot tell "one advisory accepted" from "none accepted", which is
+    /// the finding. Here the guard must pass: an empty list is the shipping
+    /// state after SAK-220, and a guard that failed on it would be demanding an
+    /// exception rather than a shape.
+    #[test]
+    fn no_entries_at_all_passes() {
+        for deny in [
+            advisories_with(""),
+            "[advisories]\nignore = []\n".to_string(),
+            // No key either: cargo-deny's default is the empty list.
+            "[advisories]\nunmaintained = \"all\"\n".to_string(),
+        ] {
+            assert!(
+                check_ignore_entries_are_logged(&deny, &grep()).is_ok(),
+                "an empty ignore list must pass:\n{deny}"
+            );
+        }
+    }
+
+    /// K6. Without this the guard would only be checking a house style. The
+    /// log step exists to put the *reconsider date* in front of someone on
+    /// every run — cargo-deny has no expiry feature, so the date is the only
+    /// thing that stops an acceptance from being permanent. An entry the grep
+    /// finds but with no date in its reason has to fail.
+    #[test]
+    fn a_grep_visible_entry_with_no_review_date_fails() {
+        let deny = advisories_with(
+            "  { id = \"RUSTSEC-2026-0258\", \
+             reason = \"h2 0.3.27 via pinned tonic 0.11; local-only gRPC surface.\" },\n",
+        );
+        let error = check_ignore_entries_are_logged(&deny, &grep())
+            .expect_err("a reason with no date must fail");
+        assert!(error.contains("no review date"), "{error}");
+
+        // An id is not a date, which is why the scan reads the reason and not
+        // the line: `RUSTSEC-2026-0258` is four digits, a dash and four more.
+        assert_eq!(review_date("RUSTSEC-2026-0258"), None);
+        assert_eq!(review_date("RUSTSEC-2024-0449"), None);
+        assert_eq!(
+            review_date("Reconsider by 2027-02-06."),
+            Some("2027-02-06".to_string())
+        );
+        // Not a date-shaped number that happens to be ten characters long.
+        assert_eq!(review_date("2027-13-06"), None);
+        assert_eq!(review_date("2027-02-00"), None);
+        assert_eq!(review_date("12027-02-06"), None);
+        assert_eq!(review_date("2027-02-061"), None);
+    }
+
+    /// K7. Without this arm the guard could be pinning one advisory number
+    /// rather than a shape. A second, differently-numbered entry written
+    /// correctly has to pass — and its reason carries a comma, so the entry
+    /// splitter is exercised on the thing that would make it split in the
+    /// wrong place.
+    #[test]
+    fn a_second_correctly_written_entry_passes() {
+        let deny = advisories_with(&format!(
+            "{SHIPPED_ENTRY}  {{ id = \"RUSTSEC-2024-0449\", reason = \"unsafe-libyaml, reached \
+             through a dev dependency on serde_yaml; archived, no code path in the shipped \
+             binary. Reconsider by 2026-12-31.\" }},\n"
+        ));
+        assert!(
+            check_ignore_entries_are_logged(&deny, &grep()).is_ok(),
+            "a correctly written second entry must pass, or this guard is \
+             pinning an advisory id instead of a shape"
+        );
+    }
+
+    /// The other two valid spellings the grep cannot see. A bare string element
+    /// is the shape cargo-deny's own documentation shows first, and it carries
+    /// no reason at all; an entry with an `id` and nothing else is grep-visible
+    /// but has nothing to log.
+    #[test]
+    fn an_entry_with_no_reason_fails() {
+        let deny = advisories_with("  \"RUSTSEC-2026-0258\",\n");
+        let error = check_ignore_entries_are_logged(&deny, &grep())
+            .expect_err("a bare string element must fail");
+        assert!(
+            error.contains("does not match the log step's grep"),
+            "{error}"
+        );
+
+        let deny = advisories_with("  { id = \"RUSTSEC-2026-0258\" },\n");
+        let error = check_ignore_entries_are_logged(&deny, &grep())
+            .expect_err("an entry with no reason must fail");
+        assert!(error.contains("no `reason"), "{error}");
+    }
+
+    /// A commented-out entry is not a live one. `deny.toml` quotes advisory ids
+    /// and whole entries in its prose as history — that is where the h2
+    /// acceptance is now recorded — so a guard that read comments would fail on
+    /// the documentation of itself. (The log step's `grep` does print such a
+    /// line, which over-reports; this check is about what cargo-deny acts on.)
+    #[test]
+    fn a_commented_out_entry_is_not_read_as_live() {
+        let deny = advisories_with(&format!("#{SHIPPED_ENTRY}"));
+        assert!(check_ignore_entries_are_logged(&deny, &grep()).is_ok());
+
+        // And a commented-out good entry must not rescue a live bad one.
+        let deny = advisories_with(&format!(
+            "#{SHIPPED_ENTRY}  {{ id='RUSTSEC-2026-0258', reason = \"x 2027-02-06\" }},\n"
+        ));
+        assert!(check_ignore_entries_are_logged(&deny, &grep()).is_err());
+    }
+
+    /// A live `ignore` whose value this reader cannot parse fails rather than
+    /// passing vacuously — the same call SAK-235 made for `[graph] targets`.
+    #[test]
+    fn an_unreadable_ignore_list_fails() {
+        for value in [
+            // Not an array at all.
+            "\"RUSTSEC-2026-0258\"",
+            // An array that never closes.
+            "[ { id = \"RUSTSEC-2026-0258\" ",
+            // An escape this reader does not implement.
+            "[ { id = \"RUSTSEC-2026-0258\", reason = \"needs a \\\"quote\\\" 2027-02-06\" } ]",
+            // An *unbalanced* bracket inside a reason. The first pass counts
+            // brackets before it knows it is inside a string, so the array
+            // closes early and the cut falls mid-string — which lands here,
+            // rather than parsing into something wrong. (A balanced pair reads
+            // fine; see `the_ignore_reader_reads_the_shapes_it_claims_to`.)
+            "[ { id = \"RUSTSEC-2026-0258\", reason = \"see RUSTSEC-1] 2027-02-06\" } ]",
+            "[ { id = \"RUSTSEC-2026-0258\", reason = \"opens a [ 2027-02-06\" } ]",
+        ] {
+            let deny = format!("[advisories]\nignore = {value}\n");
+            assert!(
+                check_ignore_entries_are_logged(&deny, &grep()).is_err(),
+                "`ignore = {value}` must not read as an empty, compliant list"
+            );
+        }
+    }
+
+    /// The readers this guard is built on, exercised directly, so that a wrong
+    /// answer cannot be masked by another branch reaching the same verdict.
+    #[test]
+    fn the_ignore_reader_reads_the_shapes_it_claims_to() {
+        // One entry, one line, and the line kept verbatim for the grep check.
+        let entries = ignore_entries(&advisories_with(SHIPPED_ENTRY)).expect("readable");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].lines.len(), 1);
+        assert!(entries[0].lines[0].contains("RUSTSEC-2026-0258"));
+        assert!(entries[0].text.starts_with('{') && entries[0].text.ends_with('}'));
+
+        // A comma inside a quoted reason does not split the entry.
+        let entries = ignore_entries(&advisories_with(
+            "  { id = \"RUSTSEC-1\", reason = \"a, b, c 2027-02-06\" },\n",
+        ))
+        .expect("readable");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(
+            string_value(&entries[0].text, "reason").as_deref(),
+            Some("a, b, c 2027-02-06")
+        );
+
+        // Nor does a brace, in either string form.
+        let entries = ignore_entries(&advisories_with(
+            "  { id = \"RUSTSEC-1\", reason = 'closes with } 2027-02-06' },\n",
+        ))
+        .expect("readable");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+
+        // A balanced bracket pair inside a reason reads fine: the first pass
+        // counts brackets without knowing about strings, and a pair nets to
+        // zero. Only an unbalanced one is unreadable — see
+        // `an_unreadable_ignore_list_fails`.
+        let entries = ignore_entries(&advisories_with(
+            "  { id = \"RUSTSEC-1\", reason = \"see [1]. Reconsider by 2027-02-06.\" },\n",
+        ))
+        .expect("readable");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(check_ignore_entries_are_logged(
+            &advisories_with(
+                "  { id = \"RUSTSEC-2026-0258\", \
+                 reason = \"see [1]. Reconsider by 2027-02-06.\" },\n"
+            ),
+            &grep()
+        )
+        .is_ok());
+
+        // Two entries on one line split; a multi-line entry keeps its lines.
+        let entries = ignore_entries(&advisories_with(
+            "  { id = \"RUSTSEC-1\" }, { id = \"RUSTSEC-2\" },\n",
+        ))
+        .expect("readable");
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.lines.len() == 1));
+        let entries = ignore_entries(&advisories_with(
+            "  { id = \"RUSTSEC-1\",\n    reason = \"x\" },\n",
+        ))
+        .expect("readable");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].lines.len(), 2);
+
+        // Absent and empty are both "no accepted advisories"; unreadable is not.
+        assert_eq!(
+            ignore_entries("[advisories]\nyanked = \"deny\"\n"),
+            Some(Vec::new())
+        );
+        assert_eq!(ignore_entries("ignore = []\n"), Some(Vec::new()));
+        assert_eq!(ignore_entries("ignore = \"RUSTSEC-1\"\n"), None);
+        assert_eq!(
+            ignore_entries("ignore = [\n  { id = \"RUSTSEC-1\" },\n"),
+            None
+        );
+
+        // `string_value` keeps the boundary rule `count_key` uses.
+        assert_eq!(
+            string_value("{ reason = \"why\" }", "reason").as_deref(),
+            Some("why")
+        );
+        assert_eq!(string_value("{ my-reason = \"why\" }", "reason"), None);
+        assert_eq!(string_value("{ id = \"RUSTSEC-1\" }", "reason"), None);
+        assert_eq!(string_value("{ reason = 0 }", "reason"), None);
+    }
+
+    /// The pattern reader, and the half of this guard that points at `ci.yml`.
+    /// The real step is the measurement: whatever it greps for is what the
+    /// shipped entry shape has to match, so the two cannot drift apart silently.
+    #[test]
+    fn the_log_steps_pattern_is_read_out_of_the_workflow() {
+        assert_eq!(grep(), "id = \"RUSTSEC");
+
+        let step = format!("      - name: {LOG_STEP}\n");
+        assert_eq!(
+            log_step_pattern(&format!(
+                "{step}        run: grep -n 'id = \"RUSTSEC' deny.toml\n"
+            ))
+            .expect("the shipped step body is readable"),
+            "id = \"RUSTSEC"
+        );
+
+        // No step means no promise to keep, which is a failure and not a pass.
+        assert!(
+            log_step_pattern("jobs:\n  deny:\n    steps:\n      - run: cargo deny check\n")
+                .is_err()
+        );
+        // A step whose body is no longer that grep is not assumed equivalent.
+        assert!(log_step_pattern(&format!("{step}        run: cat deny.toml\n")).is_err());
+        assert!(
+            log_step_pattern(&format!("{step}        run: grep -n RUSTSEC deny.toml\n")).is_err()
+        );
+        assert!(log_step_pattern(&format!("{step}        run: grep -n '' deny.toml\n")).is_err());
+        assert!(log_step_pattern(&step).is_err());
+        // And the `run:` has to belong to this step, not to the next one.
+        assert!(log_step_pattern(&format!(
+            "{step}      - name: Something else\n        run: grep -n 'x' deny.toml\n"
+        ))
+        .is_err());
     }
 }
