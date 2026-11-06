@@ -382,12 +382,13 @@ as of SAK-190; realtime listeners as of SAK-189, below.
 - **Known limit:** the feed is in-process. With `--postgres-url`, a write by a
   *different* process does not wake these listeners — nothing polls the table.
 
-**Verified on 2026-11-06**, stacked on [SAK-194](/SAK/issues/SAK-194) (PR #64)
-and re-run after that rebase: `cargo test --lib` (468), `--test
-local_firestore_listen_tests` (15, over the real bidirectional gRPC stream),
-`--test fidelity_matrix_tests` (5), `--test local_firestore_tests` (46),
-`--test local_datastore_tests` (6), `--test local_auth_tests` (18), `--test
-local_auth_postgres_tests` (10), `--test local_postgres_store_tests` (7),
+**Verified on 2026-11-06**, stacked on [SAK-192](/SAK/issues/SAK-192) (PR #65,
+itself on [SAK-194](/SAK/issues/SAK-194) PR #64) and re-run after that rebase:
+`cargo test --lib` (491), `--test local_firestore_listen_tests` (15, over the
+real bidirectional gRPC stream), `--test fidelity_matrix_tests` (5), `--test
+local_query_pushdown_tests` (5), `--test local_firestore_tests` (46), `--test
+local_datastore_tests` (6), `--test local_auth_tests` (18), `--test
+local_auth_postgres_tests` (10), `--test local_postgres_store_tests` (8),
 `--test export_fidelity_tests` (21), `--test integration_tests` (55), `--test
 postgres_import_tests` (7), `--test ddl_postgres_load_tests` (9), `--test
 cli_exit_code_tests` (9), `--test real_export_validation` (7), `--test

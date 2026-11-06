@@ -32,7 +32,7 @@ use tonic::{Status, Streaming};
 use tracing::debug;
 
 use crate::local::names::{parse_document_name, parse_parent_name};
-use crate::local::query::Query;
+use crate::local::query::{Prefilter, Query};
 use crate::local::store::{
     now_timestamp, Mutation, PendingWrite, SharedStore, Store, StoreResult, WriteEffect,
     WriteOutcome,
@@ -254,6 +254,34 @@ impl Store for WatchedStore {
         self.inner.scan_kind(documents_root, kind).await
     }
 
+    // The two pre-filtered scans are forwarded explicitly rather than left to
+    // the trait's default. The default would be *correct* — it falls back to the
+    // unfiltered scan — and would silently throw away the Postgres pushdown for
+    // every read on the server, because this decorator is what the data plane
+    // actually holds. A wrapper that quietly costs a backend its query plan is
+    // the kind of regression no test fails on.
+    async fn scan_collection_filtered(
+        &self,
+        parent: &str,
+        collection_id: &str,
+        prefilter: Prefilter<'_>,
+    ) -> StoreResult<Vec<Document>> {
+        self.inner
+            .scan_collection_filtered(parent, collection_id, prefilter)
+            .await
+    }
+
+    async fn scan_kind_filtered(
+        &self,
+        documents_root: &str,
+        kind: &str,
+        prefilter: Prefilter<'_>,
+    ) -> StoreResult<Vec<Document>> {
+        self.inner
+            .scan_kind_filtered(documents_root, kind, prefilter)
+            .await
+    }
+
     async fn child_segments(&self, prefix: &str) -> StoreResult<Vec<String>> {
         self.inner.child_segments(prefix).await
     }
@@ -461,12 +489,20 @@ async fn evaluate(store: &SharedStore, tracked: &Tracked) -> Result<Vec<Document
             Ok(found)
         }
         Tracked::Query { parent, query, .. } => {
-            // The same two scans `RunQuery` picks between, so watching a query
-            // and reading it once see the same documents.
+            // The same two pre-filtered scans `RunQuery` picks between, so
+            // watching a query and reading it once see the same documents —
+            // and a watched query gets the same Postgres pushdown. That matters
+            // more here than there: a query target is re-evaluated on every
+            // change to its collection.
+            let prefilter = query.prefilter();
             let documents = if query.all_descendants() {
-                store.scan_kind(parent, query.collection_id()).await?
+                store
+                    .scan_kind_filtered(parent, query.collection_id(), prefilter)
+                    .await?
             } else {
-                store.scan_collection(parent, query.collection_id()).await?
+                store
+                    .scan_collection_filtered(parent, query.collection_id(), prefilter)
+                    .await?
             };
             Ok(query.evaluate(documents).documents)
         }
@@ -993,6 +1029,136 @@ mod tests {
 
         let status = build_target(&target).expect_err("read_time resume is out of scope");
         assert_eq!(status.code(), tonic::Code::Unimplemented);
+    }
+
+    /// A store that records which scan the layer above it asked for.
+    ///
+    /// The point is the *pre-filtered* scans: `Store` gives them a default that
+    /// falls back to the unfiltered one, so a decorator that forgets to forward
+    /// them still compiles, still answers correctly, and silently costs the
+    /// Postgres backend its query plan. Nothing else in the suite notices —
+    /// `tests/local_query_pushdown_tests.rs` measures a bare `PostgresStore`,
+    /// not the decorated one the server actually holds.
+    #[derive(Default)]
+    struct ScanRecorder {
+        filtered: std::sync::atomic::AtomicUsize,
+        unfiltered: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Store for Arc<ScanRecorder> {
+        fn backend(&self) -> &'static str {
+            "recorder"
+        }
+
+        async fn get(&self, _name: &str) -> StoreResult<Option<Document>> {
+            Ok(None)
+        }
+
+        async fn contains(&self, _name: &str) -> StoreResult<bool> {
+            Ok(false)
+        }
+
+        async fn commit(
+            &self,
+            _writes: Vec<PendingWrite>,
+            _now: Timestamp,
+        ) -> StoreResult<Vec<WriteEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn scan_collection(&self, _parent: &str, _id: &str) -> StoreResult<Vec<Document>> {
+            self.unfiltered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        async fn scan_kind(&self, _root: &str, _kind: &str) -> StoreResult<Vec<Document>> {
+            self.unfiltered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        async fn scan_collection_filtered(
+            &self,
+            _parent: &str,
+            _id: &str,
+            _prefilter: Prefilter<'_>,
+        ) -> StoreResult<Vec<Document>> {
+            self.filtered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        async fn scan_kind_filtered(
+            &self,
+            _root: &str,
+            _kind: &str,
+            _prefilter: Prefilter<'_>,
+        ) -> StoreResult<Vec<Document>> {
+            self.filtered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        async fn child_segments(&self, _prefix: &str) -> StoreResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn count(&self) -> StoreResult<usize> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_decorator_forwards_the_pre_filtered_scans_rather_than_falling_back() {
+        let recorder = Arc::new(ScanRecorder::default());
+        let (store, _hub) = attach(Arc::new(recorder.clone()));
+        let query = Query::compile(&StructuredQuery {
+            from: vec![CollectionSelector {
+                collection_id: "users".to_string(),
+                all_descendants: false,
+            }],
+            ..Default::default()
+        })
+        .expect("compiles");
+
+        store
+            .scan_collection_filtered(ROOT, "users", query.prefilter())
+            .await
+            .expect("scan");
+
+        let order = std::sync::atomic::Ordering::SeqCst;
+        assert_eq!(recorder.filtered.load(order), 1);
+        assert_eq!(
+            recorder.unfiltered.load(order),
+            0,
+            "the decorator must not degrade a pre-filtered scan into a full one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_watched_query_reads_through_the_pre_filtered_scan() {
+        // The watch path has its own two scan calls, so forwarding the trait
+        // method is not enough — `evaluate` has to ask for the filtered one
+        // too. It matters more here than on `RunQuery`: a query target is
+        // re-evaluated on every change to its collection.
+        let recorder = Arc::new(ScanRecorder::default());
+        let store: SharedStore = Arc::new(recorder.clone());
+        let order = std::sync::atomic::Ordering::SeqCst;
+
+        for (target, label) in [
+            (query_target("users"), "a collection query target"),
+            (
+                group_query_target("posts", true),
+                "a collection group target",
+            ),
+        ] {
+            let tracked = build_target(&target).expect("compiles");
+            evaluate(&store, &tracked).await.expect("evaluate");
+            assert_eq!(recorder.unfiltered.load(order), 0, "{label}");
+        }
+        assert_eq!(recorder.filtered.load(order), 2);
     }
 
     #[test]
