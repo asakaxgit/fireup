@@ -8,6 +8,10 @@
 //! Value conversion is between the public `google.datastore.v1.Value` and
 //! `google.firestore.v1.Value` shapes. Key values become Firestore reference
 //! strings; entity values become maps.
+//!
+//! Because a Datastore property *is* a document field under this mapping, a
+//! `PropertyTransform` resolves through the same conversion as the entity it
+//! rides on — see [`compile_property_transforms`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -15,12 +19,15 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use tonic::Status;
 
 use crate::local::names::parse_document_name;
+use crate::local::transforms::{self, FieldTransform};
 use crate::protos::google::datastore::v1::key::path_element::IdType as DsIdType;
+use crate::protos::google::datastore::v1::property_transform::TransformType as DsTransformType;
 use crate::protos::google::datastore::v1::value::ValueType as DsValueType;
 use crate::protos::google::datastore::v1::{
     key::PathElement as DsPathElement, ArrayValue as DsArrayValue, Entity as DsEntity,
-    Key as DsKey, PartitionId, Value as DsValue,
+    Key as DsKey, PartitionId, PropertyTransform as DsPropertyTransform, Value as DsValue,
 };
+use crate::protos::google::firestore::v1::document_transform::field_transform::TransformType as FsTransformType;
 use crate::protos::google::firestore::v1::value::ValueType as FsValueType;
 use crate::protos::google::firestore::v1::{
     ArrayValue as FsArrayValue, Document, MapValue as FsMapValue, Value as FsValue,
@@ -316,6 +323,128 @@ pub fn apply_property_mask(entity: &mut DsEntity, paths: &[String]) -> Result<()
     Ok(())
 }
 
+/// Resolve `Mutation.property_transforms` against the document fields the named
+/// properties map to.
+///
+/// This is the whole reason the Datastore spelling of the transforms needed a
+/// pass of its own. A transform names a *property*, and the number it reads is
+/// whatever [`entity_to_document`] left in the corresponding document field — so
+/// the operands have to cross the same `Value` conversion as the entity's own
+/// properties, or an `increment(1)` would compare and add against a differently
+/// tagged value than the one that is stored. Concretely:
+///
+/// * `integer_value`/`double_value` keep their tag, so an integer increment of
+///   an integer property stays exact and only a double on either side makes the
+///   sum a double — the same rule on both surfaces.
+/// * array elements convert with [`ds_value_to_fs`], so `append_missing_elements`
+///   and `remove_all_from_array` compare a `key_value` against the stored
+///   reference string and a `blob_value` against the stored bytes, rather than
+///   never matching.
+/// * `meaning` and `exclude_from_indexes` on an operand are dropped, as they are
+///   for every other property fireup stores; nothing here models indexes.
+///
+/// Property *paths* are refused: `foo.bar` names a property inside an entity
+/// value, which is a nested document field, and the Firestore side refuses
+/// nested field paths too. A property name containing an escape is refused for
+/// the same reason — Datastore escapes `.` and `\` in a name, and guessing at
+/// which of the two a client meant would risk incrementing the wrong property.
+///
+/// The operation half is compiled by [`transforms::compile_kind`], so `maximum`
+/// and `minimum` are refused here exactly as they are on the Firestore side.
+pub fn compile_property_transforms(
+    property_transforms: &[DsPropertyTransform],
+    project_id: &str,
+    database_id: &str,
+) -> Result<Vec<FieldTransform>, Status> {
+    property_transforms
+        .iter()
+        .map(|transform| {
+            let field = transform_property_field(&transform.property)?;
+            let transform_type = transform.transform_type.as_ref().ok_or_else(|| {
+                Status::invalid_argument(format!("transform on property {field:?} is empty"))
+            })?;
+            let kind = transforms::compile_kind(
+                &field,
+                &ds_transform_type_to_fs(transform_type, project_id, database_id)?,
+            )?;
+            Ok(FieldTransform { field, kind })
+        })
+        .collect()
+}
+
+/// Report `WriteEffect::transform_results` as `MutationResult.transform_results`.
+///
+/// The results are computed as Firestore values inside the store transaction, so
+/// they come back through the same conversion a looked-up entity does: a
+/// `serverTimestamp` reports a `timestamp_value`, an `increment` reports the
+/// integer or double it resolved to, and the array transforms report the null
+/// value the proto specifies.
+pub fn transform_results_to_properties(
+    results: &[FsValue],
+    project_id: &str,
+    database_id: &str,
+) -> Result<Vec<DsValue>, Status> {
+    results
+        .iter()
+        .map(|value| fs_value_to_ds(value, project_id, database_id))
+        .collect()
+}
+
+/// The document field a transform's `property` names, or a refusal.
+fn transform_property_field(property: &str) -> Result<String, Status> {
+    if property.is_empty() {
+        return Err(Status::invalid_argument(
+            "a property transform needs a property",
+        ));
+    }
+    if property.contains('.') || property.contains('\\') {
+        return Err(Status::unimplemented(format!(
+            "fireup local does not support property paths in transforms yet (got {property:?}); \
+             a transform must name a top-level property. \
+             See docs/local/README.md for the full fidelity matrix."
+        )));
+    }
+    Ok(property.to_string())
+}
+
+/// Restate a Datastore transform operation in the Firestore oneof so one
+/// implementation serves both. The two `ServerValue` enums agree on
+/// `SERVER_VALUE_UNSPECIFIED = 0` and `REQUEST_TIME = 1`, so the raw number
+/// carries over and an unknown value is refused on the far side.
+fn ds_transform_type_to_fs(
+    transform_type: &DsTransformType,
+    project_id: &str,
+    database_id: &str,
+) -> Result<FsTransformType, Status> {
+    let converted = |value: &DsValue| ds_value_to_fs(value, project_id, database_id);
+    let converted_array = |array: &DsArrayValue| -> Result<FsArrayValue, Status> {
+        Ok(FsArrayValue {
+            values: array
+                .values
+                .iter()
+                .map(|value| ds_value_to_fs(value, project_id, database_id))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    };
+
+    Ok(match transform_type {
+        DsTransformType::SetToServerValue(server_value) => {
+            FsTransformType::SetToServerValue(*server_value)
+        }
+        DsTransformType::Increment(operand) => FsTransformType::Increment(converted(operand)?),
+        // Carried across rather than refused here so the refusal keeps living in
+        // exactly one place.
+        DsTransformType::Maximum(operand) => FsTransformType::Maximum(converted(operand)?),
+        DsTransformType::Minimum(operand) => FsTransformType::Minimum(converted(operand)?),
+        DsTransformType::AppendMissingElements(array) => {
+            FsTransformType::AppendMissingElements(converted_array(array)?)
+        }
+        DsTransformType::RemoveAllFromArray(array) => {
+            FsTransformType::RemoveAllFromArray(converted_array(array)?)
+        }
+    })
+}
+
 fn ds_value_to_fs(
     value: &DsValue,
     project_id: &str,
@@ -409,6 +538,7 @@ fn fs_value_to_ds(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local::transforms::TransformKind;
 
     #[test]
     fn a_named_key_maps_to_a_document_resource_name() {
@@ -442,6 +572,179 @@ mod tests {
         assert_eq!(name, "projects/demo/databases/(default)/documents/Task/42");
         let round = document_name_to_key(&name, "demo", "(default)").expect("round trip");
         assert_eq!(round.path[0].id_type, Some(DsIdType::Id(42)));
+    }
+
+    /// A `PropertyTransform` naming `property`, with `transform_type`.
+    fn property_transform(property: &str, transform_type: DsTransformType) -> DsPropertyTransform {
+        DsPropertyTransform {
+            property: property.to_string(),
+            transform_type: Some(transform_type),
+        }
+    }
+
+    fn ds_integer(number: i64) -> DsValue {
+        DsValue {
+            value_type: Some(DsValueType::IntegerValue(number)),
+            ..Default::default()
+        }
+    }
+
+    fn compiled(transforms: &[DsPropertyTransform]) -> Result<Vec<FieldTransform>, Status> {
+        compile_property_transforms(transforms, "demo", "")
+    }
+
+    #[test]
+    fn a_property_transform_resolves_to_the_field_of_the_same_name() {
+        let compiled = compiled(&[
+            property_transform("touched", DsTransformType::SetToServerValue(1)),
+            property_transform("hits", DsTransformType::Increment(ds_integer(2))),
+        ])
+        .expect("both compile");
+
+        assert_eq!(
+            compiled.iter().map(|t| t.field.as_str()).collect::<Vec<_>>(),
+            vec!["touched", "hits"],
+            "entity_to_document maps a property onto the field of the same name"
+        );
+        assert_eq!(compiled[0].kind, TransformKind::RequestTime);
+        assert_eq!(
+            compiled[1].kind,
+            TransformKind::Increment(transforms::Number::Integer(2)),
+            "an integer operand stays an integer, so an integer property stays exact"
+        );
+    }
+
+    #[test]
+    fn an_increment_operand_keeps_its_datastore_value_tag() {
+        // A double operand must not arrive as an integer: the sum's type, and so
+        // the type of the stored property, depends on it.
+        let compiled = compiled(&[property_transform(
+            "ratio",
+            DsTransformType::Increment(DsValue {
+                value_type: Some(DsValueType::DoubleValue(0.5)),
+                ..Default::default()
+            }),
+        )])
+        .expect("a double increment compiles");
+        assert_eq!(
+            compiled[0].kind,
+            TransformKind::Increment(transforms::Number::Double(0.5))
+        );
+    }
+
+    #[test]
+    fn array_transform_elements_convert_the_way_stored_properties_do() {
+        // A key property is stored as a Firestore reference string, so an
+        // arrayRemove of that key has to be compared as the same string or it
+        // would never match what Lookup returns.
+        let key = DsKey {
+            partition_id: None,
+            path: vec![DsPathElement {
+                kind: "Task".to_string(),
+                id_type: Some(DsIdType::Name("sample".to_string())),
+            }],
+        };
+        let compiled = compiled(&[property_transform(
+            "related",
+            DsTransformType::RemoveAllFromArray(DsArrayValue {
+                values: vec![DsValue {
+                    value_type: Some(DsValueType::KeyValue(key)),
+                    ..Default::default()
+                }],
+            }),
+        )])
+        .expect("a key element compiles");
+
+        let TransformKind::RemoveAllFromArray(elements) = &compiled[0].kind else {
+            panic!("expected arrayRemove, got {:?}", compiled[0].kind);
+        };
+        assert_eq!(
+            elements[0].value_type,
+            Some(FsValueType::ReferenceValue(
+                "projects/demo/databases/(default)/documents/Task/sample".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_property_path_or_an_escaped_property_name_is_refused() {
+        for property in ["foo.bar", "foo\\.bar"] {
+            let error = compiled(&[property_transform(
+                property,
+                DsTransformType::Increment(ds_integer(1)),
+            )])
+            .expect_err("property paths are not served");
+            assert_eq!(
+                error.code(),
+                tonic::Code::Unimplemented,
+                "property {property:?}"
+            );
+        }
+
+        let error = compiled(&[property_transform(
+            "",
+            DsTransformType::Increment(ds_integer(1)),
+        )])
+        .expect_err("an unnamed property");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn maximum_minimum_and_bad_operands_are_refused_as_on_the_firestore_side() {
+        for transform_type in [
+            DsTransformType::Maximum(ds_integer(1)),
+            DsTransformType::Minimum(ds_integer(1)),
+        ] {
+            let error = compiled(&[property_transform("n", transform_type)])
+                .expect_err("max/min are not served");
+            assert_eq!(error.code(), tonic::Code::Unimplemented);
+        }
+
+        let error = compiled(&[property_transform(
+            "n",
+            DsTransformType::Increment(DsValue {
+                value_type: Some(DsValueType::StringValue("1".to_string())),
+                ..Default::default()
+            }),
+        )])
+        .expect_err("a string increment");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+        // SERVER_VALUE_UNSPECIFIED; the two enums agree on the numbering.
+        let error = compiled(&[property_transform("n", DsTransformType::SetToServerValue(0))])
+            .expect_err("the unspecified server value");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+        let error = compiled(&[DsPropertyTransform {
+            property: "n".to_string(),
+            transform_type: None,
+        }])
+        .expect_err("no transform_type");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn transform_results_come_back_as_datastore_values() {
+        let results = transform_results_to_properties(
+            &[
+                FsValue {
+                    value_type: Some(FsValueType::IntegerValue(43)),
+                },
+                FsValue {
+                    value_type: Some(FsValueType::NullValue(0)),
+                },
+            ],
+            "demo",
+            "",
+        )
+        .expect("results convert");
+
+        assert_eq!(results[0], ds_integer(43), "increment reports its new value");
+        assert_eq!(
+            results[1].value_type,
+            Some(DsValueType::NullValue(0)),
+            "array transforms report the null value"
+        );
     }
 
     #[test]
