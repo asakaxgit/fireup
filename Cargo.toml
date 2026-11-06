@@ -122,3 +122,7 @@ path = "tests/local_auth_tests.rs"
 [[test]]
 name = "local_auth_postgres_tests"
 path = "tests/local_auth_postgres_tests.rs"
+
+[[test]]
+name = "fidelity_matrix_tests"
+path = "tests/fidelity_matrix_tests.rs"

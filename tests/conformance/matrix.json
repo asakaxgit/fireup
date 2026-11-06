@@ -1,0 +1,796 @@
+{
+  "$comment": "The fidelity matrix from docs/local/README.md, as data. One entry per documented row plus the claims the README makes in prose. `status` decides what the conformance suite demands of each row: served => it must work, unimplemented => it must fail with UNIMPLEMENTED and a message naming the gap, documented-divergence => the documented difference must still hold. `driver` is the primary driver (node-sdk | node-grpc | auth-smoke) and `python` marks the subset the Python layer re-checks. See tests/conformance/README.md.",
+  "docFile": "docs/local/README.md",
+  "docTables": {
+    "firestore-rpcs": {
+      "heading": "### RPCs",
+      "labelColumn": "RPC",
+      "statusColumn": 1
+    },
+    "queries": {
+      "heading": "### Queries",
+      "labelColumn": "Feature",
+      "statusColumn": 1
+    },
+    "field-transforms": {
+      "heading": "### Field transforms",
+      "labelColumn": "Transform",
+      "statusColumn": 2
+    },
+    "datastore-rpcs": {
+      "heading": "### Datastore RPCs (Phase 3)",
+      "labelColumn": "RPC",
+      "statusColumn": 1
+    },
+    "auth-endpoints": {
+      "heading": "### What is served",
+      "labelColumn": "Endpoint",
+      "statusColumn": null
+    }
+  },
+  "features": [
+    {
+      "id": "firestore.GetDocument",
+      "docTable": "firestore-rpcs",
+      "label": "GetDocument",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "No official SDK emits this RPC: .get() goes to BatchGetDocuments. Probed on the wire."
+    },
+    {
+      "id": "firestore.ListDocuments",
+      "docTable": "firestore-rpcs",
+      "label": "ListDocuments",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "firestore.CreateDocument",
+      "docTable": "firestore-rpcs",
+      "label": "CreateDocument",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "The SDK's create()/add() go to Commit with an exists:false precondition. Probed on the wire."
+    },
+    {
+      "id": "firestore.UpdateDocument",
+      "docTable": "firestore-rpcs",
+      "label": "UpdateDocument",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "The SDK's update() goes to Commit. Probed on the wire."
+    },
+    {
+      "id": "firestore.DeleteDocument",
+      "docTable": "firestore-rpcs",
+      "label": "DeleteDocument",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "The SDK's delete() goes to Commit. Probed on the wire."
+    },
+    {
+      "id": "firestore.BatchGetDocuments",
+      "docTable": "firestore-rpcs",
+      "label": "BatchGetDocuments",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "firestore.BeginTransaction",
+      "docTable": "firestore-rpcs",
+      "label": "BeginTransaction",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "firestore.Commit",
+      "docTable": "firestore-rpcs",
+      "label": "Commit",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "firestore.Rollback",
+      "docTable": "firestore-rpcs",
+      "label": "Rollback",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "firestore.RunQuery",
+      "docTable": "firestore-rpcs",
+      "label": "RunQuery",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "firestore.BatchWrite",
+      "docTable": "firestore-rpcs",
+      "label": "BatchWrite",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false,
+      "note": "Reached through BulkWriter. Deliberately not atomic: one status per write."
+    },
+    {
+      "id": "firestore.ListCollectionIds",
+      "docTable": "firestore-rpcs",
+      "label": "ListCollectionIds",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "firestore.Listen",
+      "docTable": "firestore-rpcs",
+      "label": "Listen",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "Probed on the wire: the SDK loses the refusal in a retry loop (see limits.listen-sdk-retry-loop). SAK-189 may flip this to served; the probe has both branches."
+    },
+    {
+      "id": "firestore.Write",
+      "docTable": "firestore-rpcs",
+      "label": "Write (streaming)",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false
+    },
+    {
+      "id": "firestore.RunAggregationQuery",
+      "docTable": "firestore-rpcs",
+      "label": "RunAggregationQuery",
+      "status": "unimplemented",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "firestore.PartitionQuery",
+      "docTable": "firestore-rpcs",
+      "label": "PartitionQuery",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false
+    },
+    {
+      "id": "firestore.ExecutePipeline",
+      "docTable": "firestore-rpcs",
+      "label": "ExecutePipeline",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false
+    },
+
+    {
+      "id": "query.comparison-operators",
+      "docTable": "queries",
+      "label": "where() with ==, !=, <, <=, >, >=",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "query.membership-and-array-operators",
+      "docTable": "queries",
+      "label": "where() with in, not-in, array-contains, array-contains-any",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "query.unary-filters",
+      "docTable": "queries",
+      "label": "IS_NULL / IS_NOT_NULL / IS_NAN / IS_NOT_NAN",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "query.composite-filters",
+      "docTable": "queries",
+      "label": "AND and OR composite filters, nested",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "query.order-by",
+      "docTable": "queries",
+      "label": "orderBy(), ascending and descending, several terms",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "query.limit-offset",
+      "docTable": "queries",
+      "label": "limit(), offset()",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "query.projection",
+      "docTable": "queries",
+      "label": "select() projection, including keys-only (__name__)",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "query.limit-to-last",
+      "docTable": "queries",
+      "label": "limitToLast()",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "query.document-id-filter-and-order",
+      "docTable": "queries",
+      "label": "Filtering and ordering on __name__",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "query.collection-group",
+      "docTable": "queries",
+      "label": "Collection group queries (all_descendants)",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "query.cursors",
+      "docTable": "queries",
+      "label": "Cursors (startAt/startAfter/endAt/endBefore)",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "query.nested-field-paths",
+      "docTable": "queries",
+      "label": "Nested field paths (a.b) in filters, orders, projections, and read masks",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "query.nested-update-mask",
+      "docTable": "queries",
+      "label": "Nested field paths in an update_mask",
+      "status": "unimplemented",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "query.collection-group-without-id",
+      "docTable": "queries",
+      "label": "A collection group query with no collection id",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "The SDK requires a collection id, so the empty form goes on the wire."
+    },
+    {
+      "id": "query.vector-search",
+      "docTable": "queries",
+      "label": "Vector search (find_nearest)",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "Probed on the wire: findNearest() is not in every SDK minor version."
+    },
+    {
+      "id": "query.aggregations",
+      "docTable": "queries",
+      "label": "Aggregations (count(), sum(), average())",
+      "status": "unimplemented",
+      "driver": "node-sdk",
+      "python": true
+    },
+
+    {
+      "id": "transform.server-timestamp",
+      "docTable": "field-transforms",
+      "label": "set_to_server_value: REQUEST_TIME",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "transform.increment",
+      "docTable": "field-transforms",
+      "label": "increment",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "transform.array-union",
+      "docTable": "field-transforms",
+      "label": "append_missing_elements",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "transform.array-remove",
+      "docTable": "field-transforms",
+      "label": "remove_all_from_array",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "transform.maximum-minimum",
+      "docTable": "field-transforms",
+      "label": "maximum / minimum",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "No SDK surface emits them, so the transform goes on the wire."
+    },
+    {
+      "id": "transform.nested-field-path",
+      "docTable": "field-transforms",
+      "label": "Nested field path (a.b) on a transform",
+      "status": "unimplemented",
+      "driver": "node-sdk",
+      "python": false
+    },
+
+    {
+      "id": "datastore.Lookup",
+      "docTable": "datastore-rpcs",
+      "label": "Lookup",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "datastore.RunQuery",
+      "docTable": "datastore-rpcs",
+      "label": "RunQuery",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "datastore.Commit",
+      "docTable": "datastore-rpcs",
+      "label": "Commit",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "datastore.BeginTransaction-Rollback",
+      "docTable": "datastore-rpcs",
+      "label": "BeginTransaction / Rollback",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "datastore.AllocateIds",
+      "docTable": "datastore-rpcs",
+      "label": "AllocateIds",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "datastore.ReserveIds",
+      "docTable": "datastore-rpcs",
+      "label": "ReserveIds",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "@google-cloud/datastore exposes no reserveIds(). Probed on the wire."
+    },
+    {
+      "id": "datastore.RunAggregationQuery",
+      "docTable": "datastore-rpcs",
+      "label": "RunAggregationQuery",
+      "status": "unimplemented",
+      "driver": "node-sdk",
+      "python": false
+    },
+
+    {
+      "id": "auth.signUp",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/accounts:signUp",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.signInWithPassword",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/accounts:signInWithPassword",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.signInWithCustomToken",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/accounts:signInWithCustomToken",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.lookup",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/accounts:lookup",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.update",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/accounts:update",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.delete",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/accounts:delete",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.token",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/token",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.admin-create",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/projects/{p}/accounts",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.admin-lookup",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/projects/{p}/accounts:lookup",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.admin-update",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/projects/{p}/accounts:update",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.admin-delete",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/projects/{p}/accounts:delete",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.admin-batchGet",
+      "docTable": "auth-endpoints",
+      "label": "GET /v1/projects/{p}/accounts:batchGet",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.emulator-config",
+      "docTable": "auth-endpoints",
+      "label": "GET /emulator/v1/projects/{p}/config",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.emulator-clear-accounts",
+      "docTable": "auth-endpoints",
+      "label": "DELETE /emulator/v1/projects/{p}/accounts",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+
+    {
+      "id": "semantics.missing-field-never-matches",
+      "docTable": null,
+      "label": "A document without the filtered field never matches",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "semantics.missing-order-field-absent",
+      "docTable": null,
+      "label": "A document without the ordered field is absent from the results",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "semantics.inequality-does-not-cross-types",
+      "docTable": null,
+      "label": "An inequality does not cross types",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "semantics.nan-equality-never-matches",
+      "docTable": null,
+      "label": "== NaN never matches; IS_NAN selects it and NaN sorts first",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "semantics.integer-double-compare-numerically",
+      "docTable": null,
+      "label": "Integers and doubles compare numerically",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "semantics.name-appended-to-order",
+      "docTable": null,
+      "label": "__name__ is appended to every orderBy, in the last term's direction",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "transaction.atomic-commit",
+      "docTable": null,
+      "label": "Every write in a Commit applies or none does",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "transaction.optimistic-concurrency",
+      "docTable": null,
+      "label": "A concurrent write to a read document aborts the commit",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": true
+    },
+    {
+      "id": "transaction.absent-read-is-checked",
+      "docTable": null,
+      "label": "A document read as absent is in the read set too",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false
+    },
+    {
+      "id": "transaction.read-only",
+      "docTable": null,
+      "label": "Read-only transactions are served; read-only at a read_time is refused",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false
+    },
+    {
+      "id": "transform.runs-after-its-mutation",
+      "docTable": null,
+      "label": "A transform runs after the mutation it rides on",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "transform.increment-numeric-rules",
+      "docTable": null,
+      "label": "increment sets a missing or non-numeric field, and a double makes the sum a double",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "transform.array-missing-field-is-empty",
+      "docTable": null,
+      "label": "The array transforms treat a missing or non-array field as the empty array",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "semantics.cursor-is-a-position",
+      "docTable": null,
+      "label": "A cursor is a position, not a filter: startAfter skips every document at that value",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "semantics.cursors-before-offset-and-limit",
+      "docTable": null,
+      "label": "Cursors are applied before offset and limit, so the two compose",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "semantics.dotted-field-name-is-escaped",
+      "docTable": null,
+      "label": "A dot in a field path is structure; a field literally called a.b is addressed as `a.b`",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "semantics.projection-keeps-nesting",
+      "docTable": null,
+      "label": "A projection on a nested path keeps the nesting",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "semantics.collection-group-scoped-to-parent",
+      "docTable": null,
+      "label": "A collection group query is scoped to the request's parent",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "datastore.property-transforms",
+      "docTable": null,
+      "label": "Datastore property transforms (Mutation.property_transforms)",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "The Firestore spelling is served; the Datastore one is not."
+    },
+    {
+      "id": "limits.read-time-consistency",
+      "docTable": null,
+      "label": "Point-in-time reads (any read_time consistency selector)",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false
+    },
+    {
+      "id": "limits.listen-sdk-retry-loop",
+      "docTable": null,
+      "label": "onSnapshot() retries the refused Listen instead of surfacing it",
+      "status": "documented-divergence",
+      "driver": "node-sdk",
+      "python": false,
+      "note": "The one place the matrix's 'a gap is never a hang' promise does not hold through the Node SDK. The server's refusal is clear on the wire (firestore.Listen); @google-cloud/firestore loses it in a race and reopens forever. Delete this row with the README footnote when SAK-189 lands."
+    },
+    {
+      "id": "limits.masked-field-deletion",
+      "docTable": null,
+      "label": "A masked field the request does not carry is left alone, not deleted",
+      "status": "documented-divergence",
+      "driver": "node-sdk",
+      "python": false,
+      "note": "Not an error path: production Firestore deletes the field. Pinned so the divergence cannot change silently."
+    },
+    {
+      "id": "datastore.namespaces",
+      "docTable": null,
+      "label": "Datastore non-default namespaces",
+      "status": "unimplemented",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "datastore.gql",
+      "docTable": null,
+      "label": "Datastore GQL queries",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false
+    },
+    {
+      "id": "datastore.projection-queries",
+      "docTable": null,
+      "label": "Datastore projection queries",
+      "status": "unimplemented",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
+      "id": "datastore.cursors",
+      "docTable": null,
+      "label": "Datastore query cursors",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false
+    },
+    {
+      "id": "datastore.nested-property-mask",
+      "docTable": null,
+      "label": "Datastore nested property masks",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false
+    },
+    {
+      "id": "auth.phone",
+      "docTable": null,
+      "label": "Phone auth: sendVerificationCode, signInWithPhoneNumber",
+      "status": "unimplemented",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.mfa-and-tenants",
+      "docTable": null,
+      "label": "Multi-factor enrolment and tenants (Identity Platform v2)",
+      "status": "unimplemented",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.federated-providers",
+      "docTable": null,
+      "label": "Federated / OAuth providers: signInWithIdp, createAuthUri",
+      "status": "unimplemented",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.out-of-band-codes",
+      "docTable": null,
+      "label": "Out-of-band email flows: sendOobCode, resetPassword",
+      "status": "unimplemented",
+      "driver": "auth-smoke",
+      "python": false,
+      "note": "SAK-193 may flip this to served; flip the status here and in the README at the same time."
+    },
+    {
+      "id": "auth.batch-account-writes",
+      "docTable": null,
+      "label": "Batch account writes: accounts:batchDelete, accounts:batchCreate",
+      "status": "unimplemented",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.session-cookies",
+      "docTable": null,
+      "label": "Session cookies: createSessionCookie, verifySessionCookie",
+      "status": "unimplemented",
+      "driver": "auth-smoke",
+      "python": false
+    }
+  ]
+}
