@@ -1407,7 +1407,17 @@ impl TableImportSpec {
                     .iter()
                     .map(|column_type| {
                         placeholder_index += 1;
-                        format!("${}::{}", placeholder_index, column_type.to_sql())
+                        match column_type {
+                            // Blobs cross the pipeline as base64, because JSON
+                            // cannot hold bytes. `$n::BYTEA` reads that text
+                            // *as* bytea input and stores the ASCII of the
+                            // base64 — a 768-byte avatar arriving as 1024 bytes
+                            // of "AAECAwQFBgcI…". `decode` is the real inverse.
+                            PostgreSQLType::Bytea => {
+                                format!("decode(${}, 'base64')", placeholder_index)
+                            }
+                            other => format!("${}::{}", placeholder_index, other.to_sql()),
+                        }
                     })
                     .collect();
                 format!("({})", placeholders.join(", "))

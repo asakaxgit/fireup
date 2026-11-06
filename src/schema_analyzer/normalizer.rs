@@ -166,7 +166,11 @@ impl NormalizationEngine {
                     // explicitly null) in even one document cannot be NOT NULL.
                     let nullable = field_type.presence_percentage < 100.0;
 
-                    let mut column = ColumnDefinition::new(column_name, field_type.recommended_type.clone());
+                    // The column name is derived, so record the field it came
+                    // from; the importer reads values back out by field path.
+                    let mut column =
+                        ColumnDefinition::new(column_name, field_type.recommended_type.clone())
+                            .from_field(field_name);
                     if !nullable {
                         column = column.not_null();
                     }

@@ -37,6 +37,10 @@ const SKIP_NOTICE: &str =
 /// load for either payload format.
 const FIXTURE_TREES: [&str; 2] = ["export-onestore", "export-v1-entity"];
 
+/// The edge-case trees from `tests/fixtures/generate_edge_export.py`, split the
+/// same way. See `tests/export_fidelity_tests.rs` for what each kind covers.
+const EDGE_FIXTURE_TREES: [&str; 2] = ["export-edge-onestore", "export-edge-v1"];
+
 fn test_url() -> Option<String> {
     match std::env::var("FIREUP_TEST_POSTGRES_URL") {
         Ok(url) if !url.trim().is_empty() => Some(url),
@@ -445,4 +449,68 @@ async fn primary_key_is_not_indexed_twice() {
         "these tables index their primary key more than once: {duplicates:?}"
     );
 
+}
+
+// ---------------------------------------------------------------------------
+// Edge-case fixtures (SAK-195)
+//
+// `tests/export_fidelity_tests.rs` asserts these properties against the
+// in-memory schema. These two tests hand the same schema to PostgreSQL, which
+// is the only authority on whether an identifier is distinct: the server
+// truncates anything past 63 bytes without an error, so a length bug is
+// invisible until the catalog is read back.
+// ---------------------------------------------------------------------------
+
+/// Both edge trees, every kind, loaded by the server.
+#[tokio::test]
+async fn generated_ddl_for_the_edge_fixture_loads_in_postgres() {
+    let Some(url) = test_url() else { return };
+
+    for tree in EDGE_FIXTURE_TREES {
+        let loaded = load_fixture_ddl(&url, tree).await;
+        let tables = table_names(&url, &loaded.name);
+        for kind in ["Awkward", "Fragments", "Idents", "Scoped", "Shards", "Values"] {
+            assert!(
+                tables.iter().any(|table| table == kind),
+                "tree {tree}: expected a table named {kind}, got {tables:?}"
+            );
+        }
+    }
+}
+
+/// Two property names that agree on their first 63 bytes must stay two columns.
+///
+/// `kind_Awkward` carries a 69-character pair differing only at byte 64.
+/// PostgreSQL truncates both to the same 63 bytes, so emitting them verbatim
+/// either aborts the load with a duplicate column or drops one field — and
+/// reading `information_schema` back is the only way to see which.
+#[tokio::test]
+async fn long_property_names_load_as_two_distinct_columns() {
+    let Some(url) = test_url() else { return };
+
+    for tree in EDGE_FIXTURE_TREES {
+        let loaded = load_fixture_ddl(&url, tree).await;
+        let columns = column_types(&url, &loaded.name, "Awkward");
+
+        let long: Vec<&String> = columns
+            .iter()
+            .map(|(name, _, _)| name)
+            .filter(|name| name.starts_with("shipping_address_normalization"))
+            .collect();
+        assert_eq!(
+            long.len(),
+            2,
+            "tree {tree}: the two long property names must survive as two columns, got {long:?} \
+             out of {:?}",
+            columns.iter().map(|(c, _, _)| c).collect::<Vec<_>>()
+        );
+        for name in &long {
+            assert!(
+                name.len() <= 63,
+                "tree {tree}: PostgreSQL stored '{name}' ({} bytes); it would have truncated \
+                 anything longer",
+                name.len()
+            );
+        }
+    }
 }

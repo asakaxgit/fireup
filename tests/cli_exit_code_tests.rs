@@ -228,3 +228,89 @@ fn import_rejects_an_unsupportable_sslmode() {
         "stderr should explain the TLS limitation, got: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Edge-case fixtures (SAK-195)
+//
+// The CLI is the surface a migration actually runs through, so the edge-case
+// trees get driven end to end here too: `validate` and `analyze` need no
+// database, and both have to cope with output shards, namespace partitions,
+// non-finite doubles and over-long property names without exiting non-zero.
+// ---------------------------------------------------------------------------
+
+/// Both edge trees, see `tests/export_fidelity_tests.rs` for what they cover.
+const EDGE_FIXTURE_TREES: [&str; 2] = ["export-edge-onestore", "export-edge-v1"];
+
+fn edge_fixture(tree: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(tree);
+    assert!(path.is_dir(), "missing fixture tree {}", path.display());
+    path
+}
+
+#[test]
+fn validate_check_quality_accepts_the_edge_case_export() {
+    for tree in EDGE_FIXTURE_TREES {
+        let output = Command::new(env!("CARGO_BIN_EXE_fireup"))
+            .args(["validate", "-b"])
+            .arg(edge_fixture(tree))
+            .arg("--check-quality")
+            .output()
+            .expect("run fireup validate");
+
+        assert!(
+            output.status.success(),
+            "tree {tree} must validate: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// `analyze` must reach all 25 entities and write DDL for every kind.
+///
+/// This is the cheapest end-to-end guard on shard and partition discovery: if
+/// `output-10` or `namespace_tenant-b/` stops being read, the document count
+/// drops and a kind disappears from the generated script, while the command
+/// still exits 0 on its own terms.
+#[test]
+fn analyze_covers_every_kind_of_the_edge_case_export() {
+    for tree in EDGE_FIXTURE_TREES {
+        let output_file = tempfile::NamedTempFile::new().expect("create output file");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_fireup"))
+            .args(["analyze", "-b"])
+            .arg(edge_fixture(tree))
+            .arg("-o")
+            .arg(output_file.path())
+            .output()
+            .expect("run fireup analyze");
+
+        assert!(
+            output.status.success(),
+            "tree {tree} must analyze: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // `tracing` writes the run log to stdout; check both streams so the
+        // assertion does not depend on which one the subscriber picks.
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            logs.contains("Parsed 25 documents"),
+            "tree {tree}: analyze should report all 25 entities; log tail: {}",
+            &logs[logs.len().saturating_sub(2000)..]
+        );
+
+        let ddl = std::fs::read_to_string(output_file.path()).expect("read generated DDL");
+        for kind in ["Awkward", "Fragments", "Idents", "Scoped", "Shards", "Values"] {
+            assert!(
+                ddl.contains(&format!("\"{kind}\"")),
+                "tree {tree}: generated DDL has no table for kind {kind}"
+            );
+        }
+    }
+}

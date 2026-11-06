@@ -370,6 +370,16 @@ pub struct ColumnDefinition {
     pub default_value: Option<serde_json::Value>,
     /// Additional constraints
     pub constraints: Vec<String>,
+    /// Document field this column was generated from, when it differs from
+    /// [`Self::name`].
+    ///
+    /// A column name is *derived* from a property name — dots become
+    /// underscores, over-long names are shortened by [`postgres_identifier`] —
+    /// so the name alone cannot be used to look the value back up. A Datastore
+    /// property called `meta.source` becomes the column `meta_source`, and
+    /// searching the document for `meta_source` finds nothing.
+    #[serde(default)]
+    pub source_field: Option<String>,
 }
 
 /// PostgreSQL data types supported by the system
@@ -744,9 +754,22 @@ impl ColumnDefinition {
             nullable: true,
             default_value: None,
             constraints: Vec::new(),
+            source_field: None,
         }
     }
-    
+
+    /// Record the document field this column holds, for the importer to read
+    /// values back out by. See [`Self::source_field`].
+    pub fn from_field(mut self, field_path: impl Into<String>) -> Self {
+        self.source_field = Some(field_path.into());
+        self
+    }
+
+    /// Document field whose value belongs in this column.
+    pub fn field_path(&self) -> &str {
+        self.source_field.as_deref().unwrap_or(&self.name)
+    }
+
     /// Set the column as not nullable
     pub fn not_null(mut self) -> Self {
         self.nullable = false;

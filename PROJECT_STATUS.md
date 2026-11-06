@@ -26,6 +26,10 @@ which exercised the real on-disk export format.
 - 209+ passing library unit tests
 - Realistic export fixtures plus a format-level validation suite
   (`tests/fixtures/`, `tests/real_export_validation.rs`)
+- An export-fidelity regression suite over deliberately awkward fixtures —
+  output shards, namespace partitions, key identity, numeric limits, property
+  names PostgreSQL cannot store whole (`tests/export_fidelity_tests.rs`,
+  SAK-195)
 
 ### What works on a real export
 - Reading a managed export end to end: masked CRC32C framing, legacy
@@ -68,7 +72,8 @@ entities**, 2 collections, 0 errors. The same tree previously reported
 
 **Test Coverage:** `tests/real_export_validation.rs` (7 tests) checks the
 fixtures with a reader written independently of `src/`, then reads them through
-fireup. `cargo test --lib leveldb_parser` is 53 tests; the in-crate fixtures are
+fireup; `tests/export_fidelity_tests.rs` (21 tests) does the same for the
+edge-case trees. `cargo test --lib leveldb_parser` is 53 tests; the in-crate fixtures are
 now built with masked CRC32C, so they test the format rather than mirroring the
 implementation.
 
@@ -218,20 +223,30 @@ Warnings: 110 warnings (mostly unused code for future features)
 - All warnings are related to dead code analysis of derived traits
 - These represent planned features and comprehensive API surface
 
-### Test Status ⚠️
+### Test Status
 ```
-Library unit tests:        159 passed, 0 failed       (cargo test --lib)
-Real-export validation:     3 passed, 4 ignored       (cargo test --test real_export_validation)
-Test Time: <1 second
-Coverage: components covered; end-to-end format path NOT covered
+Library unit tests:       384 passed, 0 failed    (cargo test --lib)
+Real-export validation:     7 passed, 0 ignored    (cargo test --test real_export_validation)
+Export-fidelity suite:     21 passed, 0 ignored    (cargo test --test export_fidelity_tests)
+Whole suite:              776 passed, 0 failed, 0 ignored
+                                      (cargo test --lib --tests, FIREUP_TEST_POSTGRES_URL set)
+Test Time: ~6 seconds
 ```
 
-The 4 ignored tests are pending acceptance tests that assert correct behaviour
-against the export fixtures. They fail today — run them with
-`cargo test --test real_export_validation -- --ignored` to see the current gaps.
-The high library test count does not indicate format correctness: those tests
-build inputs that match the implementation, so they pass while the tool cannot
-read a real export.
+A library test count does not by itself indicate format correctness: those tests
+build inputs that match the implementation, so they can pass while the tool
+cannot read a real export. The suites that *do* speak to it are the fixture
+ones, because their inputs come from a generator and an independent reader
+written from the LevelDB and `EntityProto` specs rather than from `src/`:
+
+- `tests/real_export_validation.rs` — the representative export
+- `tests/export_fidelity_tests.rs` — the awkward one (output shards, namespace
+  partitions, key identity, numeric limits, over-long property names), plus the
+  PostgreSQL-backed halves in `tests/ddl_postgres_load_tests.rs` and
+  `tests/postgres_import_tests.rs`
+
+The PostgreSQL-backed tests skip without `FIREUP_TEST_POSTGRES_URL`; everything
+else runs with no database.
 
 **Test Categories:**
 - Unit tests for LevelDB parsing
