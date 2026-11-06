@@ -861,6 +861,7 @@ mod postgresql_importer_tests {
                     nullable: false,
                     default_value: None,
                     constraints: vec![],
+                    source_field: None,
                 },
                 ColumnDefinition {
                     name: "email".to_string(),
@@ -868,6 +869,7 @@ mod postgresql_importer_tests {
                     nullable: true,
                     default_value: None,
                     constraints: vec![],
+                    source_field: None,
                 },
                 ColumnDefinition {
                     name: "profile".to_string(),
@@ -875,6 +877,7 @@ mod postgresql_importer_tests {
                     nullable: true,
                     default_value: None,
                     constraints: vec![],
+                    source_field: None,
                 },
             ],
             primary_key: None,

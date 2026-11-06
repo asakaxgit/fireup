@@ -88,6 +88,10 @@ name = "real_export_validation"
 path = "tests/real_export_validation.rs"
 
 [[test]]
+name = "export_fidelity_tests"
+path = "tests/export_fidelity_tests.rs"
+
+[[test]]
 name = "postgres_import_tests"
 path = "tests/postgres_import_tests.rs"
 

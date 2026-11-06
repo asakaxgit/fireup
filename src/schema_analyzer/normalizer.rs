@@ -3,6 +3,7 @@ use crate::types::{
     SchemaAnalysis, NormalizedSchema, TableDefinition, ColumnDefinition,
     PostgreSQLType, ForeignKeyDefinition, IndexDefinition, Relationship, SchemaWarning, WarningLevel, SchemaMetadata,
     RelationshipType, NormalizationType, NormalizationOpportunity, PrimaryKeyDefinition,
+    postgres_identifier,
     KEY_ID_COLUMN, KEY_KIND_COLUMN, KEY_NAME_COLUMN, KEY_NAMESPACE_COLUMN, KEY_PATH_COLUMN,
     PARENT_KEY_PATH_COLUMN,
 };
@@ -81,7 +82,7 @@ impl NormalizationEngine {
         debug!("Applying First Normal Form (1NF)");
         
         for collection in &analysis.collections {
-            let mut main_table = TableDefinition::new(collection.name.clone());
+            let mut main_table = TableDefinition::new(postgres_identifier(&collection.name));
             Self::add_key_columns(&mut main_table, &collection.name);
 
             // Process field types for this collection. Sorted so the generated
@@ -118,7 +119,8 @@ impl NormalizationEngine {
                 if self.should_normalize_array(field_type, &analysis.normalization_opportunities) {
                     // Create separate table for array elements, keyed on the
                     // parent entity's natural key plus the element's position.
-                    let array_table_name = format!("{}_{}", collection.name, field_name);
+                    let array_table_name =
+                        postgres_identifier(&format!("{}_{}", collection.name, field_name));
                     let mut array_table = TableDefinition::new(array_table_name.clone());
 
                     array_table.add_column(ColumnDefinition::new(
@@ -129,7 +131,7 @@ impl NormalizationEngine {
                     array_table.add_column(ColumnDefinition::new("value".to_string(), field_type.recommended_type.clone()));
 
                     array_table.set_primary_key(PrimaryKeyDefinition {
-                        name: format!("{}_pkey", array_table_name),
+                        name: postgres_identifier(&format!("{}_pkey", array_table_name)),
                         columns: vec![PARENT_KEY_PATH_COLUMN.to_string(), "array_index".to_string()],
                     });
 
@@ -138,7 +140,10 @@ impl NormalizationEngine {
                         column: PARENT_KEY_PATH_COLUMN.to_string(),
                         referenced_table: collection.name.clone(),
                         referenced_column: KEY_PATH_COLUMN.to_string(),
-                        constraint_name: format!("fk_{}_{}", array_table_name, collection.name),
+                        constraint_name: postgres_identifier(&format!(
+                            "fk_{}_{}",
+                            array_table_name, collection.name
+                        )),
                     });
 
                     array_tables.push(array_table);
@@ -161,7 +166,11 @@ impl NormalizationEngine {
                     // explicitly null) in even one document cannot be NOT NULL.
                     let nullable = field_type.presence_percentage < 100.0;
 
-                    let mut column = ColumnDefinition::new(column_name, field_type.recommended_type.clone());
+                    // The column name is derived, so record the field it came
+                    // from; the importer reads values back out by field path.
+                    let mut column =
+                        ColumnDefinition::new(column_name, field_type.recommended_type.clone())
+                            .from_field(field_name);
                     if !nullable {
                         column = column.not_null();
                     }
@@ -226,7 +235,7 @@ impl NormalizationEngine {
         ));
 
         table.set_primary_key(PrimaryKeyDefinition {
-            name: format!("{}_pkey", collection),
+            name: postgres_identifier(&format!("{}_pkey", collection)),
             columns: vec![KEY_PATH_COLUMN.to_string()],
         });
     }
@@ -244,14 +253,20 @@ impl NormalizationEngine {
         None
     }
 
-    /// Reserve a column name, suffixing it if the table already uses it.
+    /// Reserve a column name, shortened to fit PostgreSQL and suffixed if the
+    /// table already uses it.
+    ///
+    /// The shortening happens first: PostgreSQL truncates a long identifier
+    /// silently, so without it two long property names can collide *after* this
+    /// function has declared them unique.
     fn unique_column_name(candidate: String, used: &mut HashSet<String>) -> String {
+        let candidate = postgres_identifier(&candidate);
         if used.insert(candidate.clone()) {
             return candidate;
         }
         let mut suffix = 1;
         loop {
-            let alternative = format!("{}_{}", candidate, suffix);
+            let alternative = postgres_identifier(&format!("{}_{}", candidate, suffix));
             if used.insert(alternative.clone()) {
                 return alternative;
             }
@@ -345,7 +360,7 @@ impl NormalizationEngine {
         let from_column = format!("{}_{}", relationship.from_collection, KEY_PATH_COLUMN);
         let to_column = format!("{}_{}", relationship.to_collection, KEY_PATH_COLUMN);
 
-        let mut lookup_table = TableDefinition::new(lookup_table_name.clone());
+        let mut lookup_table = TableDefinition::new(postgres_identifier(&lookup_table_name));
 
         // Both sides reference the natural key of the entity table, so the pair
         // itself identifies the row — no surrogate id is needed.
@@ -357,7 +372,7 @@ impl NormalizationEngine {
         );
 
         lookup_table.set_primary_key(PrimaryKeyDefinition {
-            name: format!("{}_pkey", lookup_table_name),
+            name: postgres_identifier(&format!("{}_pkey", lookup_table_name)),
             columns: vec![from_column.clone(), to_column.clone()],
         });
 
@@ -366,14 +381,20 @@ impl NormalizationEngine {
             column: from_column.clone(),
             referenced_table: relationship.from_collection.clone(),
             referenced_column: KEY_PATH_COLUMN.to_string(),
-            constraint_name: format!("fk_{}_{}", lookup_table_name, relationship.from_collection),
+            constraint_name: postgres_identifier(&format!(
+                "fk_{}_{}",
+                lookup_table_name, relationship.from_collection
+            )),
         });
 
         lookup_table.add_foreign_key(ForeignKeyDefinition {
             column: to_column.clone(),
             referenced_table: relationship.to_collection.clone(),
             referenced_column: KEY_PATH_COLUMN.to_string(),
-            constraint_name: format!("fk_{}_{}", lookup_table_name, relationship.to_collection),
+            constraint_name: postgres_identifier(&format!(
+                "fk_{}_{}",
+                lookup_table_name, relationship.to_collection
+            )),
         });
 
         schema.tables.push(lookup_table);

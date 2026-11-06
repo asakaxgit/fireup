@@ -33,8 +33,9 @@
 
 use crate::leveldb_parser::base64::encode as base64_encode;
 use crate::types::{
-    tagged_blob, tagged_geo_point, tagged_key_reference, tagged_timestamp, DatastoreKey,
-    DatastoreKeyId, DatastoreKeyPathElement, DocumentMetadata, FirestoreDocument,
+    tagged_blob, tagged_geo_point, tagged_key_reference, tagged_non_finite_double,
+    tagged_timestamp, DatastoreKey, DatastoreKeyId, DatastoreKeyPathElement, DocumentMetadata,
+    FirestoreDocument,
 };
 use serde_json::{Map, Number, Value as JsonValue};
 use std::collections::HashMap;
@@ -726,12 +727,14 @@ fn scalar_to_json(
     if let Some(double_value) = value.double_value {
         return match Number::from_f64(double_value) {
             Some(number) => JsonValue::Number(number),
+            // JSON has no literal for NaN/±Infinity, but Datastore stores them
+            // and PostgreSQL accepts them, so tag rather than drop.
             None => {
-                warn!(
-                    "Record {}: property '{}' holds a non-finite double ({}); storing null",
+                debug!(
+                    "Record {}: property '{}' holds the non-finite double {}; tagging it",
                     record_index, property_name, double_value
                 );
-                JsonValue::Null
+                tagged_non_finite_double(double_value).unwrap_or(JsonValue::Null)
             }
         };
     }

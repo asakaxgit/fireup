@@ -189,34 +189,55 @@ def v1_identity(payload: bytes) -> tuple[str, str, int]:
 
 
 def check_tree(root: str, identity) -> int:
+    """Walk every partition (`all_namespaces/`, `namespace_<ns>/`) under `root`."""
     total = 0
-    kinds_dir = os.path.join(root, "all_namespaces")
-    for kind_entry in sorted(os.listdir(kinds_dir)):
-        kind_dir = os.path.join(kinds_dir, kind_entry)
-        outputs = sorted(f for f in os.listdir(kind_dir) if f.startswith("output-"))
-        assert outputs, f"{kind_dir}: no output-N files"
-        for output in outputs:
-            path = os.path.join(kind_dir, output)
-            records = read_log(path)
-            assert records, f"{path}: no records"
-            for record in records:
-                kind, ident, property_count = identity(record)
-                assert kind == kind_entry[len("kind_") :], f"{path}: kind {kind} != {kind_entry}"
-                assert ident, f"{path}: empty id"
-                assert property_count > 0, f"{path}: {kind}/{ident} has no properties"
-                total += 1
-            print(f"  {os.path.relpath(path, root):<55} {len(records):>3} records, "
-                  f"{os.path.getsize(path):>6} bytes")
+    partitions = sorted(
+        entry
+        for entry in os.listdir(root)
+        if os.path.isdir(os.path.join(root, entry))
+        and (entry == "all_namespaces" or entry.startswith("namespace_"))
+    )
+    assert partitions, f"{root}: no all_namespaces/ or namespace_<ns>/ partition directory"
+    for partition in partitions:
+        kinds_dir = os.path.join(root, partition)
+        for kind_entry in sorted(os.listdir(kinds_dir)):
+            kind_dir = os.path.join(kinds_dir, kind_entry)
+            # `output-10` must sort after `output-2`, so sort on the shard number.
+            outputs = sorted(
+                (f for f in os.listdir(kind_dir) if f.startswith("output-")),
+                key=lambda name: int(name[len("output-") :]),
+            )
+            assert outputs, f"{kind_dir}: no output-N files"
+            for output in outputs:
+                path = os.path.join(kind_dir, output)
+                records = read_log(path)
+                assert records, f"{path}: no records"
+                for record in records:
+                    kind, ident, property_count = identity(record)
+                    assert kind == kind_entry[len("kind_") :], f"{path}: kind {kind} != {kind_entry}"
+                    assert ident, f"{path}: empty id"
+                    assert property_count > 0, f"{path}: {kind}/{ident} has no properties"
+                    total += 1
+                print(f"  {os.path.relpath(path, root):<55} {len(records):>3} records, "
+                      f"{os.path.getsize(path):>6} bytes")
     metadata = [f for f in os.listdir(root) if f.endswith(".overall_export_metadata")]
     assert len(metadata) == 1, f"{root}: expected exactly one overall_export_metadata"
     assert read_log(os.path.join(root, metadata[0])), "overall_export_metadata is empty"
     return total
 
 
+# (tree, expected entity count) — the counts come from the generators.
+TREES = [
+    ("export-onestore", onestore_identity, 12),  # 5 Users + 7 Orders
+    ("export-v1-entity", v1_identity, 12),
+    ("export-edge-onestore", onestore_identity, 25),
+    ("export-edge-v1", v1_identity, 25),
+]
+
+
 def main() -> int:
     base = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-    expected = 12  # 5 Users + 7 Orders
-    for name, identity in (("export-onestore", onestore_identity), ("export-v1-entity", v1_identity)):
+    for name, identity, expected in TREES:
         print(f"{name}:")
         total = check_tree(os.path.join(base, name), identity)
         assert total == expected, f"{name}: {total} entities, expected {expected}"

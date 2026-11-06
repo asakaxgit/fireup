@@ -37,6 +37,54 @@ pub const KEY_ID_COLUMN: &str = "key_id";
 /// Name of the generated column holding the parent entity's key path.
 pub const PARENT_KEY_PATH_COLUMN: &str = "parent_key_path";
 
+/// PostgreSQL's `NAMEDATALEN - 1`: identifiers past this many **bytes** are
+/// truncated, with a notice rather than an error.
+pub const MAX_IDENTIFIER_BYTES: usize = 63;
+
+/// Shorten `name` so PostgreSQL stores it whole, keeping distinct names distinct.
+///
+/// PostgreSQL truncates a long identifier silently. Two Datastore property
+/// names that agree on their first 63 bytes therefore become one column: the
+/// `CREATE TABLE` either fails with a duplicate column or one of the fields is
+/// quietly dropped. Appending a digest of the full name keeps them apart, and
+/// the digest is derived only from the name, so the generated DDL does not
+/// depend on the order fields happened to be analyzed in.
+///
+/// Names that already fit are returned untouched, so ordinary schemas read
+/// exactly as before.
+pub fn postgres_identifier(name: &str) -> String {
+    if name.len() <= MAX_IDENTIFIER_BYTES {
+        return name.to_string();
+    }
+    let digest = format!("{:08x}", fnv1a_32(name.as_bytes()));
+    let head = truncate_to_bytes(name, MAX_IDENTIFIER_BYTES - digest.len() - 1);
+    format!("{head}_{digest}")
+}
+
+/// Longest prefix of `text` that is at most `limit` bytes and a valid `str`.
+fn truncate_to_bytes(text: &str, limit: usize) -> &str {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// FNV-1a, written out rather than taken from `DefaultHasher` because the
+/// standard hasher's output is explicitly not stable across Rust releases, and
+/// a generated column name has to be reproducible.
+fn fnv1a_32(bytes: &[u8]) -> u32 {
+    let mut hash = 0x811c_9dc5u32;
+    for &byte in bytes {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
 /// Identity of a Datastore/Firestore entity: its namespace plus full ancestor path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatastoreKey {
@@ -111,9 +159,61 @@ impl DatastoreKey {
     pub fn path_string(&self) -> String {
         self.path
             .iter()
-            .map(|element| format!("{}/{}", element.kind, element.id.as_path_segment()))
+            .map(|element| {
+                format!(
+                    "{}/{}",
+                    Self::render_segment(&element.kind),
+                    Self::render_id(&element.id)
+                )
+            })
             .collect::<Vec<_>>()
             .join("/")
+    }
+
+    /// Render the identifier half of a path element.
+    ///
+    /// An int64 id renders as bare digits — its canonical form. A string name
+    /// renders as itself unless that would be ambiguous, because
+    /// `(kind, id 1001)` and `(kind, name "1001")` are **different entities**
+    /// and [`Self::encoded_path`] is the generated primary key.
+    fn render_id(id: &DatastoreKeyId) -> String {
+        match id {
+            DatastoreKeyId::Id(value) => value.to_string(),
+            DatastoreKeyId::Name(name) => Self::render_segment(name),
+        }
+    }
+
+    /// Render one path segment so that distinct segments never render alike.
+    ///
+    /// Segments that cannot be misread pass through untouched, so ordinary key
+    /// paths (`Users/ada/Orders/1001`) look exactly as they always have. Two
+    /// kinds of segment *can* be misread, and are double-quoted instead:
+    ///
+    /// * one that parses as an `i64` — otherwise the name `1001` collides with
+    ///   the auto-allocated id `1001`
+    /// * one containing `/`, `"` or `\` — otherwise the name `a/Orders/9` under
+    ///   kind `Users` collides with the path `Users/a` → `Orders/9`
+    ///
+    /// Quoted segments always start with `"` and unquoted ones never contain
+    /// `/` or `"`, so the rendering stays injective and splittable. The same
+    /// rule applies to kinds, which means an all-numeric kind is quoted too;
+    /// that is unnecessary but harmless, and one rule is easier to trust than
+    /// two.
+    fn render_segment(segment: &str) -> String {
+        if Self::segment_needs_quoting(segment) {
+            let escaped = segment.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\"")
+        } else {
+            segment.to_string()
+        }
+    }
+
+    fn segment_needs_quoting(segment: &str) -> bool {
+        segment.is_empty()
+            || segment.contains('/')
+            || segment.contains('"')
+            || segment.contains('\\')
+            || segment.parse::<i64>().is_ok()
     }
 
     /// Canonical, namespace-qualified key path. This is the generated natural key.
@@ -160,6 +260,8 @@ pub const DATASTORE_TYPE_TIMESTAMP: &str = "timestamp";
 pub const DATASTORE_TYPE_GEO_POINT: &str = "geo_point";
 /// Tag value for a key reference; the encoded path lives under `key_path`.
 pub const DATASTORE_TYPE_KEY: &str = "key";
+/// Tag value for a non-finite double; the literal lives under `literal`.
+pub const DATASTORE_TYPE_DOUBLE: &str = "double";
 
 /// Read the Datastore type tag of a value, if it carries one.
 pub fn datastore_type_tag(value: &serde_json::Value) -> Option<&str> {
@@ -186,6 +288,31 @@ pub fn tagged_geo_point(latitude: f64, longitude: f64) -> serde_json::Value {
         "latitude": latitude,
         "longitude": longitude,
     })
+}
+
+/// Build a tagged value for a double JSON cannot hold: `NaN` or `±Infinity`.
+///
+/// Datastore stores all three in an ordinary double property, and PostgreSQL
+/// accepts all three as `numeric`/`double precision` input — it is only JSON
+/// that has no literal for them, so `serde_json::Number::from_f64` returns
+/// `None`. Tagging keeps the value instead of dropping it: nulling it is silent
+/// data loss, and failing the record aborts an otherwise fine import.
+///
+/// The spellings are PostgreSQL's own input spellings, which are also the ones
+/// `local::value_json` uses on the emulator side.
+///
+/// Returns `None` for a finite double, which belongs in a plain JSON number.
+pub fn tagged_non_finite_double(value: f64) -> Option<serde_json::Value> {
+    let literal = if value.is_nan() {
+        "NaN"
+    } else if value == f64::INFINITY {
+        "Infinity"
+    } else if value == f64::NEG_INFINITY {
+        "-Infinity"
+    } else {
+        return None;
+    };
+    Some(serde_json::json!({ DATASTORE_TYPE_TAG: DATASTORE_TYPE_DOUBLE, "literal": literal }))
 }
 
 /// Build a tagged key-reference value from an encoded key path.
@@ -243,6 +370,16 @@ pub struct ColumnDefinition {
     pub default_value: Option<serde_json::Value>,
     /// Additional constraints
     pub constraints: Vec<String>,
+    /// Document field this column was generated from, when it differs from
+    /// [`Self::name`].
+    ///
+    /// A column name is *derived* from a property name — dots become
+    /// underscores, over-long names are shortened by [`postgres_identifier`] —
+    /// so the name alone cannot be used to look the value back up. A Datastore
+    /// property called `meta.source` becomes the column `meta_source`, and
+    /// searching the document for `meta_source` finds nothing.
+    #[serde(default)]
+    pub source_field: Option<String>,
 }
 
 /// PostgreSQL data types supported by the system
@@ -617,9 +754,22 @@ impl ColumnDefinition {
             nullable: true,
             default_value: None,
             constraints: Vec::new(),
+            source_field: None,
         }
     }
-    
+
+    /// Record the document field this column holds, for the importer to read
+    /// values back out by. See [`Self::source_field`].
+    pub fn from_field(mut self, field_path: impl Into<String>) -> Self {
+        self.source_field = Some(field_path.into());
+        self
+    }
+
+    /// Document field whose value belongs in this column.
+    pub fn field_path(&self) -> &str {
+        self.source_field.as_deref().unwrap_or(&self.name)
+    }
+
     /// Set the column as not nullable
     pub fn not_null(mut self) -> Self {
         self.nullable = false;

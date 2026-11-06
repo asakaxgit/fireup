@@ -81,6 +81,17 @@ async fn row_count(importer: &PostgreSQLImporter, table: &str) -> i64 {
     rows.first().expect("one count row").get(0)
 }
 
+/// Run a query whose rows are a single text column.
+async fn text_rows(importer: &PostgreSQLImporter, sql: &str) -> Vec<String> {
+    importer
+        .execute_query(sql, &[])
+        .await
+        .unwrap_or_else(|e| panic!("query failed: {sql}: {e}"))
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect()
+}
+
 async fn drop_table(importer: &PostgreSQLImporter, table: &str) {
     importer
         .execute_statement(&format!("DROP TABLE IF EXISTS \"{table}\" CASCADE"), &[])
@@ -327,7 +338,244 @@ async fn cli_import_managed_export_fixture_into_postgres() {
     assert_eq!(row_count(&importer, "Users").await, 5, "Users rows");
     assert_eq!(row_count(&importer, "Orders").await, 7, "Orders rows");
 
+    // SAK-195: blobs reach BYTEA as bytes, not as the ASCII of their base64.
+    //
+    // Asserting the column *type* is BYTEA cannot catch this: the pipeline
+    // carries a blob as base64 text, and `$n::BYTEA` reads that text as a bytea
+    // input literal, so `ada`'s 768-byte avatar used to arrive as 1024 bytes
+    // whose first bytes spelled "AAECAwQFBgcI". The lengths below are the
+    // fixture's real blob sizes, and `linus` is the 45 KB blob that has to be
+    // reassembled from two LevelDB fragments first.
+    for (key_path, expected_len) in [
+        ("Users/ada", 768i64),
+        ("Users/grace", 64),
+        ("Users/4503599627370496", 0),
+        ("Users/linus", 45_000),
+        ("Users/unicode-ユーザー", 16),
+    ] {
+        let rows = importer
+            .execute_query(
+                "SELECT length(avatar) FROM \"Users\" WHERE key_path = $1",
+                &[&key_path],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("read avatar for {key_path}: {e}"));
+        let length: i32 = rows.first().expect("one row").get(0);
+        assert_eq!(
+            i64::from(length),
+            expected_len,
+            "{key_path}: avatar must be the blob's byte length, not its base64 length"
+        );
+    }
+
+    let rows = importer
+        .execute_query(
+            "SELECT substring(avatar from 1 for 4) FROM \"Users\" WHERE key_path = 'Users/ada'",
+            &[],
+        )
+        .await
+        .expect("read avatar prefix");
+    let prefix: Vec<u8> = rows.first().expect("one row").get(0);
+    assert_eq!(
+        prefix,
+        vec![0u8, 1, 2, 3],
+        "the fixture avatar starts with the bytes 00 01 02 03"
+    );
+
     for table in FIXTURE_TABLES {
+        drop_table(&importer, table).await;
+    }
+}
+
+/// Every table the edge-case fixture normalizes into, for setup and teardown.
+const EDGE_FIXTURE_TABLES: [&str; 6] =
+    ["Awkward", "Fragments", "Idents", "Scoped", "Shards", "Values"];
+
+/// Import the whole edge-case fixture and check what actually landed.
+///
+/// Deliberately one test rather than six: the kind names are fixed, so parallel
+/// tests importing the same tables would race each other.
+///
+/// Each assertion below corresponds to a defect this fixture found (SAK-195).
+/// `tests/export_fidelity_tests.rs` covers the same ground at the parser and
+/// schema level; only PostgreSQL can decide whether the *rows* survived.
+#[tokio::test]
+async fn cli_import_edge_fixture_preserves_every_entity() {
+    let Some(url) = test_url() else { return };
+    initialize_monitoring(MonitoringConfig::default());
+
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/export-edge-onestore");
+    assert!(
+        fixture.is_dir(),
+        "edge-case fixture missing at {}",
+        fixture.display()
+    );
+
+    let importer = connect(&url).await;
+    for table in EDGE_FIXTURE_TABLES {
+        drop_table(&importer, table).await;
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fireup"))
+        .args(["import", "-b"])
+        .arg(&fixture)
+        .args(["-p", &url, "--drop-existing"])
+        .output()
+        .expect("run fireup import against the edge-case export");
+
+    assert!(
+        output.status.success(),
+        "edge-case import failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Row counts first: a kind, shard, or namespace that stops being read shows
+    // up here before any of the specific assertions.
+    for (table, expected) in [
+        ("Shards", 6i64),    // output-0, output-1, output-2 and output-10
+        ("Fragments", 3),
+        ("Idents", 6),       // includes the id/name pair that used to merge
+        ("Values", 4),
+        ("Awkward", 2),
+        ("Scoped", 4),       // 2 key names x 2 namespaces
+    ] {
+        assert_eq!(
+            row_count(&importer, table).await,
+            expected,
+            "{table} rows"
+        );
+    }
+
+    // An int64 id and a same-looking string name are different entities, so
+    // they must be two rows with two distinct primary keys.
+    let idents = text_rows(
+        &importer,
+        "SELECT key_path || ' | ' || coalesce(key_name, '-') || ' | ' \
+            || coalesce(key_id::text, '-') FROM \"Idents\" ORDER BY label",
+    )
+    .await;
+    assert_eq!(
+        idents,
+        vec![
+            "Idents/9223372036854775807 | - | 9223372036854775807",
+            "Idents/-5 | - | -5",
+            "Idents/1001 | - | 1001",
+            "Idents/\"a/Idents/9\" | a/Idents/9 | -",
+            "Idents/\"1001\" | 1001 | -",
+            "Org/acme/Team/42/Idents/deep | deep | -",
+        ],
+        "key identity must survive to the row level"
+    );
+
+    // The same key name in two namespaces must not collide on the primary key.
+    let scoped = text_rows(
+        &importer,
+        "SELECT key_path FROM \"Scoped\" ORDER BY key_path",
+    )
+    .await;
+    assert_eq!(
+        scoped,
+        vec![
+            "[tenant-a]Scoped/also-shared",
+            "[tenant-a]Scoped/shared-name",
+            "[tenant-b]Scoped/also-shared",
+            "[tenant-b]Scoped/shared-name",
+        ],
+        "namespaced keys must stay distinct"
+    );
+
+    // NaN and ±Infinity are legal Datastore doubles and legal `numeric` input.
+    // They used to fail the record outright on the v1 decoder and collapse to
+    // NULL on the legacy one.
+    let ratios = text_rows(
+        &importer,
+        "SELECT key_path || '=' || ratio::text FROM \"Values\" ORDER BY key_path",
+    )
+    .await;
+    assert_eq!(
+        ratios,
+        vec![
+            "Values/coercions=Infinity",
+            "Values/infinities=-Infinity",
+            "Values/limits=NaN",
+            "Values/negative-infinity=NaN",
+        ],
+        "non-finite doubles must reach PostgreSQL"
+    );
+
+    // int64 limits must not round-trip through f64.
+    let limits = text_rows(
+        &importer,
+        "SELECT big::text || ',' || small::text FROM \"Values\" WHERE key_path = 'Values/limits'",
+    )
+    .await;
+    assert_eq!(
+        limits,
+        vec!["9223372036854775807,-9223372036854775808"],
+        "int64 limits must be exact"
+    );
+
+    // A property name with a literal dot becomes the column `meta_source`;
+    // looking the value up by that derived name finds nothing, which made the
+    // NOT NULL column abort the entire import.
+    let dotted = text_rows(
+        &importer,
+        "SELECT meta_source FROM \"Awkward\" ORDER BY key_path",
+    )
+    .await;
+    assert_eq!(
+        dotted,
+        vec!["literal-dot", "literal-dot"],
+        "a property name containing a dot must keep its value"
+    );
+
+    // The 69-character pair that agrees on its first 63 bytes must be two
+    // columns holding two different values, not one column holding one.
+    let long_columns = text_rows(
+        &importer,
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_name = 'Awkward' \
+           AND column_name LIKE 'shipping_address_normalization%' \
+         ORDER BY column_name",
+    )
+    .await;
+    assert_eq!(
+        long_columns.len(),
+        2,
+        "expected two distinct long columns, got {long_columns:?}"
+    );
+    let long_values = text_rows(
+        &importer,
+        &format!(
+            "SELECT \"{}\" || '/' || \"{}\" FROM \"Awkward\" ORDER BY key_path",
+            long_columns[0], long_columns[1]
+        ),
+    )
+    .await;
+    for value in &long_values {
+        let (left, right) = value.split_once('/').expect("two values");
+        assert_ne!(
+            left, right,
+            "the two long columns must hold the two different source values"
+        );
+    }
+
+    // The 80 KB blob spans three LevelDB blocks, so its bytes only come out
+    // right if FIRST/MIDDLE/LAST reassembly and the BYTEA decode both work.
+    let blob = text_rows(
+        &importer,
+        "SELECT length(payload)::text FROM \"Fragments\" \
+         WHERE key_path = 'Fragments/three-block-blob'",
+    )
+    .await;
+    assert_eq!(
+        blob,
+        vec!["80000"],
+        "a blob reassembled from three blocks must arrive at its exact length"
+    );
+
+    for table in EDGE_FIXTURE_TABLES {
         drop_table(&importer, table).await;
     }
 }

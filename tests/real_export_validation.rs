@@ -7,17 +7,23 @@
 //!
 //! Two groups of tests live here:
 //!
-//! * **Fixture guards** (always run) — an independent masked-CRC32C log reader
-//!   proves the fixtures are spec-correct, so a fireup failure against them is a
-//!   fireup finding rather than a fixture artifact.
-//! * **Pending acceptance tests** (`#[ignore]`) — these assert the behaviour
-//!   fireup *should* have. They currently fail; each carries the reason and the
-//!   gap it tracks. Remove the `#[ignore]` as each gap is fixed.
-
-use std::path::{Path, PathBuf};
+//! * **Fixture guards** — an independent masked-CRC32C log reader
+//!   (`tests/support/export_log_reader.rs`) proves the fixtures are
+//!   spec-correct, so a fireup failure against them is a fireup finding rather
+//!   than a fixture artifact.
+//! * **Acceptance tests** — the same fixtures read back through fireup itself.
+//!
+//! Edge cases beyond this happy-path dataset — output shards, namespaces, key
+//! identity, numeric limits, awkward property names — live in
+//! `tests/export_fidelity_tests.rs` against the `export-edge-*` trees.
 
 use fireup::leveldb_parser::parser::FirestoreDocumentParser;
 use fireup::monitoring::{initialize_monitoring, MonitoringConfig};
+
+#[path = "support/export_log_reader.rs"]
+mod export_log_reader;
+
+use export_log_reader::{fixtures_dir, kind_output, read_log_records, BLOCK_SIZE};
 
 /// `parse_documents()` calls `get_monitoring_system()`, which panics unless the
 /// process has already initialised the global monitoring system. Every test that
@@ -26,106 +32,9 @@ fn init_monitoring() {
     initialize_monitoring(MonitoringConfig::default());
 }
 
-const BLOCK_SIZE: usize = 32768;
-const HEADER_SIZE: usize = 7;
-
 const EXPECTED_USERS: usize = 5;
 const EXPECTED_ORDERS: usize = 7;
 const EXPECTED_TOTAL: usize = EXPECTED_USERS + EXPECTED_ORDERS;
-
-fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
-
-fn kind_output(tree: &str, kind: &str) -> PathBuf {
-    fixtures_dir()
-        .join(tree)
-        .join("all_namespaces")
-        .join(format!("kind_{kind}"))
-        .join("output-0")
-}
-
-// ---------------------------------------------------------------------------
-// Reference LevelDB log reader (spec-correct, independent of src/)
-// ---------------------------------------------------------------------------
-
-/// CRC32C (Castagnoli), the polynomial LevelDB actually uses.
-fn crc32c(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0x82F6_3B78
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
-}
-
-/// LevelDB stores masked CRCs so a stored checksum is never a checksum of real data.
-fn mask_crc(crc: u32) -> u32 {
-    ((crc >> 15) | (crc << 17)).wrapping_add(0xA282_EAD8)
-}
-
-/// Unframe a LevelDB log file, verifying every record checksum.
-fn read_log_records(path: &Path) -> Vec<Vec<u8>> {
-    let raw = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let mut records = Vec::new();
-    let mut pending: Vec<u8> = Vec::new();
-
-    for block in raw.chunks(BLOCK_SIZE) {
-        let mut offset = 0usize;
-        while offset + HEADER_SIZE <= block.len() {
-            let header = &block[offset..offset + HEADER_SIZE];
-            let checksum = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-            let length = u16::from_le_bytes([header[4], header[5]]) as usize;
-            let record_type = header[6];
-            if checksum == 0 && length == 0 && record_type == 0 {
-                break; // trailing padding
-            }
-
-            let start = offset + HEADER_SIZE;
-            let body = &block[start..start + length];
-
-            let mut hashed = Vec::with_capacity(length + 1);
-            hashed.push(record_type);
-            hashed.extend_from_slice(body);
-            assert_eq!(
-                mask_crc(crc32c(&hashed)),
-                checksum,
-                "{}: masked CRC32C mismatch at record offset {offset}",
-                path.display()
-            );
-
-            match record_type {
-                1 => {
-                    assert!(pending.is_empty(), "FULL record inside an open fragment");
-                    records.push(body.to_vec());
-                }
-                2 => {
-                    assert!(pending.is_empty(), "FIRST record inside an open fragment");
-                    pending = body.to_vec();
-                }
-                3 | 4 => {
-                    assert!(!pending.is_empty(), "fragment without a preceding FIRST");
-                    pending.extend_from_slice(body);
-                    if record_type == 4 {
-                        records.push(std::mem::take(&mut pending));
-                    }
-                }
-                other => panic!("invalid LevelDB record type {other}"),
-            }
-
-            offset = start + length;
-        }
-    }
-
-    assert!(pending.is_empty(), "{}: ends mid-fragment", path.display());
-    records
-}
 
 // ---------------------------------------------------------------------------
 // Fixture guards — must always pass
@@ -196,7 +105,7 @@ fn users_fixture_exercises_cross_block_fragmentation() {
 }
 
 // ---------------------------------------------------------------------------
-// Pending acceptance tests — assert the behaviour fireup should have
+// Acceptance tests — the fixtures read back through fireup itself
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

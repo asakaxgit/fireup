@@ -883,6 +883,7 @@ fn create_basic_schema_from_analysis(analysis: &types::SchemaAnalysis) -> Result
             nullable: false,
             default_value: None,
             constraints: vec![],
+            source_field: None,
         });
         
         // Add columns for each field
@@ -899,6 +900,7 @@ fn create_basic_schema_from_analysis(analysis: &types::SchemaAnalysis) -> Result
                 nullable: true, // Most fields are nullable in Firestore
                 default_value: None,
                 constraints: vec![],
+                source_field: None,
             });
         }
         

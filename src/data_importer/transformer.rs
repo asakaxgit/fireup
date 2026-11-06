@@ -3,7 +3,8 @@ use crate::schema_analyzer::ddl_generator::{quote_identifier, quote_identifier_l
 use crate::types::{
     datastore_type_tag, FirestoreDocument, ForeignKeyDefinition, NormalizedSchema, TableDefinition,
     ColumnDefinition,
-    PostgreSQLType, DATASTORE_TYPE_BLOB, DATASTORE_TYPE_GEO_POINT, DATASTORE_TYPE_KEY,
+    PostgreSQLType, DATASTORE_TYPE_BLOB, DATASTORE_TYPE_DOUBLE, DATASTORE_TYPE_GEO_POINT,
+    DATASTORE_TYPE_KEY,
     DATASTORE_TYPE_TIMESTAMP, KEY_ID_COLUMN, KEY_KIND_COLUMN, KEY_NAMESPACE_COLUMN,
     KEY_NAME_COLUMN, KEY_PATH_COLUMN, PARENT_KEY_PATH_COLUMN,
 };
@@ -253,8 +254,16 @@ impl DocumentTransformer {
                 continue; // Already populated from the Datastore key
             }
 
-            let field_value = self.extract_field_value(&document.data, &column.name, &column.column_type)?;
-            
+            // By field path, not by column name: the name is derived from the
+            // property (dots replaced, over-long names shortened), so looking
+            // up by it silently yields NULL for any property whose name had to
+            // be rewritten.
+            let field_value = self.extract_field_value(
+                &document.data,
+                column.field_path(),
+                &column.column_type,
+            )?;
+
             match field_value {
                 Some(value) => {
                     // Check if this is a foreign key
@@ -381,8 +390,15 @@ impl DocumentTransformer {
         field_path: &str,
         _expected_type: &PostgreSQLType,
     ) -> Result<Option<Value>, FireupError> {
+        // A property name may itself contain a dot — `meta.source` is a legal
+        // Datastore property — so an exact match wins over reading the dots as
+        // a nested path.
+        if let Some(value) = data.get(field_path) {
+            return Ok(Some(value.clone()));
+        }
+
         let path_parts: Vec<&str> = field_path.split('.').collect();
-        
+
         if path_parts.len() == 1 {
             // Simple field access
             Ok(data.get(field_path).cloned())
@@ -507,6 +523,8 @@ impl DocumentTransformer {
                 Some(Value::String(format!("({},{})", longitude, latitude)))
             }
             (DATASTORE_TYPE_KEY, PostgreSQLType::Text) => field("key_path"),
+            // `NaN`, `Infinity` and `-Infinity` are valid `numeric` input text.
+            (DATASTORE_TYPE_DOUBLE, PostgreSQLType::Numeric(_, _)) => field("literal"),
             // Any tagged value is still faithfully representable as JSONB.
             (_, PostgreSQLType::Jsonb) => Some(value.clone()),
             _ => None,
