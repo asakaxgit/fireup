@@ -38,30 +38,6 @@ const expectCode = async (expected, fn) => {
   return error
 }
 
-/**
- * Resolve the first outcome of a snapshot listener, failing if neither a
- * snapshot nor an error arrives. A hang is the specific failure mode the
- * matrix promises not to have, so it is a failure here rather than a timeout
- * somebody has to interpret.
- */
-const firstListenOutcome = (query, timeoutMs = 10_000) =>
-  new Promise((resolvePromise, reject) => {
-    let unsubscribe = () => {}
-    const timer = setTimeout(() => {
-      unsubscribe()
-      reject(new Error(`the listener neither produced a snapshot nor failed within ${timeoutMs}ms`))
-    }, timeoutMs)
-    const settle = (fn, arg) => {
-      clearTimeout(timer)
-      unsubscribe()
-      fn(arg)
-    }
-    unsubscribe = query.onSnapshot(
-      (snapshot) => settle(resolvePromise, snapshot),
-      (error) => settle(reject, error),
-    )
-  })
-
 export const firestoreProbes = [
   {
     id: 'firestore.GetDocument',
@@ -340,9 +316,9 @@ export const firestoreProbes = [
 
   {
     id: 'firestore.Listen',
-    // Probed on the wire, not through onSnapshot(): the server's refusal is
-    // unambiguous here, and the SDK drops it on the floor
-    // (limits.listen-sdk-retry-loop pins that separately).
+    // Probed on the wire rather than through onSnapshot(): this layer asserts
+    // the protocol, and the SDK's own `onSnapshot()` path is covered by
+    // tests/local-smoke/smoke.mjs.
     unimplemented: async ({ raw, projectId, expectUnimplemented }) => {
       await expectUnimplemented(
         () =>
@@ -565,42 +541,6 @@ export const firestoreProbes = [
           name: documentName(projectId, path),
           read_time: { seconds: '1700000000', nanos: 0 },
         }),
-      )
-    },
-  },
-
-  {
-    id: 'limits.listen-sdk-retry-loop',
-    'documented-divergence': async ({ freshCollection }) => {
-      const cities = freshCollection('listenretry')
-      await cities.doc('tokyo').set({ n: 1 })
-
-      // The server refuses Listen with a clear UNIMPLEMENTED (proved by
-      // firestore.Listen over raw gRPC). @google-cloud/firestore loses it:
-      // Firestore._initializeStream resolves the stream as "healthy" before the
-      // trailers-only status lands, so Watch attaches its own 'error' handler
-      // too late, sees only 'end', synthesises GoogleError('Stream ended
-      // unexpectedly') with code UNKNOWN — which its isPermanentWatchError()
-      // treats as retryable — and reopens the stream forever.
-      //
-      // So onSnapshot() against fireup hangs instead of failing, which is the
-      // one place the matrix's "a gap is never a hang" promise does not reach.
-      // Pinned rather than hidden: when SAK-189 serves Listen, or the SDK stops
-      // swallowing the status, this fails and says so.
-      let outcome = 'hung'
-      try {
-        await firstListenOutcome(cities, 6_000)
-        outcome = 'snapshot'
-      } catch (error) {
-        outcome = /neither produced a snapshot nor failed/.test(error.message)
-          ? 'hung'
-          : `failed with code ${error.code}`
-      }
-      assert.equal(
-        outcome,
-        'hung',
-        'docs/local/README.md records that onSnapshot() retries rather than surfacing the ' +
-          'refusal. That changed — update the README and this row.',
       )
     },
   },

@@ -155,9 +155,10 @@ if this table and that suite stop agreeing. See [Tests](#tests).
 
 ### RPCs
 
-All 17 RPCs of `google.firestore.v1.Firestore`. The 12 marked **served** are the
-v1 surface frozen in the `firestore-v1-contract` document on
-[SAK-163](/SAK/issues/SAK-163).
+All 17 RPCs of `google.firestore.v1.Firestore`. The first 12 marked **served**
+are the v1 surface frozen in the `firestore-v1-contract` document on
+[SAK-163](/SAK/issues/SAK-163); `Listen` was added in Phase 2.1
+([SAK-189](/SAK/issues/SAK-189)).
 
 | RPC | Status | Notes |
 |---|---|---|
@@ -173,7 +174,7 @@ v1 surface frozen in the `firestore-v1-contract` document on
 | `RunQuery` | served | See the query matrix below. Transactions and `new_transaction` supported; `read_time` and `explain_options` refused. |
 | `BatchWrite` | served | Deliberately **not** atomic, per the API: one status per write. Serves [field transforms](#field-transforms). |
 | `ListCollectionIds` | served | Paged by resume token. `read_time` refused. |
-| `Listen` | `UNIMPLEMENTED` | Realtime listeners. No change feed exists to drive them. The refusal is clear on the wire, but the Node SDK swallows it — see [Other known limits](#other-known-limits). |
+| `Listen` | served | Document and query watches. See the listener matrix below. |
 | `Write` (streaming) | `UNIMPLEMENTED` | `Commit` is the write path SDKs use. |
 | `RunAggregationQuery` | `UNIMPLEMENTED` | `count()`/`sum()`/`average()`. |
 | `PartitionQuery` | `UNIMPLEMENTED` | Parallel-scan partitioning, for data-pipeline clients. |
@@ -289,6 +290,58 @@ wrong:
   than — and usually a fraction of a millisecond before — the document's
   `update_time`.
 
+### Realtime listeners (Phase 2.1)
+
+`Listen` is served well enough for `onSnapshot()` in the official SDKs. A target
+is validated when it is added, and one this server cannot serve comes back as a
+`TargetChange` of type `REMOVE` carrying the cause — the contract's per-target
+error channel — so a bad target does not take down the other listeners a client
+multiplexed onto the same stream.
+
+| Feature | Status |
+|---|---|
+| `DocumentsTarget` (watch named documents) | served |
+| `QueryTarget` with any query shape from the matrix above | served — it is the same compiled query `RunQuery` uses |
+| `QueryTarget` over a collection group (`all_descendants`) | served — the watch covers that collection at any depth below the parent |
+| `DocumentChange` / `DocumentDelete` / `DocumentRemove` | served, and distinguished |
+| `TargetChange` `ADD` / `CURRENT` / `REMOVE` / `RESET` / `NO_CHANGE` | served |
+| `Target.once` | served — the target retires as soon as it is `CURRENT` |
+| `Target.target_id = 0` (server assigns one) | served |
+| `RemoveTarget` | served |
+| `Target.resume_token` | ignored; the target re-snapshots (see below) |
+| `Target.read_time` (resume at a point in time) | `UNIMPLEMENTED` |
+| `ExistenceFilter` / `Target.expected_count` | not sent; a client gets full changes instead |
+
+What to know before trusting a listener here:
+
+- **The feed is in-process.** A change reaches a listener because it passed
+  through *this process's* store. With `--postgres-url`, a document written by a
+  second `fireup local`, by `psql`, or by any other client of the same database
+  does **not** wake these listeners, because nothing polls the table. Single
+  process — which is what a local SDK test is — is complete.
+- **A query target is re-evaluated on every change to its collection.** That is
+  what makes `limit`, `offset`, cursors, and `orderBy` correct: a write that cannot
+  affect a limited result set produces no change, where matching each write
+  against the filter alone would wrongly report it. It also means a watched
+  collection is rescanned per change, which is fine for development volumes and
+  is not how production Firestore does it.
+- **No resume tokens are issued.** Every `TargetChange` carries an empty
+  `resume_token`, so an SDK has nothing to resume from and reconnects with a
+  full snapshot. A token that arrives anyway is ignored rather than honoured:
+  pretending to resume would make the client silently skip whatever changed
+  while it was away.
+- **A listener that falls behind is `RESET`, never silently truncated.** The feed
+  buffers a bounded number of events per listener; a listener that exceeds it
+  gets `RESET` plus a fresh snapshot, which is exactly what the protocol's
+  `RESET` is for.
+- **Writes through any surface notify.** The change feed sits *below* the data
+  plane, so a Datastore `Commit`, a `fireup local seed`, and every Firestore
+  write RPC all reach a Firestore listener — in this store they are the same
+  document.
+- **Shutting the server down ends its listeners.** A `Listen` stream is
+  open-ended, and gRPC graceful shutdown waits for in-flight requests, so the
+  server closes its listeners explicitly rather than hanging on Ctrl-C.
+
 ### Transactions
 
 - **Atomic:** every write in a `Commit` applies or none does.
@@ -384,18 +437,6 @@ field before the transform runs, noted above.
 - **No `property_mask` on a Datastore mutation.** Masked entity updates are
   still `UNIMPLEMENTED`, which is why a Datastore `increment` needs the written
   entity to carry the current value (see above).
-- **`onSnapshot()` hangs instead of failing.** This is the one place the "a gap
-  is never a hang" rule does not reach the caller, and it is upstream rather
-  than ours. The server refuses `Listen` with a clear `UNIMPLEMENTED` — verified
-  on the wire — but `@google-cloud/firestore` marks the stream healthy before
-  the trailers-only status lands, so its `Watch` attaches its own error handler
-  too late, sees only the stream end, and synthesises
-  `GoogleError('Stream ended unexpectedly')` with code `UNKNOWN`, which it
-  treats as retryable. It then reopens the stream forever and the error callback
-  is never called. Nothing in this repository can fix that from the server side;
-  use a gRPC client directly if you need to see the refusal. The conformance
-  suite pins the behaviour (`limits.listen-sdk-retry-loop`) so it cannot change
-  silently, and that row goes away when `Listen` is served.
 - **No field deletion through a mask.** A masked field that the request does not
   carry is left alone instead of being deleted.
 - **No point-in-time reads.** The store keeps only the current version of a

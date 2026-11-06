@@ -64,8 +64,8 @@ about ports.
 ### Local data plane
 
 - `google.firestore.v1.Firestore`: document CRUD, structured queries,
-  transactions, batch writes — 12 of the 17 RPCs, with the rest an explicit
-  `UNIMPLEMENTED`
+  transactions, batch writes, and realtime `onSnapshot()` listeners — 13 of the
+  17 RPCs, with the rest an explicit `UNIMPLEMENTED`
 - `google.datastore.v1.Datastore`: `Lookup`, `RunQuery`, `Commit`,
   transactions, id allocation — over the *same* rows, since kinds map to
   collections
