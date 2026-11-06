@@ -491,11 +491,21 @@ async fn evaluate(store: &SharedStore, tracked: &Tracked) -> Result<Vec<Document
         }
         Tracked::Query { parent, query, .. } => {
             // The same two scans `RunQuery` picks between, so watching a query
-            // and reading it once see the same documents.
+            // and reading it once see the same documents — including the
+            // pre-filter, which matters more here than it does there. This runs
+            // once per change event per active target, so an unfiltered read
+            // turns every write into a full collection scan (a full *kind* scan
+            // for a collection group listener) for each listener watching it,
+            // rather than once per request.
+            let prefilter = query.prefilter();
             let documents = if query.all_descendants() {
-                store.scan_kind(parent, query.collection_id()).await?
+                store
+                    .scan_kind_filtered(parent, query.collection_id(), prefilter)
+                    .await?
             } else {
-                store.scan_collection(parent, query.collection_id()).await?
+                store
+                    .scan_collection_filtered(parent, query.collection_id(), prefilter)
+                    .await?
             };
             Ok(query.evaluate(documents).documents)
         }
