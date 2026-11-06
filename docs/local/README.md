@@ -159,14 +159,14 @@ v1 surface frozen in the `firestore-v1-contract` document on
 | `GetDocument` | served | Default consistency or inside a transaction. `read_time` refused. |
 | `ListDocuments` | served | Name order; paged by resume token; `show_missing` supported; `collection_id` may be empty to span every collection under the parent. `order_by` refused. |
 | `CreateDocument` | served | 20-character auto ids; `ALREADY_EXISTS` enforced inside the write, not by a check before it. |
-| `UpdateDocument` | served | `update_mask` merge, `current_document` preconditions. |
+| `UpdateDocument` | served | `update_mask` merge, `current_document` preconditions. The contract carries no transforms on this RPC — an SDK's `update()` with a `FieldValue` sentinel goes to `Commit`. |
 | `DeleteDocument` | served | Idempotent. |
 | `BatchGetDocuments` | served | The read path gRPC SDKs actually use. Transactions and `new_transaction` supported; `read_time` refused. |
 | `BeginTransaction` | served | Read-write and read-only. Read-only *at a `read_time`* refused. |
-| `Commit` | served | **Atomic.** Transactional commits verify the transaction's read set. |
+| `Commit` | served | **Atomic.** Transactional commits verify the transaction's read set. Serves [field transforms](#field-transforms). |
 | `Rollback` | served | Spends the token; rejects an unknown one. |
 | `RunQuery` | served | See the query matrix below. Transactions and `new_transaction` supported; `read_time` and `explain_options` refused. |
-| `BatchWrite` | served | Deliberately **not** atomic, per the API: one status per write. |
+| `BatchWrite` | served | Deliberately **not** atomic, per the API: one status per write. Serves [field transforms](#field-transforms). |
 | `ListCollectionIds` | served | Paged by resume token. `read_time` refused. |
 | `Listen` | `UNIMPLEMENTED` | Realtime listeners. No change feed exists to drive them. |
 | `Write` (streaming) | `UNIMPLEMENTED` | `Commit` is the write path SDKs use. |
@@ -237,6 +237,53 @@ wrong. Fireup implements the published Firestore behaviour for each:
   database root it spans every matching collection at any depth; below a
   document it spans only that document's descendants.
 
+### Field transforms
+
+A `FieldValue` sentinel reaches the server as a `DocumentTransform.FieldTransform`
+on the write — either in a write's `update_transforms` or as a transform-only
+`transform` write. The value is computed **inside the same store transaction as
+the write**, against the document that write's own mutation just produced, so
+ten concurrent `increment(1)` calls end at ten rather than at one.
+
+| Transform | SDK spelling | Status |
+|---|---|---|
+| `set_to_server_value: REQUEST_TIME` | `FieldValue.serverTimestamp()` | served |
+| `increment` | `FieldValue.increment(n)` | served |
+| `append_missing_elements` | `FieldValue.arrayUnion(…)` | served |
+| `remove_all_from_array` | `FieldValue.arrayRemove(…)` | served |
+| `maximum` / `minimum` | no SDK surface emits them | `UNIMPLEMENTED` |
+| Nested field path (`a.b`) on a transform | `update({'a.b': …})` | `UNIMPLEMENTED` — a transform writes a whole top-level field, the same limit as an `update_mask`. Reads *do* support nested paths. |
+
+Each write's `WriteResult.transform_results` reports the value each transform
+resolved to, in order, so a client reads the new counter off the commit instead
+of with a second round trip. The array transforms report `null` there, as the
+contract specifies.
+
+The semantics come from the comments on `DocumentTransform.FieldTransform` in
+the public `write.proto`, including the parts that are easy to get quietly
+wrong:
+
+- **A transform runs after the mutation it rides on.** `set()` replaces the
+  document first, so `set({n: increment(5)})` on a document whose `n` was `10`
+  stores `5` — the replace cleared the field before the transform read it. A
+  masked `update()` leaves the field alone, so `n` becomes `15`.
+- **`increment` on a missing field, or on one holding a string, sets it** to the
+  operand rather than failing.
+- **A double on either side makes the sum a double**; two integers stay an
+  integer, and integer overflow resolves to the largest-magnitude integer of
+  that sign instead of wrapping.
+- **An `increment` operand that is not a number is `INVALID_ARGUMENT`**, checked
+  before any write in the batch applies.
+- **The array transforms treat a missing or non-array field as the empty
+  array**, so `arrayRemove` on a string field leaves `[]`, not the string.
+- **Array elements compare across numeric types** (`3` and `3.0` are one
+  element) and, unlike an equality *filter*, `NaN` equals `NaN` and `null`
+  equals `null`. A repeated input element is appended once.
+- **`serverTimestamp()` has millisecond precision**, per the contract, and every
+  field transformed in one commit gets the same value. That makes it no later
+  than — and usually a fraction of a millisecond before — the document's
+  `update_time`.
+
 ### Transactions
 
 - **Atomic:** every write in a `Commit` applies or none does.
@@ -282,8 +329,10 @@ cursors, property transforms, and nested property masks are refused.
   the trade-off). In particular a cursor does not make the scan smaller, only
   the result set. Fine for local-development volumes; not a production query
   planner.
-- **No field transforms.** `serverTimestamp()`, `increment()`, and array
-  union/remove are `UNIMPLEMENTED` rather than silently writing a wrong value.
+- **No Datastore property transforms.** The Firestore [field
+  transforms](#field-transforms) are served, but their Datastore spelling
+  (`Mutation.property_transforms`) is still `UNIMPLEMENTED` — the entity
+  encoding has to be mapped onto them first.
 - **No field deletion through a mask.** A masked field that the request does not
   carry is left alone instead of being deleted.
 - **No point-in-time reads.** The store keeps only the current version of a

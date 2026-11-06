@@ -456,6 +456,18 @@ fn values_equal(left: &Value, right: &Value) -> bool {
     if is_nan(left) || is_nan(right) {
         return false;
     }
+    values_equivalent(left, right)
+}
+
+/// Equality as the **array field transforms** see it.
+///
+/// `arrayUnion`/`arrayRemove` are documented to treat equivalent numbers of
+/// different types (`3` and `3.0`) as equal, and — unlike an equality filter —
+/// `NaN` as equal to `NaN` and `null` as equal to `null`. That is exactly the
+/// sort order's notion of equality, so it is defined here, beside it, rather
+/// than as a second value comparator in
+/// [`transforms`](crate::local::transforms) that could drift from this one.
+pub(crate) fn values_equivalent(left: &Value, right: &Value) -> bool {
     type_rank(left) == type_rank(right) && compare_values(left, right) == Ordering::Equal
 }
 

@@ -16,7 +16,7 @@
 // show_missing, and runTransaction() goes to BeginTransaction + Commit. That is
 // exactly why this layer exists alongside the Rust tests.
 
-import { FieldPath, Firestore } from '@google-cloud/firestore'
+import { FieldPath, FieldValue, Firestore, Timestamp } from '@google-cloud/firestore'
 import { strict as assert } from 'node:assert'
 
 const PROJECT_ID = 'fireup-smoke'
@@ -423,6 +423,84 @@ const main = async () => {
 
     assert.equal((await cities.doc('nagoya').get()).get('population'), 9)
     assert.equal((await cities.doc('sapporo').get()).get('population'), 5)
+  })
+
+  // ---- Field transforms ----------------------------------------------------
+  //
+  // The SDK decides how a FieldValue sentinel reaches the wire — a masked
+  // update plus update_transforms, a transform-only write, or a transform
+  // riding on a full set() — so this is the layer that proves we read whatever
+  // shape it picks. The values themselves are computed by the server, which is
+  // the point: the client never sends them.
+
+  const counters = db.collection('counters')
+
+  await check('serverTimestamp(), increment(), and arrayUnion() resolve on a set()', async () => {
+    const ref = counters.doc('page')
+    await ref.set({
+      label: 'home',
+      seen: FieldValue.serverTimestamp(),
+      hits: FieldValue.increment(5),
+      tags: FieldValue.arrayUnion('a', 'b'),
+    })
+
+    const snapshot = await ref.get()
+    assert.equal(snapshot.get('label'), 'home')
+    assert.equal(snapshot.get('hits'), 5, 'increment on a missing field sets it to the operand')
+    assert.deepEqual(snapshot.get('tags'), ['a', 'b'])
+    assert.ok(
+      snapshot.get('seen') instanceof Timestamp,
+      `serverTimestamp() should come back as a Timestamp, got ${snapshot.get('seen')}`,
+    )
+    assert.ok(
+      snapshot.get('seen').toMillis() <= snapshot.updateTime.toMillis(),
+      'the server timestamp must not be after the write that produced it',
+    )
+  })
+
+  await check('increment() accumulates and arrayUnion() stays idempotent across updates', async () => {
+    const ref = counters.doc('page')
+    await ref.update({ hits: FieldValue.increment(3), tags: FieldValue.arrayUnion('b', 'c') })
+    await ref.update({ hits: FieldValue.increment(-1) })
+
+    const snapshot = await ref.get()
+    assert.equal(snapshot.get('hits'), 7, 'each increment reads the value the last one wrote')
+    assert.deepEqual(snapshot.get('tags'), ['a', 'b', 'c'], 'an element already present is not appended twice')
+    assert.equal(snapshot.get('label'), 'home', 'a transform must not disturb the other fields')
+  })
+
+  await check('arrayRemove() drops the elements it names', async () => {
+    const ref = counters.doc('page')
+    await ref.update({ tags: FieldValue.arrayRemove('a', 'c') })
+
+    assert.deepEqual((await ref.get()).get('tags'), ['b'])
+  })
+
+  await check('increment() on a float field stays a float', async () => {
+    const ref = counters.doc('ratio')
+    await ref.set({ value: 1.5 })
+    await ref.update({ value: FieldValue.increment(1) })
+
+    assert.equal((await ref.get()).get('value'), 2.5)
+  })
+
+  await check('concurrent increments all land', async () => {
+    // The whole reason a transform is computed server-side: ten clients adding
+    // one each must end at ten, which a read-modify-write from the client
+    // cannot guarantee.
+    const ref = counters.doc('contended')
+    await ref.set({ hits: 0 })
+    await Promise.all(Array.from({ length: 10 }, () => ref.update({ hits: FieldValue.increment(1) })))
+
+    assert.equal((await ref.get()).get('hits'), 10, 'no increment may be lost')
+  })
+
+  await check('a transform the server does not serve reports UNIMPLEMENTED', async () => {
+    // Nested field paths are a documented gap, and a transform on one has to
+    // fail loudly rather than write to a top-level field called "a.b".
+    await expectCode(GRPC_UNIMPLEMENTED, () =>
+      counters.doc('page').update({ 'nested.at': FieldValue.serverTimestamp() }),
+    )
   })
 
   await check('an unsupported query reports a clear UNIMPLEMENTED instead of hanging', async () => {

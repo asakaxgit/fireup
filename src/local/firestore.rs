@@ -19,6 +19,13 @@
 //! | `ListCollectionIds`  | served |
 //! | everything else      | `UNIMPLEMENTED` |
 //!
+//! A write's `update_transforms` — and a transform-only `DocumentTransform`
+//! write — are served for `serverTimestamp`, `increment`, `arrayUnion`, and
+//! `arrayRemove`; see [`transforms`](crate::local::transforms) for the
+//! semantics and for what is still refused. `UpdateDocument` does not carry
+//! transforms in the contract, so an SDK's `update()` with a `FieldValue`
+//! sentinel arrives here as a `Commit`.
+//!
 //! Every unimplemented RPC answers with an explicit `UNIMPLEMENTED` status and a
 //! message naming the phase that will add it, so an SDK failure is immediately
 //! legible instead of looking like a hang or a protocol error.
@@ -36,8 +43,9 @@ use tracing::debug;
 
 use crate::local::names::{parse_document_name, parse_parent_name};
 use crate::local::query::{self, Query};
-use crate::local::store::{self, now_timestamp, Mutation, PendingWrite, SharedStore};
+use crate::local::store::{self, now_timestamp, Mutation, PendingWrite, SharedStore, WriteEffect};
 use crate::local::transactions::Transactions;
+use crate::local::transforms;
 use crate::protos::google::firestore::v1::run_query_request::QueryType;
 use crate::protos::google::rpc::Status as RpcStatus;
 use crate::protos::google::firestore::v1::{
@@ -62,7 +70,7 @@ const AUTO_ID_LENGTH: usize = 20;
 /// has to satisfy the trait.
 type UnimplementedStream<T> = ReceiverStream<Result<T, Status>>;
 
-fn unimplemented(rpc: &str, plan: &str) -> Status {
+pub(crate) fn unimplemented(rpc: &str, plan: &str) -> Status {
     Status::unimplemented(format!(
         "fireup local does not serve {rpc} yet ({plan}). \
          See docs/local/README.md for the full fidelity matrix."
@@ -234,24 +242,19 @@ fn precondition(request: &Option<Precondition>) -> Result<Option<store::Precondi
 /// Translate one `Write` from a commit batch into a store write.
 ///
 /// Pure, so a batch is fully translated — and fully rejected if any write in it
-/// is unsupported — before the store is touched at all.
+/// is unsupported — before the store is touched at all. The transforms travel
+/// with the mutation and are computed by the store inside the write's own
+/// transaction; see [`transforms`](crate::local::transforms).
 fn pending_write(write: &crate::protos::google::firestore::v1::Write) -> Result<PendingWrite, Status> {
-    if !write.update_transforms.is_empty() {
-        return Err(unimplemented(
-            "field transforms (serverTimestamp, increment, array union)",
-            "a transform computes the value server-side, which needs the write pipeline",
-        ));
-    }
-
     let operation = write
         .operation
         .as_ref()
         .ok_or_else(|| Status::invalid_argument("write has no operation"))?;
 
-    let mutation = match operation {
+    let (mutation, transforms) = match operation {
         Operation::Update(document) => {
             let name = parse_document_name(&document.name)?.full();
-            match &write.update_mask {
+            let mutation = match &write.update_mask {
                 // No mask: full replace, the `set()` path.
                 None => Mutation::Put(Document {
                     name,
@@ -263,31 +266,62 @@ fn pending_write(write: &crate::protos::google::firestore::v1::Write) -> Result<
                     name,
                     fields: masked_fields(&mask.field_paths, document)?,
                 },
-            }
+            };
+            (mutation, transforms::compile(&write.update_transforms)?)
         }
-        Operation::Delete(name) => Mutation::Delete {
-            name: parse_document_name(name)?.full(),
-        },
-        Operation::Transform(_) => {
-            return Err(unimplemented(
-                "DocumentTransform writes",
-                "a transform computes the value server-side, which needs the write pipeline",
-            ))
+        Operation::Delete(name) => {
+            if !write.update_transforms.is_empty() {
+                return Err(Status::invalid_argument(
+                    "update_transforms may only be set on an `update` write",
+                ));
+            }
+            (
+                Mutation::Delete {
+                    name: parse_document_name(name)?.full(),
+                },
+                Vec::new(),
+            )
+        }
+        // A transform-only write: no field data, just the transforms. An empty
+        // merge is the right base for it — the contract creates the document if
+        // it is absent, and otherwise leaves every untransformed field alone.
+        Operation::Transform(transform) => {
+            if !write.update_transforms.is_empty() {
+                return Err(Status::invalid_argument(
+                    "update_transforms may only be set on an `update` write",
+                ));
+            }
+            if transform.field_transforms.is_empty() {
+                return Err(Status::invalid_argument(
+                    "a transform write needs at least one field transform",
+                ));
+            }
+            (
+                Mutation::Merge {
+                    name: parse_document_name(&transform.document)?.full(),
+                    fields: Vec::new(),
+                },
+                transforms::compile(&transform.field_transforms)?,
+            )
         }
     };
 
-    Ok(PendingWrite::guarded(
+    Ok(PendingWrite::transformed(
         mutation,
         precondition(&write.current_document)?,
+        transforms,
     ))
 }
 
-/// One `WriteResult` per applied write.
-fn write_results(count: usize, now: &Timestamp) -> Vec<WriteResult> {
-    (0..count)
-        .map(|_| WriteResult {
+/// One `WriteResult` per applied write, carrying that write's transform
+/// results — the values `increment` and `serverTimestamp` resolved to, which an
+/// SDK reads back off the commit rather than with another round trip.
+fn write_results(effects: &[WriteEffect], now: &Timestamp) -> Vec<WriteResult> {
+    effects
+        .iter()
+        .map(|effect| WriteResult {
             update_time: Some(now.clone()),
-            transform_results: Vec::new(),
+            transform_results: effect.transform_results.clone(),
         })
         .collect()
 }
@@ -317,15 +351,20 @@ impl FirestoreApi {
         &self.transactions
     }
 
-    /// Apply one write and return the document it left behind.
+    /// Apply one write and report the time it landed and what its transforms
+    /// resolved to.
     ///
     /// The single-document RPCs all go through the batch commit path, so there
     /// is one implementation of precondition handling and `create_time`
     /// preservation rather than one per RPC.
-    async fn apply_one(&self, write: PendingWrite) -> Result<Timestamp, Status> {
+    async fn apply_one(&self, write: PendingWrite) -> Result<(Timestamp, WriteEffect), Status> {
         let now = now_timestamp();
-        self.store.commit(vec![write], now.clone()).await?;
-        Ok(now)
+        let effects = self.store.commit(vec![write], now.clone()).await?;
+        let effect = effects
+            .into_iter()
+            .next()
+            .ok_or_else(|| Status::internal("a one-write commit returned no write effect"))?;
+        Ok((now, effect))
     }
 
     /// Read a document back after writing it, for an RPC that returns one.
@@ -608,10 +647,15 @@ impl Firestore for FirestoreApi {
         batch.extend(writes);
 
         let now = now_timestamp();
-        self.store.commit(batch, now.clone()).await?;
+        let mut effects = self.store.commit(batch, now.clone()).await?;
+
+        // The read set's verifications were prepended to the batch, so the
+        // caller's own writes — and their transform results — are the tail.
+        let verified = effects.len().saturating_sub(applied);
+        effects.drain(..verified);
 
         Ok(Response::new(CommitResponse {
-            write_results: write_results(applied, &now),
+            write_results: write_results(&effects, &now),
             commit_time: Some(now),
         }))
     }
@@ -925,10 +969,10 @@ impl Firestore for FirestoreApi {
                 Ok(pending) => self.apply_one(pending).await,
             };
             match outcome {
-                Ok(now) => {
+                Ok((now, effect)) => {
                     write_results.push(WriteResult {
                         update_time: Some(now),
-                        transform_results: Vec::new(),
+                        transform_results: effect.transform_results,
                     });
                     statuses.push(RpcStatus::default());
                 }

@@ -463,6 +463,35 @@ Phase 4 documented is closed: `src/local/seed.rs` reads the same
   `Timestamp`, a `Buffer`, a `GeoPoint`, and a followable `DocumentReference`.
 - Non-default namespaces remain skipped; that is unchanged and deliberate.
 
+**SAK-190 (November 6 2026)** — field transforms. `serverTimestamp`,
+`increment`, `arrayUnion`, and `arrayRemove` are served on `Commit` and
+`BatchWrite`, both as a write's `update_transforms` and as a transform-only
+`DocumentTransform` write. This supersedes the Phase 2 "still unserved" line
+above for field transforms.
+
+- The value is computed in `src/local/transforms.rs`, called from
+  `Store::commit` **inside the write's own store transaction**, so ten
+  concurrent `increment(1)` calls end at ten rather than at one. The proto→store
+  translation is pure and runs before the store is touched, so an unsupported
+  transform fails the whole batch instead of applying half of it.
+- `WriteResult.transform_results` reports what each transform resolved to, in
+  order, so a client reads the new counter off the commit.
+- The semantics are the ones the vendored public `write.proto` specifies: a
+  transform runs *after* the mutation it rides on, `increment` sets a missing or
+  non-numeric field to the operand, a double on either side makes the sum a
+  double, integer overflow saturates instead of wrapping, the array transforms
+  treat a non-array field as empty and compare `3` to `3.0` (and `NaN` to `NaN`)
+  as equal, and `serverTimestamp` is millisecond-precision and identical for
+  every field in one commit.
+- Still refused, explicitly: `maximum`/`minimum` (no SDK emits them), a
+  transform on a nested field path, and the Datastore spelling
+  (`Mutation.property_transforms`).
+- Verified by 14 unit tests in `src/local/transforms.rs`, two new store
+  conformance cases that both the in-memory and PostgreSQL backends must pass,
+  7 new gRPC tests in `tests/local_firestore_tests.rs` (33 total), and 6 new
+  checks in `scripts/smoke-local-firestore.sh` — **33/33 against both stores**
+  with Google's official client, including ten concurrent increments.
+
 ---
 
 ## Dependencies & Environment

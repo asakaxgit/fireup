@@ -2,7 +2,7 @@
 
 > First-party Fireup code is licensed under **Apache-2.0** (see root `LICENSE`). Brand assets under `brand/` are carved out — see `brand/LICENSE`. Dependency-tree audit: [`CARGO_LICENSE_AUDIT.md`](CARGO_LICENSE_AUDIT.md).
 
-**Status:** current as of SAK-196 — first-party Apache-2.0 + brand trademark carve-out; dependency audit recorded. Prior: SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
+**Status:** current as of SAK-190 — Firestore field transforms. Prior: SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -262,6 +262,28 @@ brand/trademark assets out under `brand/LICENSE`. Vendored googleapis protos
 remain Apache-2.0 at the existing pin; this change only settles the previously
 undeclared (and inconsistently MIT-labelled) first-party grant.
 
+### SAK-190 notes — Firestore field transforms
+
+**No new Google or Firebase artefact, no new proto, no new Rust dependency, and
+no new npm package.** The proto pin is unchanged at googleapis `57aa4dbc`;
+`google/firestore/v1/write.proto`, already rowed above, is where
+`DocumentTransform.FieldTransform` lives, and it has been compiled into the tree
+since Phase 0 — this change serves four of its cases instead of refusing them.
+
+#### What the implementation was written from
+
+| Source | Status | How it was used |
+|---|---|---|
+| The comments on `DocumentTransform.FieldTransform` in the vendored `write.proto` | Published Apache-2.0 googleapis definition, already in this ledger | The normative semantics: `increment` setting a missing or non-numeric field to the operand, double contagion, integer overflow resolving to the largest-magnitude integer, the array transforms treating a non-array field as empty, cross-type numeric equality with `NaN == NaN` and `null == null`, the array transforms' `null` transform result, and `REQUEST_TIME` being millisecond-precision and identical across one transaction |
+| Public Firestore `FieldValue` documentation | Published Google documentation | Which sentinels clients actually emit, which is why `maximum`/`minimum` are refused rather than implemented |
+| Behaviour of Google's **open-source** `@google-cloud/firestore` client (Apache-2.0) | Open source, public repository | Which wire shape the SDK picks for a sentinel (a masked `update` plus `update_transforms`), verified by running it as a **client** against our server in `tests/local-smoke/smoke.mjs` |
+
+**No reverse engineering.** The Firebase Emulator Suite was not decompiled,
+disassembled, or binary-analysed, and no proprietary emulator source or data was
+copied or consulted. What is not served stays an explicit `UNIMPLEMENTED` or
+`INVALID_ARGUMENT`: `maximum`, `minimum`, a transform on a nested field path,
+and the Datastore spelling (`Mutation.property_transforms`).
+
 ## Existing Fireup notes (pre-local-cloud)
 
 | Dependency | Version / pin | SPDX | Upstream | How we use it | Attribution OK? | Decision |
@@ -274,14 +296,14 @@ undeclared (and inconsistently MIT-labelled) first-party grant.
 The PR checklist in `.cursor/rules/firebase-gcp-compliance.mdc`, answered as each
 phase landed.
 
-| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 | SAK-196 |
-|---|---|---|---|---|---|---|
-| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected |
-| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added | Yes — none added; first-party SPDX corrected to Apache-2.0; audit linked |
-| For a REST/JSON surface: public sources named | n/a / prior phases | Yes | n/a (protos) | n/a | n/a | n/a — no new surface |
-| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated/OOB → `501` | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a |
-| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged | Yes — retained in README licence section |
-| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added | n/a — nothing added |
+| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 | SAK-196 | SAK-190 |
+|---|---|---|---|---|---|---|---|
+| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected | Yes — the vendored `write.proto` comments, public `FieldValue` docs, open-source client as a client |
+| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added | Yes — none added; first-party SPDX corrected to Apache-2.0; audit linked | Yes — none added |
+| For a REST/JSON surface: public sources named | n/a / prior phases | Yes | n/a (protos) | n/a | n/a | n/a — no new surface | n/a (protos) |
+| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated/OOB → `501` | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a | Yes — `maximum`/`minimum`, nested transform paths, and Datastore property transforms stay refused |
+| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged | Yes — retained in README licence section | Yes — unchanged |
+| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added |
 
 ## How to add a row
 
