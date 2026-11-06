@@ -200,6 +200,7 @@ immediately rather than after a scan.
 | Cursors (`startAt`/`startAfter`/`endAt`/`endBefore`) | served, including `startAfter(documentSnapshot)` paging |
 | Nested field paths (`a.b`) in filters, orders, projections, and read masks | served, with `` `a.b` `` for a field whose name contains a dot |
 | Nested field paths in an `update_mask` | `UNIMPLEMENTED` — a mask writes whole top-level fields |
+| A top-level `update_mask` path the write does not carry | served — the field is **deleted**, which is how `FieldValue.delete()` reaches the wire |
 | A collection group query with no collection id | `UNIMPLEMENTED` — name the collection to scan |
 | Vector search (`find_nearest`) | `UNIMPLEMENTED` |
 | Aggregations (`count()`, `sum()`, `average()`) | `UNIMPLEMENTED` |
@@ -368,7 +369,7 @@ What to know before trusting a listener here:
 |---|---|---|
 | `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
 | `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`), `AND`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. |
-| `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` (below). |
+| `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` and `property_mask` (below). |
 | `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. |
 | `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
 | `ReserveIds` | served | Acknowledged; local allocations already avoid colliding with completed keys. |
@@ -417,13 +418,41 @@ refuses nested field paths for the same reason. Datastore escapes `.` and `\` in
 a property name, so a name containing either is refused too — incrementing the
 wrong property is worse than saying no.
 
-**A transform runs after the operation,** per the proto, and Fireup does not
-serve `property_mask` yet, so an `update` or `upsert` always replaces the whole
-entity before the transform reads it. An `increment` therefore accumulates only
-when the submitted entity carries the property's current value — the
-read-modify-write idiom inside a transaction. A mutation that omits the property
-resets it to the operand. This is the Datastore equivalent of `set()` clearing a
-field before the transform runs, noted above.
+**A transform runs after the operation,** per the proto, and the transforms apply
+"regardless of the property mask". Which operation the transform lands on top of
+is therefore what decides whether it accumulates:
+
+- *Without* a mask, an `update` or `upsert` replaces the whole entity first, so
+  an `increment` accumulates only when the submitted entity carries the
+  property's current value — the read-modify-write idiom inside a transaction. A
+  mutation that omits the property resets it to the operand. This is the
+  Datastore equivalent of `set()` clearing a field before the transform runs,
+  noted above.
+- *With* a mask that does not name the property, nothing in the write touches it,
+  so the transform reads the stored value and the counter climbs across commits
+  without the client ever sending it. `property_mask: {paths: ["title"]}` plus
+  `increment("hits", 1)` is the useful shape, and the same pairing as Firestore's
+  `update_mask` + `update_transforms`.
+
+#### Datastore `property_mask` on a mutation
+
+`Mutation.property_mask` restricts an `insert`/`update`/`upsert` to the
+properties it names, mapped onto the shared store's masked-write primitive:
+
+| Mask shape | Behaviour |
+|---|---|
+| A path the entity carries | Written, as an unmasked write would |
+| A path the entity omits | **Deleted**, per the proto |
+| A property the mask does not name | Left untouched, even if the entity carries a value for it |
+| `__key__` | Accepted and ignored — the key travels in the entity's key, so it names no field |
+| A property *path* (`foo.bar`) or an escaped name | `UNIMPLEMENTED`, as for a transform's property and the Firestore `update_mask` |
+| An empty path | `INVALID_ARGUMENT` — "a path must not be empty" |
+| Any other reserved (`__`-wrapped) name | `INVALID_ARGUMENT` |
+
+A mask does not weaken the operation's own precondition: a masked `insert` on an
+existing entity is still `ALREADY_EXISTS` and a masked `update` on a missing one
+is still `NOT_FOUND`. On a `delete` the mask is ignored, per the proto, so the
+whole entity is removed rather than some of its properties.
 
 ### Other known limits
 
@@ -434,11 +463,10 @@ field before the transform runs, noted above.
   the trade-off). In particular a cursor does not make the scan smaller, only
   the result set. Fine for local-development volumes; not a production query
   planner.
-- **No `property_mask` on a Datastore mutation.** Masked entity updates are
-  still `UNIMPLEMENTED`, which is why a Datastore `increment` needs the written
-  entity to carry the current value (see above).
-- **No field deletion through a mask.** A masked field that the request does not
-  carry is left alone instead of being deleted.
+- **Nested mask paths are refused on both surfaces.** A Firestore `update_mask`
+  or a Datastore `property_mask` naming `foo.bar` is `UNIMPLEMENTED` rather than
+  overwriting the whole parent field; top-level paths are served, including the
+  field deletion a masked path with no submitted value means.
 - **No point-in-time reads.** The store keeps only the current version of a
   document, so any `read_time` consistency selector is refused rather than
   answered with current data.

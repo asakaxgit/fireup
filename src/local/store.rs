@@ -742,6 +742,7 @@ pub mod conformance {
         overwrite_drops_fields_absent_from_the_new_document(store, &name("replace")).await;
         merge_only_touches_named_fields(store, &name("merge")).await;
         merge_creates_a_missing_document(store, &name("merge-create")).await;
+        a_none_in_a_merge_deletes_the_field(store, &name("merge-delete")).await;
         delete_reports_whether_the_document_existed(store, &name("delete")).await;
         missing_documents_read_as_none(store, &name("absent")).await;
         counts_reflect_writes_and_deletes(store, &name("count")).await;
@@ -795,7 +796,11 @@ pub mod conformance {
         store.put(doc(name, "keep", "v"), ts(10)).await.expect("put");
         assert_eq!(
             store
-                .merge(name, vec![("added".to_string(), Some(string_value("x")))], ts(20))
+                .merge(
+                    name,
+                    vec![("added".to_string(), Some(string_value("x")))],
+                    ts(20),
+                )
                 .await
                 .expect("merge"),
             WriteOutcome::Updated
@@ -804,6 +809,39 @@ pub mod conformance {
         let found = store.get(name).await.expect("get").expect("still present");
         assert_eq!(found.fields["keep"], string_value("v"));
         assert_eq!(found.fields["added"], string_value("x"));
+        assert_eq!(found.create_time, Some(ts(10)));
+        assert_eq!(found.update_time, Some(ts(20)));
+    }
+
+    /// Both surfaces reach this through a mask path the request carries no value
+    /// for, so it has to mean the same thing in both backends — including that
+    /// deleting a field that was never there is not an error.
+    async fn a_none_in_a_merge_deletes_the_field(store: &dyn Store, name: &str) {
+        store
+            .put(doc(name, "keep", "v"), ts(10))
+            .await
+            .expect("put");
+        store
+            .merge(
+                name,
+                vec![
+                    ("added".to_string(), Some(string_value("x"))),
+                    ("keep".to_string(), None),
+                    ("never-there".to_string(), None),
+                ],
+                ts(20),
+            )
+            .await
+            .expect("merge with deletions");
+
+        let found = store.get(name).await.expect("get").expect("still present");
+        assert_eq!(found.fields["added"], string_value("x"));
+        assert!(
+            !found.fields.contains_key("keep"),
+            "a None value deletes the field: {:?}",
+            found.fields.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(found.fields.len(), 1);
         assert_eq!(found.create_time, Some(ts(10)));
         assert_eq!(found.update_time, Some(ts(20)));
     }

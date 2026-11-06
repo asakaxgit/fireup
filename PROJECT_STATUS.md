@@ -632,6 +632,34 @@ closes the one deliberate gap SAK-190 left.
   `scripts/smoke-local-datastore.sh`, passing **against both the in-memory and
   the PostgreSQL store** with Google's official client library.
 
+**SAK-203 (November 6 2026)** — `Mutation.property_mask` is served on `Commit`,
+which is the half that makes SAK-198's transforms useful. A masked
+`insert`/`update`/`upsert` maps onto the store's masked-write primitive, so
+`property_mask: {paths: ["title"]}` plus `increment("hits", 1)` leaves `hits` for
+the transform to read and the counter climbs across commits — the Datastore
+spelling of Firestore's `update_mask` + `update_transforms`.
+
+- **The proto's other half needed a real store change.** "Properties referenced
+  in the mask but not in the entity are deleted", and the shared store had no
+  field deletion — the gap `docs/local/README.md` recorded as "no field deletion
+  through a mask". Rather than refuse that one case, `Mutation::Merge` now
+  carries an `Option<Value>` per path, where `None` deletes. One primitive, so
+  the Firestore `update_mask` side gets the same rule instead of a second
+  reading of the same sentence.
+- **That fixed a live Firestore bug.** `FieldValue.delete()` reaches the wire as
+  an `update_mask` path the write carries no value for, so it was silently
+  leaving the field in place. It is now a check in the Firestore SDK smoke.
+- Refusals follow the proto line by line: a nested path (`foo.bar`) or an
+  escaped name is `UNIMPLEMENTED` as on the Firestore side; an empty path and a
+  reserved name other than `__key__` are `INVALID_ARGUMENT`; `__key__` itself is
+  accepted and ignored, since the key travels in the entity's key. A mask does
+  not weaken the operation's precondition, and on a `delete` it is ignored.
+- Verified by 5 new gRPC tests in `tests/local_datastore_tests.rs` (16 total), a
+  new masked-deletion case in the shared store contract — so **both** backends
+  assert it — a new Firestore gRPC test and unit test (47 and 464), and new
+  steps in both SDK smokes: Datastore 10/10 **against both stores**, Firestore
+  47/47, with Google's official client libraries.
+
 ---
 
 ## Dependencies & Environment
