@@ -151,8 +151,10 @@ impl DataTypeMapper {
                         })
                     }
                 } else if n.is_f64() {
+                    // A JSON float came from an IEEE 754 binary64 double;
+                    // `NUMERIC(15, 6)` would silently round it to 6 decimals.
                     Ok(TypeMappingResult {
-                        postgres_type: PostgreSQLType::Numeric(Some(15), Some(6)),
+                        postgres_type: PostgreSQLType::DoublePrecision,
                         requires_normalization: false,
                         metadata: TypeMappingMetadata {
                             original_type: "float".to_string(),
@@ -476,7 +478,7 @@ impl DataTypeMapper {
         } else if mappings.iter().all(|m| matches!(m.postgres_type, PostgreSQLType::Varchar(_) | PostgreSQLType::Text)) {
             warnings.push("String types unified to TEXT".to_string());
             PostgreSQLType::Text
-        } else if mappings.iter().all(|m| matches!(m.postgres_type, PostgreSQLType::Integer | PostgreSQLType::BigInt | PostgreSQLType::Numeric(_, _))) {
+        } else if mappings.iter().all(|m| matches!(m.postgres_type, PostgreSQLType::Integer | PostgreSQLType::BigInt | PostgreSQLType::Numeric(_, _) | PostgreSQLType::DoublePrecision)) {
             warnings.push("Numeric types unified to NUMERIC".to_string());
             PostgreSQLType::Numeric(None, None)
         } else {

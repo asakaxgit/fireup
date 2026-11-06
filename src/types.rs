@@ -399,6 +399,8 @@ pub enum PostgreSQLType {
     Point,
     /// Numeric with optional precision and scale
     Numeric(Option<u32>, Option<u32>),
+    /// IEEE 754 binary64, i.e. the exact shape of a Datastore/Firestore double
+    DoublePrecision,
     /// Boolean
     Boolean,
     /// Timestamp with timezone
@@ -806,6 +808,7 @@ impl PostgreSQLType {
             }
             // A scale without a precision is not expressible in PostgreSQL.
             PostgreSQLType::Numeric(None, _) => "NUMERIC".to_string(),
+            PostgreSQLType::DoublePrecision => "DOUBLE PRECISION".to_string(),
             PostgreSQLType::Boolean => "BOOLEAN".to_string(),
             PostgreSQLType::Timestamp => "TIMESTAMPTZ".to_string(),
             PostgreSQLType::Uuid => "UUID".to_string(),

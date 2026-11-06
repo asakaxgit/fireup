@@ -390,6 +390,14 @@ async fn datastore_types_map_to_faithful_postgres_types() {
         "point",
         "a geo point must not be dropped from the schema"
     );
+    // SAK-202: `numeric` is decimal arbitrary precision. It has no signed zero
+    // and does not round-trip every binary64 value through its decimal text
+    // form, which is what a Datastore double actually needs.
+    assert_eq!(
+        find_column(&users, "score").1,
+        "double precision",
+        "a Datastore double is IEEE 754 binary64, not a decimal"
+    );
 
 }
 

@@ -33,7 +33,7 @@ mod type_mapper_tests {
 
         // Test float mapping
         let result = mapper.map_value_type(&json!(3.14), "test.float").unwrap();
-        assert!(matches!(result.postgres_type, PostgreSQLType::Numeric(Some(15), Some(6))));
+        assert!(matches!(result.postgres_type, PostgreSQLType::DoublePrecision));
         assert_eq!(result.metadata.original_type, "float");
     }
 

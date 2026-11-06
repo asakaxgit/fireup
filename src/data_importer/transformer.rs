@@ -453,6 +453,7 @@ impl DocumentTransformer {
             (PostgreSQLType::Integer, Value::Number(n)) if n.is_i64() => Ok(value.clone()),
             (PostgreSQLType::BigInt, Value::Number(n)) if n.is_i64() => Ok(value.clone()),
             (PostgreSQLType::Numeric(_, _), Value::Number(_)) => Ok(value.clone()),
+            (PostgreSQLType::DoublePrecision, Value::Number(_)) => Ok(value.clone()),
             (PostgreSQLType::Text, Value::String(_)) => Ok(value.clone()),
             (PostgreSQLType::Varchar(_), Value::String(_)) => Ok(value.clone()),
             (PostgreSQLType::Jsonb, _) => Ok(value.clone()),
@@ -523,8 +524,11 @@ impl DocumentTransformer {
                 Some(Value::String(format!("({},{})", longitude, latitude)))
             }
             (DATASTORE_TYPE_KEY, PostgreSQLType::Text) => field("key_path"),
-            // `NaN`, `Infinity` and `-Infinity` are valid `numeric` input text.
-            (DATASTORE_TYPE_DOUBLE, PostgreSQLType::Numeric(_, _)) => field("literal"),
+            // `NaN`, `Infinity` and `-Infinity` are valid `double precision`
+            // input text. A `numeric` column also accepts `NaN`, so a schema
+            // generated before SAK-202 keeps working.
+            (DATASTORE_TYPE_DOUBLE, PostgreSQLType::DoublePrecision)
+            | (DATASTORE_TYPE_DOUBLE, PostgreSQLType::Numeric(_, _)) => field("literal"),
             // Any tagged value is still faithfully representable as JSONB.
             (_, PostgreSQLType::Jsonb) => Some(value.clone()),
             _ => None,
