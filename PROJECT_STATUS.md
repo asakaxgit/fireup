@@ -342,9 +342,12 @@ stubs at all.
 
 **Still unserved** (answer `UNIMPLEMENTED` with a message naming the gap):
 realtime listeners (`Listen`, streaming `Write`), aggregation queries,
-`PartitionQuery`, collection group queries, query cursors, field transforms,
-nested field paths, point-in-time reads, auth and security rules. The fidelity
-matrix in `docs/local/README.md` is the authoritative list.
+`PartitionQuery`, field transforms, nested paths in an `update_mask`,
+point-in-time reads, and security rules. The fidelity matrix in
+`docs/local/README.md` is the authoritative list.
+
+Collection group queries, query cursors, and nested field paths in filters,
+orders, projections, and read masks are served as of SAK-191.
 
 **Phase L (SAK-168, November 4 2026)** — Firebase Auth / Identity Platform, in
 parallel with Phase 2 and without waiting for a Phase 2 exit:

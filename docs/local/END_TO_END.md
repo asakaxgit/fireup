@@ -258,8 +258,8 @@ Three seeding limits, all deliberate refusals rather than silent results:
   reason and exits non-zero.
 
 Everything else that is not production Firestore — no realtime listeners, no
-aggregations, no cursors, no collection-group queries, no security rules,
-unsigned auth tokens — is enumerated in the
+aggregations, no field transforms, no security rules, unsigned auth tokens — is
+enumerated in the
 [fidelity matrix](README.md#fidelity-matrix). The rule there holds here too:
 **an unsupported feature is an explicit error, never a wrong answer.**
 
