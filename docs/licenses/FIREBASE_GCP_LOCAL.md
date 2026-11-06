@@ -620,11 +620,14 @@ project published about itself and got wrong: `fireup local` accepts an
 both of which the emulator and production reject — and the second has a
 conformance probe *asserting* the divergent behaviour. A probe stops a row
 changing silently; it cannot stop a row from having been wrong when it was
-written. On the auth surface, `accounts:batchCreate` answers `405` with a
-self-contradictory message and `projects:createSessionCookie` answers
+written. On the auth surface, `accounts:batchCreate` answered `405` with a
+self-contradictory message and `projects:createSessionCookie` answered
 `404 PROJECT_NOT_FOUND` from mis-parsing the `{project}:customMethod` colon, so
-two rows the matrix correctly calls `UNIMPLEMENTED` refuse in a shape that does
-not name the gap.
+two rows the matrix correctly calls `UNIMPLEMENTED` refused in a shape that did
+not name the gap. SAK-224 fixed both; the replacement refusals were
+re-measured against `main` at `5d015dc` on 2026-11-06 rather than transcribed
+from the fix, and both now answer `501 OPERATION_NOT_ALLOWED` naming the
+missing capability.
 
 **Trademarks are used nominatively**, as before: "Firebase", "Firestore",
 "Datastore" and "Google Cloud" appear only to identify the products being
