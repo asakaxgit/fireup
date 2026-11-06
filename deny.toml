@@ -51,6 +51,39 @@
 all-features = true
 
 [advisories]
+# Where the advisories come from. This one line decides everything the
+# `advisories` check below is capable of knowing, which makes it the only
+# setting in this file that can be loosened without loosening any policy: every
+# `deny` stays `deny`, and the database simply stops mentioning the thing.
+#
+# SAK-228 measured what happens when the database cannot be *fetched* — an
+# unresolvable host, a 404 repository, `--offline` with no cache — and all three
+# fail closed. What was not measured was a database that fetches fine and has
+# been edited. Measured now (SAK-236) against local forks of advisory-db served
+# over `git daemon`, with the tree held fixed by `shlex = "=1.2.0"`
+# (RUSTSEC-2024-0006) and only this key moving:
+#
+#   official URL (ships)            exit 1   `error[vulnerability]` named
+#   fork with zero advisories       exit 1   fails to load -> fail closed
+#   fork that HAS the advisory      exit 1   control: the fork really is used
+#   same fork, that one file gone   exit 0   `advisories ok`            <- hole
+#   thinned fork + official URL     exit 1   control: several URLs are a union
+#   official URL + `.git` suffix    exit 1   another spelling of the same repo
+#   key deleted                     exit 1   the default is the official DB
+#
+# The two forks differ by exactly one file in `git ls-tree`
+# (`crates/shlex/RUSTSEC-2024-0006.md`). So an *empty* database fails closed but
+# a *thinned* one is simply quiet, and nothing else in the gate notices:
+# `maximum-db-staleness` sees a fresh clone, and `-D advisory-not-detected` has
+# an empty `ignore` list to work with.
+#
+# That is why `dependency_pin_tests` guards this line, and it is the one
+# loosening in this file that neither the `deny` job nor a reader of the diff
+# would catch — every other one leaves the job exit 0 with a test able to go
+# red, or goes red in the job itself. The guard requires the official URL to be
+# *among* the entries rather than to be the only one, because the union result
+# above makes extra URLs additive and harmless, and it accepts the key being
+# absent because the default is this same database.
 db-urls = ["https://github.com/rustsec/advisory-db"]
 # A yanked crate in the lock file is an error, not a warning: it means the
 # version we pinned was withdrawn from crates.io after we pinned it.
@@ -121,6 +154,43 @@ maximum-db-staleness = "P7D"
 # deliberately — with `-D advisory-not-detected` making sure the acceptance
 # cannot outlive the crate.
 unmaintained = "all"
+# Unsoundness advisories cover the whole graph too, for the same reason and with
+# more force. `unsound` is the sibling scope enum of `unmaintained` above — the
+# same "all" / "workspace" / "transitive" / "none" values, not a lint level —
+# and this file did not set it, so it ran at the "workspace" default and a
+# transitive unsound advisory was reported nowhere. SAK-225 found that hole in
+# `unmaintained`; it was still open one key to the left.
+#
+# Measured (SAK-236) with `anstream` 0.6.7 — RUSTSEC-2024-0404, unsound, affects
+# `< 0.6.8` — placed in a purely transitive position by pinning `clap = "=4.5.0"`,
+# giving `fireup -> clap 4.5.0 -> clap_builder 4.5.0 -> anstream 0.6.7` with no
+# direct edge (`cargo tree --locked -i anstream`). Tree held fixed, only this key
+# moved:
+#
+#   no key (what shipped)   exit 0   `advisories ok`                    <- hole
+#   `unsound = "all"`       exit 1   `error[unsound]` RUSTSEC-2024-0404
+#   `unsound = "workspace"` exit 0   control: identical to no key, so the
+#                                    default is "workspace"
+#   `unsound = "transitive"` exit 1  control: the crate is reachable and the
+#                                    advisory does apply, so the green above is
+#                                    the scope and nothing else
+#   `unsound = "none"`      exit 0   control: the kill switch
+#
+# The two controls are what make this a hole rather than a guess. Without the
+# "workspace" arm the green reads as "this key does nothing"; without the
+# "transitive" arm it reads as "that crate is unreachable anyway".
+#
+# The default is not "none" — unsound advisories were being checked, just
+# scoped. Separately measured with `const-cstr` 0.3.0 (RUSTSEC-2023-0020) as a
+# *direct* dependency: with the key still unset it exits 1 and names the
+# advisory, and adding `unsound = "none"` takes it to `advisories ok` in one
+# line.
+#
+# On the day it was added this changed nothing: all four values exit 0 on the
+# shipping tree, which carries no unsound advisory today. It is here for the
+# next one, and memory corruption is a worse thing to learn about late than an
+# archived repository.
+unsound = "all"
 
 # No accepted advisories. Every advisory the database reports fails the build.
 #

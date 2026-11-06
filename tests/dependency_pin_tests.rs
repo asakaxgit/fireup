@@ -833,6 +833,157 @@ fn check_graph_covers_every_target(deny: &str) -> Result<(), String> {
     }
 }
 
+/// `Err` unless `[advisories] unsound` is set to `"all"`.
+///
+/// `unsound` is the sibling of `unmaintained` and takes the same scope enum,
+/// not a lint level, so the same hole SAK-225 closed for one key was still open
+/// for the other. The difference is that `unmaintained` was at least written
+/// down: `unsound` was absent, and absence is `"workspace"`, so a transitive
+/// unsound advisory was reported nowhere.
+///
+/// Measured (SAK-236) with `anstream` 0.6.7 — RUSTSEC-2024-0404, unsound,
+/// affects `< 0.6.8` — made purely transitive by pinning `clap = "=4.5.0"`, so
+/// `fireup -> clap 4.5.0 -> clap_builder 4.5.0 -> anstream 0.6.7` with no direct
+/// edge. Tree fixed, only this key moved:
+///
+///   no key (what shipped)      exit 0   `advisories ok`                 <- hole
+///   `unsound = "all"`          exit 1   `error[unsound]` RUSTSEC-2024-0404
+///   `unsound = "workspace"`    exit 0   control: identical to no key
+///   `unsound = "transitive"`   exit 1   control: the crate is reachable
+///   `unsound = "none"`         exit 0   control: the kill switch
+///
+/// The `"workspace"` arm is what pins the default; the `"transitive"` arm is
+/// what rules out "that crate was unreachable anyway". Separately, `const-cstr`
+/// 0.3.0 (RUSTSEC-2023-0020) as a *direct* dependency exits 1 with the key still
+/// unset, which rules out `"none"` as the default.
+///
+/// One assertion is enough here, unlike `yanked` (SAK-231) or `include-dev`
+/// (SAK-234): there is no separate kill-switch key, so the value of this key
+/// alone decides the scope. Absence is a failure, because absence is
+/// `"workspace"`.
+fn check_unsound_scope_is_all(deny: &str) -> Result<(), String> {
+    match setting(deny, "unsound").as_deref() {
+        Some("all") => Ok(()),
+        Some(scope) => Err(format!(
+            "deny.toml sets `[advisories] unsound = \"{scope}\"`, not \"all\". Only \"all\" \
+             reports unsoundness in transitive dependencies, and every other value of this key \
+             makes the `deny` job *greener* rather than redder, so nothing else will tell you it \
+             changed. Measured on this tree (SAK-236) with RUSTSEC-2024-0404 (`anstream` 0.6.7) \
+             reached only through `clap 4.5.0 -> clap_builder 4.5.0`: \"all\" and \"transitive\" \
+             exit 1 and name the advisory, while \"workspace\" and \"none\" exit 0 with \
+             `advisories ok` on the identical tree. Unsoundness is memory corruption, and a \
+             transitive one is still a question about a direct dependency we chose."
+        )),
+        None => Err(
+            "deny.toml has no `[advisories] unsound` setting, so it runs at the \
+                     cargo-deny default of \"workspace\" and reports no unsound advisory in any \
+                     transitive dependency. That is the same blind spot SAK-225 closed for \
+                     `unmaintained`, one key to the left and never written down. Measured \
+                     (SAK-236): with RUSTSEC-2024-0404 (`anstream` 0.6.7) purely transitive, no \
+                     key exits 0 with `advisories ok` and is byte-identical to \
+                     `unsound = \"workspace\"`, while `unsound = \"transitive\"` exits 1 on the \
+                     same tree. Set it to \"all\" explicitly."
+                .into(),
+        ),
+    }
+}
+
+/// The official RustSec advisory database, with the spellings that mean it.
+const OFFICIAL_ADVISORY_DB: &str = "https://github.com/rustsec/advisory-db";
+
+/// Reduce an advisory-database URL to a comparable form.
+///
+/// A trailing slash and a `.git` suffix both name the same repository — the
+/// suffix form was measured to work (SAK-236: it exits 1 and names the same
+/// advisory) — so neither may be the reason this guard fails.
+fn same_advisory_db(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/').to_ascii_lowercase();
+    trimmed
+        .strip_suffix(".git")
+        .unwrap_or(&trimmed)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// `Err` unless the advisory database cargo-deny reads is still the official one.
+///
+/// Every other loosening this file guards against leaves the policy visible and
+/// only changes how strictly it is applied. This one leaves every `deny` in
+/// place and changes what the database is willing to mention, which makes it the
+/// only edit here that is invisible both to the `deny` job and to a reader of
+/// the diff — the URL of a fork looks exactly like the URL of the real thing.
+///
+/// SAK-228 established that failing to *fetch* a database fails closed, in three
+/// different ways. What was unmeasured was a database that fetches cleanly and
+/// has been edited. Measured now (SAK-236) against local forks of advisory-db
+/// served over `git daemon`, tree fixed with `shlex = "=1.2.0"`
+/// (RUSTSEC-2024-0006), only this key moving:
+///
+///   official URL (ships)              exit 1   `error[vulnerability]` named
+///   fork with zero advisories         exit 1   fails to load -> fail closed
+///   fork that HAS the advisory        exit 1   control: the fork is really used
+///   same fork, that one file deleted  exit 0   `advisories ok`          <- hole
+///   thinned fork + official URL       exit 1   control: URLs are a union
+///   official URL + `.git`             exit 1   another spelling, still works
+///   key deleted                       exit 1   the default is the official DB
+///   `db-urls = []`                    exit 1   empty is the default too
+///
+/// The two forks differ by exactly one file in `git ls-tree`. The control arm is
+/// what makes the hole legible: without it, the green could mean the fork was
+/// never fetched at all rather than that it was fetched and was quiet.
+///
+/// Hence the three decisions below. Absence passes, because the default is this
+/// database. An empty list passes, because that was measured to be the default
+/// too. A non-empty list must *contain* the official URL rather than equal it,
+/// because several URLs were measured to be a union, so an extra entry can only
+/// add advisories and never remove one.
+///
+/// A live `db-urls` line this reader cannot parse is a failure, for the reason
+/// SAK-235 gave for `targets`: cargo-deny rejects the scalar form by itself
+/// (`error[wanted]: expected an array`, measured), so today this is belt and
+/// braces — it is here so that a form this guard does not understand can never
+/// be the thing that makes it pass.
+fn check_advisory_db_is_the_official_one(deny: &str) -> Result<(), String> {
+    if setting(deny, "db-urls").is_none() {
+        return Ok(());
+    }
+
+    match setting_array(deny, "db-urls") {
+        Some(urls) if urls.is_empty() => Ok(()),
+        Some(urls)
+            if urls
+                .iter()
+                .any(|url| same_advisory_db(url) == same_advisory_db(OFFICIAL_ADVISORY_DB)) =>
+        {
+            Ok(())
+        }
+        Some(urls) => Err(format!(
+            "deny.toml sets `[advisories] db-urls = {urls:?}`, which does not include the \
+             official RustSec database `{OFFICIAL_ADVISORY_DB}`. That one line decides everything \
+             the `advisories` check is able to know, and pointing it elsewhere loosens no policy \
+             at all — every `deny` in this file stays `deny` and the database simply stops \
+             mentioning things. Measured on this tree (SAK-236) with the vulnerable `shlex` 1.2.0 \
+             (RUSTSEC-2024-0006): a fork that still carries the advisory exits 1 and names it, \
+             and the same fork with that one file deleted — a one-file difference in \
+             `git ls-tree` — exits 0 with `advisories ok`. An empty database at least fails \
+             closed; a thinned one is silent, and neither `maximum-db-staleness` nor \
+             `-D advisory-not-detected` notices. Adding URLs alongside the official one is fine \
+             and was measured to be a union; replacing it is not. Deleting the key is fine too, \
+             because the default is this same database."
+        )),
+        None => Err(format!(
+            "deny.toml has a live `[advisories] db-urls` line that is not an array, so this guard \
+             cannot tell which advisory databases the gate reads and must not report the source \
+             as official. cargo-deny rejects the scalar form by itself — measured on this tree \
+             (SAK-236), `db-urls = \"{OFFICIAL_ADVISORY_DB}\"` exits 1 with \
+             `error[wanted]: expected an array` and never runs the check — so today this branch \
+             is belt and braces, for the reason SAK-235 gave for `[graph] targets`: a form this \
+             reader does not understand must never be what makes it pass. Write it as an array, \
+             or delete the key and take the default."
+        )),
+    }
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -930,6 +1081,20 @@ fn deny_toml_fails_on_an_allowed_source_that_nothing_comes_from() {
 #[test]
 fn deny_toml_leaves_every_build_target_in_the_graph() {
     if let Err(reason) = check_graph_covers_every_target(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_reports_unsound_advisories_for_the_whole_graph() {
+    if let Err(reason) = check_unsound_scope_is_all(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_reads_the_official_advisory_database() {
+    if let Err(reason) = check_advisory_db_is_the_official_one(&repo_file("deny.toml")) {
         panic!("{reason}");
     }
 }
@@ -1877,5 +2042,187 @@ targets = [\"x86_64-unknown-linux-gnu\"]
         // Nor may a trailing comment hide a live entry.
         let deny = "targets = [\"x86_64-unknown-linux-gnu\"]  # just for CI speed\n";
         assert!(check_graph_covers_every_target(deny).is_err());
+    }
+
+    #[test]
+    fn the_unsound_scope_the_repository_ships_passes() {
+        assert!(check_unsound_scope_is_all("unsound = \"all\"\n").is_ok());
+    }
+
+    /// The regression, and the value the file ran at before SAK-236 without
+    /// ever saying so. Measured: identical to the key being absent.
+    #[test]
+    fn narrowing_the_unsound_scope_to_the_workspace_fails() {
+        let error = check_unsound_scope_is_all("unsound = \"workspace\"\n")
+            .expect_err("\"workspace\" must fail");
+        assert!(
+            error.contains("RUSTSEC-2024-0404") && error.contains("workspace"),
+            "{error}"
+        );
+    }
+
+    /// `"transitive"` is red on the measured tree, but it is still a narrowing:
+    /// it drops the workspace's own crates. The guard wants "all", not "any
+    /// value that happened to be red in one experiment".
+    #[test]
+    fn narrowing_the_unsound_scope_to_transitive_only_fails() {
+        assert!(check_unsound_scope_is_all("unsound = \"transitive\"\n").is_err());
+    }
+
+    /// The kill switch. One word and unsound advisories stop being reported at
+    /// all — measured with `const-cstr` 0.3.0 as a direct dependency, where it
+    /// takes the check from exit 1 to `advisories ok`.
+    #[test]
+    fn disabling_the_unsound_check_fails() {
+        assert!(check_unsound_scope_is_all("unsound = \"none\"\n").is_err());
+    }
+
+    /// The quietest form of the regression and the one that actually shipped:
+    /// the key is simply not there, cargo-deny defaults to `"workspace"`, and
+    /// the file reads as though the question was never asked. This is the arm
+    /// that differs from `unmaintained`, which was at least written down.
+    #[test]
+    fn omitting_the_unsound_setting_entirely_fails() {
+        let deny = "[advisories]\nyanked = \"deny\"\nunmaintained = \"all\"\nignore = []\n";
+        let error = check_unsound_scope_is_all(deny).expect_err("an absent key must fail");
+        assert!(error.contains("workspace"), "{error}");
+    }
+
+    /// `deny.toml` now writes this key out five times in the arms table above
+    /// it, including `unsound = "workspace"` and `unsound = "none"`. None of
+    /// those may be read as the setting, or deleting a comment would "fix" a
+    /// file whose live line is wrong — and documenting the measurement would
+    /// break the guard that the measurement justified.
+    #[test]
+    fn the_comments_about_the_unsound_scope_are_not_read_as_the_scope() {
+        let deny = "\
+#   no key (what shipped)      exit 0   `advisories ok`
+#   `unsound = \"all\"`          exit 1   RUSTSEC-2024-0404
+#   `unsound = \"workspace\"`    exit 0   control: identical to no key
+#   `unsound = \"none\"`         exit 0   control: the kill switch
+unsound = \"all\"
+";
+        assert!(check_unsound_scope_is_all(deny).is_ok());
+
+        // A commented-out good value must not rescue a live bad one.
+        let deny = "# unsound = \"all\"\nunsound = \"workspace\"\n";
+        assert!(check_unsound_scope_is_all(deny).is_err());
+
+        // Nor may a trailing comment hide the live value.
+        let deny = "unsound = \"none\"  # back to all once the backlog is clear\n";
+        assert!(check_unsound_scope_is_all(deny).is_err());
+
+        // And prose alone is not the setting.
+        let deny = "# `unsound` is the sibling scope enum of `unmaintained`.\n";
+        assert!(check_unsound_scope_is_all(deny).is_err());
+    }
+
+    #[test]
+    fn the_advisory_database_the_repository_ships_passes() {
+        let deny = "db-urls = [\"https://github.com/rustsec/advisory-db\"]\n";
+        assert!(check_advisory_db_is_the_official_one(deny).is_ok());
+    }
+
+    /// The hole, as measured: a fork of advisory-db with one advisory file
+    /// deleted takes the check from exit 1 to `advisories ok` while every
+    /// `deny` in the file stays exactly where it was.
+    #[test]
+    fn a_thinned_fork_of_the_advisory_database_fails() {
+        let deny = "db-urls = [\"https://github.com/acme/advisory-db\"]\n";
+        let error = check_advisory_db_is_the_official_one(deny)
+            .expect_err("a fork must not be accepted as the advisory source");
+        assert!(
+            error.contains("RUSTSEC-2024-0006") && error.contains("rustsec/advisory-db"),
+            "{error}"
+        );
+    }
+
+    /// Absence passes, and this is measured rather than assumed: with the key
+    /// deleted the check still exits 1 and names RUSTSEC-2024-0006, because the
+    /// cargo-deny default is this same database. Failing on absence would be
+    /// wrong *and* would make the guard a nuisance.
+    #[test]
+    fn omitting_the_database_url_passes() {
+        let deny = "[advisories]\nyanked = \"deny\"\nunsound = \"all\"\nignore = []\n";
+        assert!(check_advisory_db_is_the_official_one(deny).is_ok());
+    }
+
+    /// An empty list is the default too (measured: exit 1, advisory named), so
+    /// it must not fail. Without this, the guard would be passing on the key
+    /// merely containing something.
+    #[test]
+    fn an_empty_database_url_list_passes() {
+        assert!(check_advisory_db_is_the_official_one("db-urls = []\n").is_ok());
+        assert!(check_advisory_db_is_the_official_one("db-urls = [\n]\n").is_ok());
+    }
+
+    /// Several URLs are a union, measured: the thinned fork beside the official
+    /// one still exits 1 and names the advisory. So an extra entry can only add
+    /// advisories, and requiring `== [official]` would forbid a harmless thing.
+    #[test]
+    fn an_extra_database_url_beside_the_official_one_passes() {
+        let deny = "db-urls = [\"https://github.com/acme/advisory-db\", \
+                    \"https://github.com/rustsec/advisory-db\"]\n";
+        assert!(check_advisory_db_is_the_official_one(deny).is_ok());
+
+        // Including when the array is reformatted across lines, which is how a
+        // second entry would most naturally arrive.
+        let deny = "db-urls = [\n  \"https://github.com/acme/advisory-db\",\n  \
+                    \"https://github.com/rustsec/advisory-db\",\n]\n";
+        assert!(check_advisory_db_is_the_official_one(deny).is_ok());
+    }
+
+    /// The spellings that name the same repository. The `.git` suffix was
+    /// measured to work (exit 1, same advisory), so none of these may be the
+    /// reason the guard fails.
+    #[test]
+    fn the_other_spellings_of_the_official_database_pass() {
+        for url in [
+            "https://github.com/rustsec/advisory-db.git",
+            "https://github.com/rustsec/advisory-db/",
+            "https://github.com/rustsec/advisory-db.git/",
+            "https://github.com/RustSec/advisory-db",
+        ] {
+            let deny = format!("db-urls = [\"{url}\"]\n");
+            assert!(
+                check_advisory_db_is_the_official_one(&deny).is_ok(),
+                "{url} names the official database"
+            );
+        }
+    }
+
+    /// A live line this reader cannot parse fails closed rather than being
+    /// reported as the official source. cargo-deny rejects the scalar form
+    /// itself today (`error[wanted]: expected an array`, measured), so this is
+    /// belt and braces — same reasoning as the `targets` scalar branch.
+    #[test]
+    fn a_database_url_line_that_is_not_an_array_fails() {
+        let deny = "db-urls = \"https://github.com/rustsec/advisory-db\"\n";
+        let error = check_advisory_db_is_the_official_one(deny)
+            .expect_err("a scalar must not be read as the official database");
+        assert!(error.contains("not an array"), "{error}");
+    }
+
+    /// `deny.toml` quotes this URL in prose above the live line, and the arms
+    /// table describes forks of it. None of that may stand in for the setting,
+    /// in either direction.
+    #[test]
+    fn the_comments_about_the_database_are_not_read_as_the_setting() {
+        // Prose mentioning the official URL must not rescue a live fork.
+        let deny = "\
+# Where the advisories come from: https://github.com/rustsec/advisory-db
+#   official URL (ships)    exit 1   `error[vulnerability]` named
+db-urls = [\"https://github.com/acme/advisory-db\"]
+";
+        assert!(check_advisory_db_is_the_official_one(deny).is_err());
+
+        // A commented-out key must not count as the key being present either —
+        // absence is legal, so this has to pass for the right reason.
+        let deny = "# db-urls = [\"https://github.com/acme/advisory-db\"]\nignore = []\n";
+        assert!(check_advisory_db_is_the_official_one(deny).is_ok());
+
+        // Nor may a trailing comment hide a live fork.
+        let deny = "db-urls = [\"https://github.com/acme/advisory-db\"]  # mirror, faster\n";
+        assert!(check_advisory_db_is_the_official_one(deny).is_err());
     }
 }
