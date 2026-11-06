@@ -826,16 +826,22 @@ impl Firestore for FirestoreApi {
         // Compiled before anything is read, so an unsupported query shape fails
         // immediately instead of after a collection scan.
         let query = Query::compile(structured)?;
+        // Both reads hand the store the query's pre-filter. A backend may use
+        // it to return fewer rows, but only ever a superset of the matching
+        // ones — `evaluate` below still decides the result, so a backend that
+        // pushes nothing down answers identically.
+        let prefilter = query.prefilter();
         let documents = if query.all_descendants() {
             // A collection group query reads every collection with this id
             // anywhere beneath the parent, which is the scan the Datastore
-            // kind queries already needed.
+            // kind queries already needed. It is also the read that most wants
+            // narrowing, being the widest one here.
             self.store
-                .scan_kind(&parent.full(), query.collection_id())
+                .scan_kind_filtered(&parent.full(), query.collection_id(), prefilter)
                 .await?
         } else {
             self.store
-                .scan_collection(&parent.full(), query.collection_id())
+                .scan_collection_filtered(&parent.full(), query.collection_id(), prefilter)
                 .await?
         };
         let results = query.evaluate(documents);

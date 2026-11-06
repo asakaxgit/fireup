@@ -8,18 +8,27 @@
 //!
 //! ## Why the engine is here and not in the store
 //!
-//! Filtering, ordering, and limiting run in the server process against
-//! documents fetched by [`Store::scan_collection`](crate::local::store::Store::scan_collection),
-//! rather than being pushed into SQL per backend. That is a deliberate
-//! trade-off:
+//! Filtering, ordering, and limiting are *decided* in the server process
+//! against documents fetched from the store, rather than being reimplemented
+//! as SQL per backend. That is a deliberate trade-off:
 //!
 //! - **One set of semantics.** Firestore's value ordering, its treatment of
 //!   missing fields, and `NaN` handling are subtle. Expressed once in Rust,
 //!   the in-memory and PostgreSQL stores cannot disagree about what a query
 //!   means; expressed as SQL per backend, they would.
-//! - **Cost.** A query reads the whole collection. For the local-development
-//!   data volumes `fireup local` exists for that is fine, and it is recorded
-//!   as a known limit in `docs/local/README.md` rather than hidden.
+//! - **Cost.** Deciding in-process means reading candidate documents out of
+//!   the store.
+//!
+//! The second bullet is what [`Query::prefilter`] exists to reduce. A backend
+//! may use the compiled filter to narrow *which* documents it hands back, but
+//! it never gets to decide the result: a pre-filter must return a **superset**
+//! of the matching documents, and [`Query::evaluate`] still has the only vote
+//! on what matches. That is what lets
+//! [`PostgresStore`](crate::local::postgres_store::PostgresStore) push
+//! equality and range predicates into SQL — where an index can serve them —
+//! without the two backends being able to disagree about a query's meaning.
+//! [`MemoryStore`](crate::local::store::MemoryStore) ignores the pre-filter
+//! entirely, so CI exercises exactly the semantics in this file.
 //!
 //! Semantics come from the public Firestore query documentation and the
 //! `googleapis` protos vendored under `proto/`. No Firebase emulator code or
@@ -142,6 +151,17 @@ impl FieldPath {
         Ok(Self { segments })
     }
 
+    /// The path's segments, outermost first. Always at least one.
+    ///
+    /// Public so a store backend can translate the path into its own addressing
+    /// — the PostgreSQL store turns them into a JSONB path. Deliberately not a
+    /// re-joined string: a backend that reassembled `a.b` and looked for a
+    /// field of that name would silently find nothing, which on a query means
+    /// dropping documents that should have matched.
+    pub fn segments(&self) -> &[String] {
+        &self.segments
+    }
+
     /// The value this path addresses in `fields`, if any.
     ///
     /// Only maps are walked into. Firestore field paths do not index into
@@ -199,8 +219,12 @@ fn graft(fields: &mut HashMap<String, Value>, segments: &[String], value: Value)
 }
 
 /// A field path a query can address.
+///
+/// Public so a store backend can inspect a compiled filter for pushdown; the
+/// variants carry no behaviour, so a backend can read the shape of a query but
+/// cannot redefine what it means.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Path {
+pub enum Path {
     /// `__name__`: the document's resource name.
     Name,
     /// A field of the document, possibly nested.
@@ -239,7 +263,7 @@ impl Path {
 
 /// A comparison a query can make against one field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Comparison {
+pub enum Comparison {
     Equal,
     NotEqual,
     LessThan,
@@ -282,7 +306,7 @@ impl Comparison {
 
 /// A presence/`NaN` test, which takes no value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Presence {
+pub enum Presence {
     Null,
     NotNull,
     Nan,
@@ -305,7 +329,7 @@ impl Presence {
 
 /// A compiled filter tree.
 #[derive(Debug, Clone)]
-enum Predicate {
+pub enum Predicate {
     /// Every child must match.
     All(Vec<Predicate>),
     /// At least one child must match.
@@ -699,6 +723,31 @@ pub struct Results {
     pub skipped: usize,
 }
 
+/// What a store backend is allowed to use to narrow a scan.
+///
+/// A backend that acts on this must return a **superset** of the documents the
+/// query matches: letting a non-matching document through costs one wasted
+/// in-process comparison, while dropping a matching one is a wrong answer.
+/// Anything a backend cannot translate exactly it must therefore translate to
+/// "keep the row" rather than guess.
+///
+/// Deliberately not carrying `offset`, `limit`, or the cursors: all three are
+/// *positional*, resolved against the ordered result [`Query::evaluate`]
+/// produces after the pre-filter has already run. A backend has no way to know
+/// which rows they would keep.
+#[derive(Debug, Clone, Copy)]
+pub struct Prefilter<'a> {
+    /// The query's `where` clause, or `None` for an unfiltered query.
+    pub filter: Option<&'a Predicate>,
+    /// Field paths the query orders by, which a matching document must carry.
+    ///
+    /// Not part of `filter`, but just as restrictive: Firestore cannot order a
+    /// document that has no value for a sort field, so such a document is
+    /// absent from the result. `__name__` is excluded because every document
+    /// has one.
+    pub required_fields: &'a [FieldPath],
+}
+
 /// A compiled, runnable query.
 #[derive(Debug, Clone)]
 pub struct Query {
@@ -715,6 +764,10 @@ pub struct Query {
     start: Option<Bound>,
     /// The `end_at` cursor, if the query is bounded above.
     end: Option<Bound>,
+    /// The field paths of `order`, which [`Query::admits`] requires a document
+    /// to carry. Precomputed so [`Query::prefilter`] can hand them out by
+    /// reference.
+    required_fields: Vec<FieldPath>,
     offset: usize,
     limit: Option<usize>,
     /// `select` projection: the field paths to return, if restricted.
@@ -821,6 +874,14 @@ impl Query {
             }
         };
 
+        let required_fields = order
+            .iter()
+            .filter_map(|key| match &key.path {
+                Path::Field(field) => Some(field.clone()),
+                Path::Name => None,
+            })
+            .collect();
+
         Ok(Self {
             collection_id: selector.collection_id.clone(),
             all_descendants: selector.all_descendants,
@@ -828,6 +889,7 @@ impl Query {
             order,
             start,
             end,
+            required_fields,
             offset,
             limit,
             projection,
@@ -844,6 +906,15 @@ impl Query {
     /// parent, rather than only the one directly under it.
     pub fn all_descendants(&self) -> bool {
         self.all_descendants
+    }
+
+    /// What a store backend may use to narrow its scan. See [`Prefilter`] for
+    /// the contract a backend has to honour.
+    pub fn prefilter(&self) -> Prefilter<'_> {
+        Prefilter {
+            filter: self.filter.as_ref(),
+            required_fields: &self.required_fields,
+        }
     }
 
     /// Filter, order, page, and project `documents`.
