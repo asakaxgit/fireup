@@ -382,6 +382,16 @@ as of SAK-190; realtime listeners as of SAK-189, below.
 - **Known limit:** the feed is in-process. With `--postgres-url`, a write by a
   *different* process does not wake these listeners — nothing polls the table.
 
+**Verified on 2026-11-06**, rebased onto `main` at the SAK-190 merge: `cargo
+test --lib` (430), `--test local_firestore_listen_tests` (15, over the real
+bidirectional gRPC stream), `--test local_firestore_tests` (46), `--test
+local_datastore_tests` (6), `--test local_auth_tests` (15), `--test
+local_postgres_store_tests` (7, against a throwaway cluster), `--test
+integration_tests` (55), `--test cli_exit_code_tests` (7), and
+`scripts/smoke-local-firestore.sh` **50/50 against both stores** with Google's
+official `@google-cloud/firestore` client — including `onSnapshot()` on a
+document, on a missing document, and on a query, with `docChanges()` reporting
+`added`/`removed` as documents enter and leave the result set.
 
 **Phase L (SAK-168, November 4 2026)** — Firebase Auth / Identity Platform, in
 parallel with Phase 2 and without waiting for a Phase 2 exit:
