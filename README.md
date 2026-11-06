@@ -341,15 +341,39 @@ The application uses structured logging with the `tracing` crate:
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Deploying the migrator |
 | [docs/INTEGRATION_TESTING.md](docs/INTEGRATION_TESTING.md) | The integration test suite |
 | [docs/licenses/FIREBASE_GCP_LOCAL.md](docs/licenses/FIREBASE_GCP_LOCAL.md) | Licence and attribution ledger for everything Google/Firebase-related |
+| [docs/licenses/CARGO_LICENSE_AUDIT.md](docs/licenses/CARGO_LICENSE_AUDIT.md) | `cargo license` audit that cleared Apache-2.0 for the dependency tree |
 | [tests/fixtures/README.md](tests/fixtures/README.md) | The managed-export fixtures and their binary format |
 
 ## License
 
-MIT License.
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+```
+Copyright 2025-2026 Saks Industries
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+**Trademarks.** The Fireup name, mark, lockup, and other identity files under
+[`brand/`](brand/) are **not** licensed under Apache-2.0 — see
+[`brand/LICENSE`](brand/LICENSE). Using the code does not grant permission to
+use the brand.
 
 Third-party material is recorded in
 [docs/licenses/FIREBASE_GCP_LOCAL.md](docs/licenses/FIREBASE_GCP_LOCAL.md) — most
 notably the `.proto` definitions under `proto/google/`, vendored unmodified from
 [googleapis](https://github.com/googleapis/googleapis) (Apache-2.0) at a pinned
-commit. Fireup is an independent implementation of public Google API contracts
-and is not affiliated with or endorsed by Google.
+commit. The dependency-tree audit that cleared Apache-2.0 for this repo is in
+[docs/licenses/CARGO_LICENSE_AUDIT.md](docs/licenses/CARGO_LICENSE_AUDIT.md).
+Fireup is an independent implementation of public Google API contracts and is
+not affiliated with or endorsed by Google.

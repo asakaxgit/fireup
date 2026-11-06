@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Migration tool for Firestore to PostgreSQL with dual compatibility"
 authors = ["Fireup Team"]
-license = "MIT"
+license = "Apache-2.0"
 
 [dependencies]
 # Async runtime

@@ -1,6 +1,8 @@
 # Fireup — Firebase / GCP local & API license ledger
 
-**Status:** current as of SAK-174 — seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo before it; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth landed before it
+> First-party Fireup code is licensed under **Apache-2.0** (see root `LICENSE`). Brand assets under `brand/` are carved out — see `brand/LICENSE`. Dependency-tree audit: [`CARGO_LICENSE_AUDIT.md`](CARGO_LICENSE_AUDIT.md).
+
+**Status:** current as of SAK-196 — first-party Apache-2.0 + brand trademark carve-out; dependency audit recorded. Prior: SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -249,25 +251,37 @@ instead of asserting the gap. It still uses Google's own open-source
 documented, non-reverse-engineering way to verify API compatibility. No version
 range changed.
 
+
+### SAK-196 notes — repo licence decision
+
+**No new Google or Firebase artefact, no new proto, no new Rust dependency, and
+no new npm package.** Declares first-party Fireup code as **Apache-2.0** (root
+`LICENSE` + `Cargo.toml` `license = "Apache-2.0"`), records the
+`cargo license` audit in `docs/licenses/CARGO_LICENSE_AUDIT.md`, and carves
+brand/trademark assets out under `brand/LICENSE`. Vendored googleapis protos
+remain Apache-2.0 at the existing pin; this change only settles the previously
+undeclared (and inconsistently MIT-labelled) first-party grant.
+
 ## Existing Fireup notes (pre-local-cloud)
 
 | Dependency | Version / pin | SPDX | Upstream | How we use it | Attribution OK? | Decision |
 |---|---|---|---|---|---|---|
 | `prost` / `prost-types` / `prost-build` | see `Cargo.toml` | Apache-2.0 | crates.io | Protobuf decode/codegen for export EntityProto / Datastore entities | Yes (crate license) | Public OSS; not Google proprietary emulator code |
-| Vendored / hand-written wire decoding in `src/leveldb_parser/` | first-party | MIT (repo) | Fireup | Managed export parsing | N/A | First-party; based on public LevelDB / documented export formats — not RE of Firebase Emulator Suite |
+| Vendored / hand-written wire decoding in `src/leveldb_parser/` | first-party | Apache-2.0 (repo) | Fireup | Managed export parsing | N/A | First-party; based on public LevelDB / documented export formats — not RE of Firebase Emulator Suite |
 
 ## Compliance checklist, per phase
 
 The PR checklist in `.cursor/rules/firebase-gcp-compliance.mdc`, answered as each
 phase landed.
 
-| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 |
-|---|---|---|---|---|---|
-| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos |
-| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added |
-| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated/OOB → `501` | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused |
-| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged |
-| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added |
+| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 | SAK-196 |
+|---|---|---|---|---|---|---|
+| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected |
+| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added | Yes — none added; first-party SPDX corrected to Apache-2.0; audit linked |
+| For a REST/JSON surface: public sources named | n/a / prior phases | Yes | n/a (protos) | n/a | n/a | n/a — no new surface |
+| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated/OOB → `501` | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a |
+| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged | Yes — retained in README licence section |
+| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added | n/a — nothing added |
 
 ## How to add a row
 

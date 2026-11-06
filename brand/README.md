@@ -41,6 +41,9 @@ published — a deployed site, an announcement, a store listing, an avatar. See
 
 ---
 
+**Licence.** Brand assets in this directory are **not** covered by the repo’s Apache-2.0 licence. See [`LICENSE`](LICENSE) in this folder (trademark / all-rights-reserved carve-out).
+
+
 ## The mark
 
 An **F whose top bar runs out and catches**, the fire blowing up and to the
