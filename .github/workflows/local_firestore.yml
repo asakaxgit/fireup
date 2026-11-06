@@ -41,7 +41,11 @@ jobs:
           key: ${{ runner.os }}-local-firestore-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Data plane unit tests
-        run: cargo test --lib local::
+        # Quoted on purpose: a trailing `::` in an unquoted scalar makes YAML
+        # read the line as a mapping key, and GitHub then rejects the whole
+        # file — every push produced a "workflow file issue" failure until this
+        # was quoted, so the job had never actually run.
+        run: "cargo test --lib local::"
 
       - name: Firestore gRPC tests
         run: cargo test --test local_firestore_tests
