@@ -89,6 +89,40 @@
 //!    that edit, which is the same argument as (3) and (4): the setting is the
 //!    tool's own input.
 //!
+//! 7. **`[advisories] yanked` stays at `"deny"`, and yank checking stays on.** A
+//!    yanked crate in `Cargo.lock` is a version that was withdrawn from
+//!    crates.io *after* we pinned it — usually because it was broken or unsound
+//!    — and it is the one supply-chain fact `Cargo.lock` is actively working to
+//!    preserve, since a pinned yanked version keeps resolving for as long as the
+//!    lock file says so. Measured on this tree (SAK-231) with the lock
+//!    downgraded to the yanked `async-trait` 0.1.90: the shipped config exits 1
+//!    with `error[yanked]` and `advisories FAILED`, `"warn"` exits 0 with
+//!    `warning[yanked]`, and deleting the line exits 0 the same way — the
+//!    default is `warn`.
+//!
+//!    This one needs *two* assertions rather than one, which is the reason it is
+//!    listed separately from (3) and (4). `[advisories]` also has
+//!    `disable-yank-checking`, and setting it to `true` turns the check off
+//!    without touching the `yanked` line at all: measured on the same tree,
+//!    `yanked = "deny"` plus `disable-yank-checking = true` exits 0 and prints
+//!    **no yanked diagnostic of any kind**, which is quieter than either
+//!    weakening above. A guard that only read `yanked` would call that config
+//!    correct. Where an enforcement key has a separate kill switch beside it,
+//!    asserting the policy's value is not evidence that the policy runs.
+//!
+//!    (`disable-yank-checking = false` is accepted, and was measured rather than
+//!    assumed: the explicit `false` exits 1 on the yanked lock exactly like the
+//!    absent key.)
+//!
+//!    The control arm matters here more than elsewhere, because the mutation is
+//!    a lock-file edit rather than a config edit: with the lock back at
+//!    `async-trait` 0.1.92 the shipped config exits 0 with no diagnostics, so
+//!    the red in the first arm is the setting meeting a yanked crate and not the
+//!    downgrade by itself. The measurement deliberately uses `async-trait`
+//!    0.1.90 and not the yanked `tokio` 1.54.0: tokio 1.54.0 also carries
+//!    RUSTSEC-2026-0384, so it gives exit 1 for two reasons at once, while
+//!    `advisory-db/crates/async-trait/` is empty.
+//!
 //! Reading `Cargo.lock` as text rather than running `cargo metadata` is
 //! deliberate: it keeps the test free of a toml dependency and of a subprocess,
 //! and the two fields it wants (`name`, `version`) are the first two lines of
@@ -577,6 +611,52 @@ fn check_sources_are_crates_io_only(deny: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `Err` unless `[advisories] yanked` is `"deny"` **and** nothing has switched
+/// yank checking off beside it.
+///
+/// Two assertions, because the second one is the only thing that can report the
+/// quietest version of this regression. `disable-yank-checking = true` leaves
+/// `yanked = "deny"` untouched and still produces a tree with zero yanked
+/// diagnostics, so the value of the policy key says nothing on its own about
+/// whether the policy runs.
+fn check_yanked_is_denied(deny: &str) -> Result<(), String> {
+    match setting(deny, "yanked").as_deref() {
+        Some("deny") => {}
+        Some(level) => {
+            return Err(format!(
+                "deny.toml sets `[advisories] yanked = \"{level}\"`, not \"deny\". A yanked \
+                 version in Cargo.lock was withdrawn from crates.io after we pinned it, and the \
+                 lock file is what keeps it resolving. Measured on this tree (SAK-231) with the \
+                 lock downgraded to the yanked async-trait 0.1.90: \"deny\" exits 1 with \
+                 `error[yanked]` and `advisories FAILED`, while the same tree at this value \
+                 exits 0 with only `warning[yanked]`."
+            ));
+        }
+        None => {
+            return Err(
+                "deny.toml has no `[advisories] yanked` setting, which is the same as warning \
+                 and quieter: cargo-deny's default is `warn`. Measured on this tree (SAK-231) \
+                 with the lock downgraded to the yanked async-trait 0.1.90 and this line \
+                 deleted, `cargo deny check advisories` printed `warning[yanked]`, reported \
+                 `advisories ok` and exited 0. Set it to \"deny\"."
+                    .into(),
+            );
+        }
+    }
+
+    match setting(deny, "disable-yank-checking").as_deref() {
+        None | Some("false") => Ok(()),
+        Some(value) => Err(format!(
+            "deny.toml sets `[advisories] disable-yank-checking = {value}`, which switches the \
+             yanked check off whatever `yanked` says. This is the regression that does not show \
+             up in the `yanked` line: measured on this tree (SAK-231) with the lock downgraded \
+             to the yanked async-trait 0.1.90, `yanked = \"deny\"` with this key set exits 0 and \
+             prints no yanked diagnostic at all — not even the `warning[yanked]` that weakening \
+             `yanked` itself would leave behind. Delete the key, or set it to false."
+        )),
+    }
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -646,6 +726,13 @@ fn deny_toml_refuses_a_wildcard_dependency() {
 #[test]
 fn deny_toml_allows_crates_io_as_the_only_source() {
     if let Err(reason) = check_sources_are_crates_io_only(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_refuses_a_yanked_crate_and_leaves_the_check_switched_on() {
+    if let Err(reason) = check_yanked_is_denied(&repo_file("deny.toml")) {
         panic!("{reason}");
     }
 }
@@ -1245,5 +1332,96 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
         // A plain scalar is not an array, and must not be reported as an empty
         // one — that would turn a typo into a silent pass.
         assert_eq!(setting_array(r#"wildcards = "deny""#, "wildcards"), None);
+    }
+
+    #[test]
+    fn the_yanked_policy_the_repository_ships_passes() {
+        assert!(check_yanked_is_denied("yanked = \"deny\"\n").is_ok());
+    }
+
+    /// The regression itself. Measured on the stack tip with `Cargo.lock`
+    /// downgraded to the yanked `async-trait` 0.1.90: `"deny"` exits 1 with
+    /// `error[yanked]`, and this value exits 0 on the identical tree.
+    #[test]
+    fn warning_on_a_yanked_crate_fails() {
+        let error = check_yanked_is_denied("yanked = \"warn\"\n").expect_err("\"warn\" must fail");
+        assert!(error.contains("error[yanked]"), "{error}");
+    }
+
+    /// Deleting the line is the quieter version of the same change, and the one
+    /// a tidy-up produces: cargo-deny's default is `warn`, so the yanked crate
+    /// is still reported and the check still exits 0.
+    #[test]
+    fn omitting_the_yanked_setting_fails() {
+        let deny = "[advisories]\nunmaintained = \"all\"\nignore = []\n";
+        let error = check_yanked_is_denied(deny).expect_err("a missing setting must fail");
+        assert!(error.contains("default is `warn`"), "{error}");
+    }
+
+    /// The reason this key needs two assertions. `yanked = "deny"` is untouched
+    /// and the check is off: measured on the stack tip, zero yanked diagnostics
+    /// and exit 0, where weakening `yanked` itself at least still prints
+    /// `warning[yanked]`.
+    #[test]
+    fn disabling_yank_checking_beside_a_denied_yanked_fails() {
+        let deny = "[advisories]\nyanked = \"deny\"\ndisable-yank-checking = true\n";
+        let error = check_yanked_is_denied(deny)
+            .expect_err("a kill switch beside the policy key must fail");
+        assert!(error.contains("disable-yank-checking"), "{error}");
+        assert!(error.contains("no yanked diagnostic at all"), "{error}");
+    }
+
+    /// The allowed half of that key, measured rather than assumed: an explicit
+    /// `false` exits 1 on the yanked lock exactly like the absent key, so it
+    /// must not fail the guard.
+    #[test]
+    fn an_explicit_false_disable_yank_checking_passes() {
+        let deny = "[advisories]\nyanked = \"deny\"\ndisable-yank-checking = false\n";
+        assert!(check_yanked_is_denied(deny).is_ok());
+    }
+
+    /// The guard fails closed on anything it does not recognise, rather than
+    /// ignoring the value and reporting the config as correct. Only a literal
+    /// `false` (or no key at all) was measured as still enforcing.
+    #[test]
+    fn an_unrecognised_disable_yank_checking_value_fails() {
+        // (A quoted `"false"` is not in this list: the reader strips quotes, so
+        // it reads as `false` and passes. That is the right side to err on —
+        // cargo-deny rejects a string for a boolean key by itself, with
+        // `error[wanted]: expected a boolean`, so the config fails closed.)
+        for value in ["1", "off", "true # really", ""] {
+            let deny = format!("yanked = \"deny\"\ndisable-yank-checking = {value}\n");
+            assert!(
+                check_yanked_is_denied(&deny).is_err(),
+                "`disable-yank-checking = {value}` must not pass"
+            );
+        }
+    }
+
+    /// `deny.toml` explains both of these settings in prose above them, so a
+    /// naive `contains` finds the comment rather than the setting. Neither
+    /// direction may be confused.
+    #[test]
+    fn the_comments_about_yanked_are_not_read_as_the_settings() {
+        let deny = "\
+# `yanked = \"deny\"` makes a withdrawn version an error rather than a warning,
+# and `disable-yank-checking = true` would switch it off without touching it.
+unmaintained = \"all\"
+";
+        assert!(check_yanked_is_denied(deny).is_err());
+
+        // A commented-out good value must not rescue a live weakened one.
+        let deny = "\
+# yanked = \"deny\"
+yanked = \"warn\"
+";
+        assert!(check_yanked_is_denied(deny).is_err());
+
+        // And a commented-out kill switch is not a live one.
+        let deny = "\
+yanked = \"deny\"
+# disable-yank-checking = true
+";
+        assert!(check_yanked_is_denied(deny).is_ok());
     }
 }
