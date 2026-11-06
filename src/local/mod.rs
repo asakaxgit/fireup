@@ -17,12 +17,13 @@
 //! Current scope:
 //!
 //! * **Firestore** — document CRUD, `StructuredQuery` reads, collection
-//!   listings, and transactional writes against an in-memory **or PostgreSQL**
-//!   store, plus seeding from a managed export. Writes carry the
+//!   listings, transactional writes, and realtime `Listen` subscriptions
+//!   against an in-memory **or PostgreSQL** store, plus seeding from a managed
+//!   export. Writes carry the
 //!   [`serverTimestamp`/`increment`/`arrayUnion`/`arrayRemove` field
-//!   transforms](transforms). Realtime listeners and aggregation queries are
-//!   not served; those RPCs answer `UNIMPLEMENTED` with a message saying so,
-//!   and `docs/local/README.md` has the full fidelity matrix.
+//!   transforms](transforms). Aggregation queries are not served; those RPCs
+//!   answer `UNIMPLEMENTED` with a message saying so, and
+//!   `docs/local/README.md` has the full fidelity matrix.
 //! * **Datastore** — Lookup/RunQuery/Commit/BeginTransaction/AllocateIds on the
 //!   same store Firestore uses (kinds map to collections). GQL, aggregations,
 //!   namespaces, and property transforms answer `UNIMPLEMENTED`.
@@ -45,6 +46,7 @@ pub mod store;
 pub mod transactions;
 pub mod transforms;
 pub mod value_json;
+pub mod watch;
 
 use std::sync::Arc;
 
@@ -58,6 +60,7 @@ pub use datastore::DatastoreApi;
 pub use firestore::FirestoreApi;
 pub use postgres_store::PostgresStore;
 pub use store::{MemoryStore, SharedStore, Store};
+pub use watch::WatchHub;
 
 use crate::protos::google::datastore::v1::datastore_server::DatastoreServer;
 use crate::protos::google::firestore::v1::firestore_server::FirestoreServer;
@@ -80,6 +83,9 @@ pub struct RunningServer {
     pub users: SharedUserStore,
     /// The configuration this server was started with.
     pub config: Arc<LocalConfig>,
+    /// The change feed `Listen` streams are served from, so a caller can
+    /// publish-adjacent inspection or shut the listeners down directly.
+    pub watch: Arc<WatchHub>,
     grpc: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
     acceptor: tokio::task::JoinHandle<()>,
     shutdown: tokio::sync::watch::Sender<bool>,
@@ -91,6 +97,11 @@ impl RunningServer {
         // A send error means every receiver is already gone, i.e. the server
         // stopped on its own; nothing left to signal.
         let _ = self.shutdown.send(true);
+
+        // `Listen` streams are open-ended, and tonic's graceful shutdown waits
+        // for in-flight requests — so without this a single live listener
+        // would hold the server open forever.
+        self.watch.close();
 
         self.acceptor.await.context("local acceptor task panicked")?;
         self.grpc
@@ -167,6 +178,11 @@ pub async fn spawn_with_stores(
 ) -> Result<RunningServer> {
     config.validate()?;
 
+    // Wrapped once, here, so Firestore and Datastore write through the *same*
+    // change feed: a Datastore commit has to reach a Firestore listener,
+    // because in this store they are the same document.
+    let (store, watch) = watch::attach(store);
+
     let listener = TcpListener::bind(config.addr)
         .await
         .with_context(|| format!("failed to bind {}", config.addr))?;
@@ -181,7 +197,7 @@ pub async fn spawn_with_stores(
         tokio::sync::mpsc::channel::<Result<TcpStream, std::io::Error>>(32);
 
     let grpc = {
-        let firestore_api = FirestoreApi::new(store.clone());
+        let firestore_api = FirestoreApi::watching(store.clone(), watch.clone());
         let datastore_api = DatastoreApi::new(
             store.clone(),
             config.project_id.clone(),
@@ -260,6 +276,7 @@ pub async fn spawn_with_stores(
         store,
         users,
         config,
+        watch,
         grpc,
         acceptor,
         shutdown,
