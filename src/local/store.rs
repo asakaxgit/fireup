@@ -19,6 +19,12 @@
 //!   built from. Filtering, ordering, and limiting live in
 //!   [`query`](crate::local::query) rather than in each backend, so both
 //!   stores answer a query identically.
+//!
+//! [`Store::scan_collection_filtered`] is the one concession to backend
+//! strengths: a backend may use a query's [`Prefilter`] to return fewer rows,
+//! but only ever a superset of the matching ones, so it changes how much is
+//! read and never what a query means. The default implementation ignores the
+//! pre-filter, which is what [`MemoryStore`] uses.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
@@ -26,6 +32,7 @@ use std::sync::{Arc, RwLock};
 use prost_types::Timestamp;
 use tonic::Status;
 
+use crate::local::query::Prefilter;
 use crate::local::transforms::{self, FieldTransform};
 use crate::protos::google::firestore::v1::{Document, Value};
 
@@ -419,6 +426,30 @@ pub trait Store: Send + Sync + 'static {
         collection_id: &str,
     ) -> StoreResult<Vec<Document>>;
 
+    /// Like [`Store::scan_collection`], but allowed to leave out documents the
+    /// query cannot match.
+    ///
+    /// The contract is deliberately one-sided: the result must contain **every**
+    /// document [`scan_collection`](Store::scan_collection) would return that
+    /// `prefilter` can match, and may contain any number of documents that it
+    /// cannot. A backend that drops a matching row produces a wrong query
+    /// result; a backend that keeps a non-matching row only costs one in-process
+    /// comparison, which the caller was going to do anyway.
+    ///
+    /// The default implementation returns the whole collection. That is always
+    /// correct, so a backend opts into pushdown rather than having to implement
+    /// it — and `MemoryStore` deliberately does not, which keeps the in-process
+    /// engine the thing CI tests.
+    async fn scan_collection_filtered(
+        &self,
+        parent: &str,
+        collection_id: &str,
+        prefilter: Prefilter<'_>,
+    ) -> StoreResult<Vec<Document>> {
+        let _ = prefilter;
+        self.scan_collection(parent, collection_id).await
+    }
+
     /// Every document whose collection id is `kind` anywhere under
     /// `documents_root`, ordered by resource name.
     ///
@@ -426,6 +457,23 @@ pub trait Store: Send + Sync + 'static {
     /// ancestry; Firestore collection reads do not. This is the store shape
     /// that makes the two APIs share one table without lying about either.
     async fn scan_kind(&self, documents_root: &str, kind: &str) -> StoreResult<Vec<Document>>;
+
+    /// Like [`Store::scan_kind`], under the same one-sided contract as
+    /// [`Store::scan_collection_filtered`]: the result may omit documents
+    /// `prefilter` cannot match, and must omit none that it can.
+    ///
+    /// Worth having separately from the collection form because this is the
+    /// wider read — a Firestore collection group query, or a Datastore kind
+    /// query, spans every matching collection under the root rather than one.
+    async fn scan_kind_filtered(
+        &self,
+        documents_root: &str,
+        kind: &str,
+        prefilter: Prefilter<'_>,
+    ) -> StoreResult<Vec<Document>> {
+        let _ = prefilter;
+        self.scan_kind(documents_root, kind).await
+    }
 
     /// The distinct first path segments of every document name beneath
     /// `prefix`, sorted in UTF-8 byte order.
