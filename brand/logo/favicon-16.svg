@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" role="img" aria-label="Fireup">
+  <!-- MASTER, drawn for 16px. Not the 64-unit mark scaled down: at this size
+       the flame's notch lands inside a single pixel and turns to grey mush, so
+       the fire is re-cut as three whole-pixel blocks stepping up and to the
+       right off the end of the bar. One tongue, not two — at 16px there is no
+       room for a notch. stem 3px, bars 3px, counter 2px.
+       Round 5: the muzzle's pixel row is gone with the muzzle, the bar runs one
+       pixel further, and the fire's first block fills the bar's full 3px
+       height — the 64-unit mark's flush join, expressed at this size. -->
+  <rect width="16" height="16" fill="#0B1220"/>
+  <rect x="2"  y="4" width="3" height="11" fill="#FFFFFF"/>
+  <rect x="2"  y="4" width="7" height="3"  fill="#FFFFFF"/>
+  <rect x="2"  y="9" width="5" height="3"  fill="#FFFFFF"/>
+  <rect x="9"  y="4" width="4" height="3"  fill="#FF5A2B"/>
+  <rect x="10" y="2" width="3" height="2"  fill="#FF5A2B"/>
+  <rect x="11" y="1" width="2" height="1"  fill="#FF5A2B"/>
+</svg>
