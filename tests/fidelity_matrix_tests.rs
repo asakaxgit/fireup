@@ -356,9 +356,9 @@ fn every_matrix_entry_is_claimed_by_a_conformance_probe() {
 // ---------------------------------------------------------------------------
 // docs/local/COMPARISON.md — the same rule, applied to the comparison tables.
 //
-// The comparison puts Fireup beside floci-gcp, Google's emulator, and the
-// production service. The other three columns are a reading of someone else's
-// documentation and nothing here can check them. Fireup's column is different:
+// The comparison puts Fireup beside Google's emulator and the production
+// service. Those two columns are a reading of someone else's documentation and
+// nothing here can check them. Fireup's column is different:
 // it makes the same claims as the fidelity matrix, in a second place, which is
 // exactly how a document starts lying. So every comparison row whose label
 // matches a matrix row is compared against `matrix.json`, and the number of
@@ -405,8 +405,8 @@ fn the_comparison_doc_agrees_with_matrix_json_about_fireup() {
 
     let mut cross_checked = 0usize;
     for heading in COMPARISON_TABLES {
-        // Column 1 is Fireup: the tables are | subject | fireup | floci-gcp |
-        // Firebase emulator | GCP |.
+        // Column 1 is Fireup: the tables are
+        // | subject | fireup | Firebase emulator | GCP |.
         for (label, verdict) in table_rows_in(COMPARISON_DOC, &comparison, heading, Some(1)) {
             let Some(feature) = by_label.get(&label) else {
                 continue; // a product-level row with no matrix entry, by design

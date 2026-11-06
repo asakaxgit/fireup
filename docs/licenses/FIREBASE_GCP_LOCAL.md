@@ -2,7 +2,7 @@
 
 > First-party Fireup code is licensed under **Apache-2.0** (see root `LICENSE`). Brand assets under `brand/` are carved out — see `brand/LICENSE`. Dependency-tree audit: [`CARGO_LICENSE_AUDIT.md`](CARGO_LICENSE_AUDIT.md).
 
-**Status:** current as of SAK-206 — README badges, coverage, and the four-way comparison document (the first entry covering claims about third-party software). Prior: SAK-203 Datastore `property_mask` on a mutation (masked entity writes, paired with the SAK-198 property transforms); Phase 2.1 (SAK-189) Firestore `Listen` / realtime listeners; SAK-195 managed-export fidelity regression fixtures; SAK-193 Phase L.1 out-of-band email flows (no mail transport); SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
+**Status:** current as of SAK-206 — README badges, coverage, and the comparison document (the first entry covering claims about third-party software). Prior: SAK-203 Datastore `property_mask` on a mutation (masked entity writes, paired with the SAK-198 property transforms); Phase 2.1 (SAK-189) Firestore `Listen` / realtime listeners; SAK-195 managed-export fidelity regression fixtures; SAK-193 Phase L.1 out-of-band email flows (no mail transport); SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -447,7 +447,7 @@ through a mask" limit rather than leaving it half-true — the row SAK-194 had
 pinned as a `documented-divergence` is now a served row with a probe that
 asserts the deletion.
 
-### SAK-206 notes — README badges, coverage, and the four-way comparison
+### SAK-206 notes — README badges, coverage, and the comparison document
 
 **No new Google or Firebase artefact, no new proto, no new Rust dependency, and
 no new npm package.** This change adds CI workflows, a coverage script, README
@@ -455,39 +455,51 @@ badges, and `docs/local/COMPARISON.md`. It is the first change in this
 repository whose deliverable is a **statement about other people's software**,
 so the sourcing rules matter more than usual, not less.
 
+#### Scope: Google's products only, by decision
+
+The comparison was first drafted with a fourth column for a third-party
+local-cloud emulator. **The CEO's call on SAK-206 was to omit it for now**, so
+the document compares Fireup against Google's Firebase Emulator Suite, Google's
+`gcloud` Datastore emulator, and the production service — all three of them the
+thing Fireup is an independent implementation *of*, and all three documented by
+the same vendor whose API contracts we implement. That keeps this ledger's
+subject matter where it has always been.
+
+The document says in prose that other third-party emulators exist and are not
+compared yet, without naming or characterising any of them. Re-adding a
+competitor column is gated on running a conformance suite against it rather than
+reading its README (SAK-217), and on a fresh publication decision.
+
 #### What the comparison was written from
 
 | Source | Status | How it was used |
 |---|---|---|
 | `docs/local/README.md` and `tests/conformance/matrix.json` | First-party | The entire Fireup column. It is not re-typed: `cargo test --test fidelity_matrix_tests` compares every comparison row whose label matches a matrix row, so the two cannot diverge |
-| [`floci-io/floci-gcp`](https://github.com/floci-io/floci-gcp) — `README.md`, `docs/services/{firestore,datastore,firebase-auth}.md` | Public documentation of an MIT-licensed project | The floci-gcp column, as **claims its own documentation makes**. Read 2026-11-06 |
 | [Firebase Emulator Suite docs](https://firebase.google.com/docs/emulator-suite), [Firestore emulator](https://firebase.google.com/docs/emulator-suite/connect_firestore), [Auth emulator](https://firebase.google.com/docs/emulator-suite/connect_auth), [Datastore emulator](https://cloud.google.com/datastore/docs/tools/datastore-emulator) | Public Google documentation | The emulator columns, including short verbatim quotations of documented limitations |
+| [Firestore documentation](https://firebase.google.com/docs/firestore) | Public Google documentation | The production column |
 
-**No reverse engineering, and no running of anything.** Neither the Firebase
-Emulator Suite nor floci-gcp was decompiled, disassembled, binary-analysed, or
-executed to produce the comparison. Nothing was observed on the wire. The
-comparison document says this about itself, per column, and labels every
-unverified cell `not documented` rather than guessing — so a reader can tell
-which cells are evidence (ours, probed in CI) and which are a reading of
-somebody's README.
+**No reverse engineering, and no running of anything.** The Firebase Emulator
+Suite was not decompiled, disassembled, binary-analysed, or executed to produce
+the comparison. Nothing was observed on the wire. The comparison document says
+this about itself, per column, and labels every unverified cell `not documented`
+rather than guessing — so a reader can tell which cells are evidence (ours,
+probed in CI) and which are a reading of Google's documentation.
 
 **No code or text copied.** Quotations are short factual statements of
 documented limitations, each attributed inline and linked in the document's
-Sources table. floci-gcp's MIT licence is noted there; no floci-gcp code,
-configuration, test, or asset was copied, and no Google documentation prose was
-reproduced beyond those quotations.
+Sources table. No Google documentation prose was reproduced beyond those
+quotations.
 
-**Trademarks are used nominatively.** "Firebase", "Firestore", "Datastore",
-"Google Cloud" and "floci-gcp" appear to identify the products being compared.
-The comparison restates the independent-implementation position and links this
-ledger; the top-level README's notice is unchanged.
+**Trademarks are used nominatively.** "Firebase", "Firestore", "Datastore" and
+"Google Cloud" appear to identify the products being compared. The comparison
+restates the independent-implementation position and links this ledger; the
+top-level README's notice is unchanged.
 
-**Competitive claims are deliberately conservative.** Where floci-gcp serves
-something Fireup refuses — realtime listeners, aggregations, `PartitionQuery`,
-streaming `Write`, Datastore GQL — the document says so plainly, in a table and
-again in prose, and recommends floci-gcp or Google's emulator for those cases.
-This is the same positioning SAK-167 put in the README ("the two **complement**
-each other"), now with the rows behind it.
+**Claims about Google's emulator are deliberately conservative.** Where it
+serves something Fireup refuses — aggregations, streaming `Write`, Security
+Rules, Functions triggers — the document says so plainly, in a table and again
+in prose, and recommends Google's emulator for those cases. Where Google's docs
+do not say, the cell reads `not documented`, never a guess.
 
 #### Tooling
 
@@ -510,10 +522,10 @@ phase landed.
 
 | Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 | SAK-196 | SAK-190 | Phase L.1 (SAK-193) | SAK-195 | Phase 2.1 (SAK-189) | SAK-203 | SAK-206 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected | Yes — the vendored `write.proto` comments, public `FieldValue` docs, open-source client as a client | Yes — public REST + email-action-link docs, and the open-source client SDK's published link parser; no page markup or asset reproduced | Yes — fixtures generated first-party from the public LevelDB log spec and already-documented `EntityProto` numbering; no Google fixture or export used | Yes — vendored public protos, public `Listen` reference, open-source client source | Yes — the vendored `datastore.proto` comments only; the open-source client run as a client | Yes — public docs of both other projects; neither decompiled nor run, and every unverified cell is labelled `not documented` |
+| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected | Yes — the vendored `write.proto` comments, public `FieldValue` docs, open-source client as a client | Yes — public REST + email-action-link docs, and the open-source client SDK's published link parser; no page markup or asset reproduced | Yes — fixtures generated first-party from the public LevelDB log spec and already-documented `EntityProto` numbering; no Google fixture or export used | Yes — vendored public protos, public `Listen` reference, open-source client source | Yes — the vendored `datastore.proto` comments only; the open-source client run as a client | Yes — public Google documentation only; the emulator was neither decompiled nor run, and every unverified cell is labelled `not documented` |
 | New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added | Yes — none added; first-party SPDX corrected to Apache-2.0; audit linked | Yes — none added | Yes — none added, of any kind | Yes — none added | Yes — none added | Yes — none added, of any kind | Yes — none added to the build; `cargo-llvm-cov` and the shields.io badge URLs are rowed as CI/docs tooling |
 | For a REST/JSON surface: public sources named | n/a / prior phases | Yes | n/a (protos) | n/a | n/a | n/a — no new surface | n/a (protos) | Yes — the four sources are rowed in the Phase L.1 notes | n/a — binary export format, sources named above | n/a (protos) | n/a (protos) | n/a — no new surface; the comparison's sources are named in its own Sources table and above |
-| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated → `501` (OOB too, until SAK-193) | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a | Yes — `maximum`/`minimum`, nested transform paths, and Datastore property transforms stay refused | Yes — `PHONE_VERIFICATION` → `501`; mail delivery stated as a non-goal rather than faked; the one-hour code lifetime and the landing route labelled as Fireup's own choices | Yes — the `numeric` negative-zero gap is stated in the fixture README and filed as SAK-202, not hidden | Yes — a `read_time` resume is refused per target; no resume tokens and no `ExistenceFilter`, both published in the matrix | Yes — nested mask paths and escaped property names stay `UNIMPLEMENTED`; an empty path and a non-`__key__` reserved name are `INVALID_ARGUMENT` | Yes — the four RPCs and the query/transform rows Fireup refuses are stated as refusals beside competitors that serve them, not hidden |
+| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated → `501` (OOB too, until SAK-193) | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a | Yes — `maximum`/`minimum`, nested transform paths, and Datastore property transforms stay refused | Yes — `PHONE_VERIFICATION` → `501`; mail delivery stated as a non-goal rather than faked; the one-hour code lifetime and the landing route labelled as Fireup's own choices | Yes — the `numeric` negative-zero gap is stated in the fixture README and filed as SAK-202, not hidden | Yes — a `read_time` resume is refused per target; no resume tokens and no `ExistenceFilter`, both published in the matrix | Yes — nested mask paths and escaped property names stay `UNIMPLEMENTED`; an empty path and a non-`__key__` reserved name are `INVALID_ARGUMENT` | Yes — the four RPCs and the query/transform rows Fireup refuses are stated as refusals beside a reference implementation that serves them, not hidden |
 | Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged | Yes — retained in README licence section | Yes — unchanged | Yes — and the landing route's own response carries a "not a Google page" notice | Yes — unchanged | Yes — on `src/local/watch.rs` and the `Listen` row of `src/local/firestore.rs` | Yes — unchanged | Yes — restated at the top of `COMPARISON.md`, with the trademark note; README unchanged |
 | No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added | Yes — no signing key; the link's `apiKey` placeholder is a sentence, not a key-shaped string | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added |
 

@@ -153,8 +153,8 @@ Every row below is checked, not just written down:
 row with the official SDKs, and `cargo test --test fidelity_matrix_tests` fails
 if this table and that suite stop agreeing. See [Tests](#tests).
 
-For the same rows set beside floci-gcp, Google's Firebase Emulator Suite, and
-the production service, see [`COMPARISON.md`](COMPARISON.md).
+For the same rows set beside Google's Firebase Emulator Suite and the production
+service, see [`COMPARISON.md`](COMPARISON.md).
 
 ### RPCs
 

@@ -45,11 +45,10 @@ Fireup's default port is `4589` specifically so it can run beside floci-gcp
 (`4588`) and Google's Firebase emulators (`8080`/`4000`) without an argument
 about ports.
 
-**[docs/local/COMPARISON.md](docs/local/COMPARISON.md)** is the four-way
-feature matrix — Fireup, floci-gcp, the Firebase Emulator Suite, and the
-production service — including the places where Fireup serves less and the
-places where it is more faithful. It says, per column, how reliable its own
-cells are.
+**[docs/local/COMPARISON.md](docs/local/COMPARISON.md)** is the feature matrix —
+Fireup, the Firebase Emulator Suite, and the production service — including the
+places where Fireup serves less and the places where it is more faithful. It
+says, per column, how reliable its own cells are.
 
 > **Independent implementation.** `fireup local` implements **public** Google API
 > contracts from public documentation and the public
