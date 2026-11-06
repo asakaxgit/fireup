@@ -26,6 +26,11 @@
       "heading": "### What is served",
       "labelColumn": "Endpoint",
       "statusColumn": null
+    },
+    "auth-email-flows": {
+      "heading": "### Email flows: no mail is sent, and the link is readable",
+      "labelColumn": "requestType",
+      "statusColumn": null
     }
   },
   "features": [
@@ -460,6 +465,30 @@
       "python": false
     },
     {
+      "id": "auth.sendOobCode",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/accounts:sendOobCode",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.resetPassword",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/accounts:resetPassword",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.signInWithEmailLink",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/accounts:signInWithEmailLink",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
       "id": "auth.token",
       "docTable": "auth-endpoints",
       "label": "POST /v1/token",
@@ -500,6 +529,14 @@
       "python": false
     },
     {
+      "id": "auth.admin-sendOobCode",
+      "docTable": "auth-endpoints",
+      "label": "POST /v1/projects/{p}/accounts:sendOobCode",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
       "id": "auth.admin-batchGet",
       "docTable": "auth-endpoints",
       "label": "GET /v1/projects/{p}/accounts:batchGet",
@@ -516,9 +553,65 @@
       "python": false
     },
     {
+      "id": "auth.emulator-oob-codes",
+      "docTable": "auth-endpoints",
+      "label": "GET /emulator/v1/projects/{p}/oobCodes",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.emulator-clear-oob-codes",
+      "docTable": "auth-endpoints",
+      "label": "DELETE /emulator/v1/projects/{p}/oobCodes",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
       "id": "auth.emulator-clear-accounts",
       "docTable": "auth-endpoints",
       "label": "DELETE /emulator/v1/projects/{p}/accounts",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.emulator-action-route",
+      "docTable": "auth-endpoints",
+      "label": "GET /emulator/action",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.flow-password-reset",
+      "docTable": "auth-email-flows",
+      "label": "PASSWORD_RESET",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.flow-verify-email",
+      "docTable": "auth-email-flows",
+      "label": "VERIFY_EMAIL",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.flow-email-signin",
+      "docTable": "auth-email-flows",
+      "label": "EMAIL_SIGNIN",
+      "status": "served",
+      "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "auth.flow-verify-and-change-email",
+      "docTable": "auth-email-flows",
+      "label": "VERIFY_AND_CHANGE_EMAIL",
       "status": "served",
       "driver": "auth-smoke",
       "python": false
@@ -768,13 +861,13 @@
       "python": false
     },
     {
-      "id": "auth.out-of-band-codes",
+      "id": "auth.sending-email",
       "docTable": null,
-      "label": "Out-of-band email flows: sendOobCode, resetPassword",
-      "status": "unimplemented",
+      "label": "Sending email: the codes are real, the delivery is not",
+      "status": "documented-divergence",
       "driver": "auth-smoke",
       "python": false,
-      "note": "SAK-193 may flip this to served; flip the status here and in the README at the same time."
+      "note": "SAK-193 served the out-of-band flows. No SMTP: a generated link is read back from GET /emulator/v1/projects/{p}/oobCodes instead of arriving in a mailbox."
     },
     {
       "id": "auth.batch-account-writes",
