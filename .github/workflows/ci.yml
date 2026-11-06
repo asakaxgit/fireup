@@ -16,8 +16,11 @@ name: CI
 on:
   push:
     branches: [main]
+  # No branch filter on pull requests, on purpose. Overlapping work in this
+  # repository is stacked (one PR based on another, not on `main`), so a
+  # `branches: [main]` filter would skip exactly the PRs that most need
+  # checking — every layer of a stack but the bottom one.
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 env:
