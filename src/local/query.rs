@@ -151,6 +151,31 @@ impl FieldPath {
         Ok(Self { segments })
     }
 
+    /// A path addressing one top-level field whose name is `name` **verbatim**.
+    ///
+    /// Not [`FieldPath::parse`]: that reads Firestore's path syntax, in which a
+    /// dot separates segments and an unquoted segment must be an identifier. A
+    /// Datastore property name is neither — it is one name, and `my-prop` or
+    /// `名前` is an ordinary property that `parse` would reject or, worse,
+    /// split. Callers holding a single already-decoded name want this.
+    ///
+    /// A name containing a dot is refused rather than quoted into a path,
+    /// because the two readings of `a.b` select different values and the
+    /// Datastore surface refuses that property name for the same reason.
+    pub fn literal(name: &str) -> Result<Self, Status> {
+        if name.is_empty() {
+            return Err(Status::invalid_argument("a field name must not be empty"));
+        }
+        if name.contains('.') {
+            return Err(Status::invalid_argument(format!(
+                "the field name {name:?} contains a dot, which addresses a nested value"
+            )));
+        }
+        Ok(Self {
+            segments: vec![name.to_string()],
+        })
+    }
+
     /// The path's segments, outermost first. Always at least one.
     ///
     /// Public so a store backend can translate the path into its own addressing
@@ -406,6 +431,17 @@ impl Predicate {
     /// queries are index lookups, and a document with no value for a field has
     /// no entry in that field's index. Returning it would be the one failure
     /// mode that looks like working code.
+    ///
+    /// Public because the Datastore data plane evaluates its own queries
+    /// through this, having translated its `Filter` into a `Predicate` — see
+    /// [`datastore_filter`](crate::local::datastore_filter). Two surfaces that
+    /// read one store decide what a value comparison means in exactly one
+    /// place, which is also what makes the pushdown's translation exact
+    /// rather than merely close.
+    pub fn admits(&self, document: &Document) -> bool {
+        self.matches(document)
+    }
+
     fn matches(&self, document: &Document) -> bool {
         match self {
             Predicate::All(children) => children.iter().all(|child| child.matches(document)),

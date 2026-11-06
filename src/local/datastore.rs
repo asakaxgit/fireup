@@ -17,6 +17,13 @@
 //! | `ReserveIds`         | served (acknowledged; ids are not reused) |
 //! | `RunAggregationQuery`| `UNIMPLEMENTED` |
 //!
+//! `RunQuery`'s property filters are translated into the same compiled
+//! [`Predicate`](crate::local::query::Predicate) the Firestore surface
+//! compiles, so a kind query narrows in the store rather than reading the whole
+//! kind — and so that one comparator decides what a value comparison means on
+//! both surfaces. See [`datastore_filter`](crate::local::datastore_filter) for
+//! what translates and why that unification was load-bearing rather than tidy.
+//!
 //! This is an independent implementation of a published API contract. No
 //! Firebase Emulator Suite code or behaviour was reverse-engineered; see
 //! `.cursor/rules/firebase-gcp-compliance.mdc`.
@@ -28,11 +35,13 @@ use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
+use crate::local::datastore_filter;
 use crate::local::entity_map::{
     ancestor_collection, apply_property_mask, check_project_database, compile_property_transforms,
     complete_key, document_to_entity, documents_root, entity_to_document, key_is_incomplete,
     key_to_document_name, normalize_database_id, transform_results_to_properties,
 };
+use crate::local::query::Prefilter;
 use crate::local::store::{
     Mutation as StoreMutation, PendingWrite, Precondition, SharedStore, WriteOutcome,
 };
@@ -216,13 +225,39 @@ impl DatastoreApi {
             (None, None) => None,
         };
 
+        // Compiled before the read, because it is what decides how wide the
+        // read is. See `datastore_filter` for why the translated predicate is
+        // then also what filters in process when the translation is exact.
+        let property_filter = strip_ancestor_filter(query.filter.as_ref())?;
+        let translated = datastore_filter::translate(
+            property_filter.as_ref(),
+            &self.project_id,
+            &self.database_id,
+        );
+        let prefilter = Prefilter {
+            filter: translated.prefilter.as_ref(),
+            // Empty on purpose, and not because Datastore queries have no
+            // `order`. Firestore excludes a document that has no value for a
+            // sort field, which is what lets its pre-filter demand the field be
+            // present; `compare_entities` instead *orders* an entity missing
+            // the property first. Copying the Firestore spelling here would
+            // drop those entities from the answer.
+            required_fields: &[],
+        };
+
         let mut candidates = match (kind, ancestor.as_ref()) {
             (Some(kind), Some(ancestor)) => {
                 let (parent, collection) =
                     ancestor_collection(ancestor, kind, &self.project_id, &self.database_id)?;
-                self.store.scan_collection(&parent, &collection).await?
+                self.store
+                    .scan_collection_filtered(&parent, &collection, prefilter)
+                    .await?
             }
-            (Some(kind), None) => self.store.scan_kind(&self.root(), kind).await?,
+            (Some(kind), None) => {
+                self.store
+                    .scan_kind_filtered(&self.root(), kind, prefilter)
+                    .await?
+            }
             (None, Some(_ancestor)) => {
                 // No kind: every direct child collection under the ancestor.
                 // Phase 3 refuses the unbounded form rather than scan the world.
@@ -239,14 +274,24 @@ impl DatastoreApi {
             }
         };
 
-        let property_filter = strip_ancestor_filter(query.filter.as_ref())?;
-        if let Some(filter) = property_filter.as_ref() {
-            candidates.retain(|document| {
-                match document_to_entity(document, &self.project_id, &self.database_id) {
-                    Ok(entity) => entity_matches(&entity, filter),
-                    Err(_) => false,
+        // A pre-filter is a *superset*, so something still has to decide the
+        // answer. When the translation was exact that is the translated
+        // predicate itself — one filter, evaluated by one comparator, in both
+        // places. Otherwise some term did not translate and the original
+        // Datastore evaluator decides the whole filter, as it always did.
+        match (translated.exact, translated.prefilter.as_ref()) {
+            (true, Some(predicate)) => candidates.retain(|document| predicate.admits(document)),
+            (true, None) => {}
+            (false, _) => {
+                if let Some(filter) = property_filter.as_ref() {
+                    candidates.retain(|document| {
+                        match document_to_entity(document, &self.project_id, &self.database_id) {
+                            Ok(entity) => entity_matches(&entity, filter),
+                            Err(_) => false,
+                        }
+                    });
                 }
-            });
+            }
         }
 
         if !query.order.is_empty() {
