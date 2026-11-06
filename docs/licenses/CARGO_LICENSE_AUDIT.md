@@ -100,22 +100,26 @@ current lock file, so it is not in the list either.
 the Windows/macOS/wasi crates that are in `Cargo.lock` and that anyone building
 Fireup on those platforms pulls.
 
-### Accepted vulnerability
+### Accepted vulnerabilities: none
 
-`RUSTSEC-2026-0258` — `h2` 0.3.27 accepts and queues unbounded empty DATA
-frames (low severity). Path: `fireup -> tonic 0.11 -> axum 0.6 -> hyper 0.14 ->
-h2 0.3.27`. The fix is `h2 >= 0.4.16`, which needs hyper 1.x, which needs
-tonic >= 0.12 and prost 0.13; `Cargo.toml` pins tonic 0.11 on purpose to keep a
-single prost version across the data plane and the export parser. Accepted
-because the only h2 surface in Fireup is the `fireup local` gRPC server, a
-loopback development emulator. Review date 2027-02-06, recorded in `deny.toml`.
-The migration is tracked as SAK-220.
+`[advisories] ignore` is empty. Every advisory the RustSec database reports
+fails the build.
 
-Be precise about the limit here: cargo-deny has no expiry mechanism for `ignore`
-entries, so that date is a commitment, not a gate. What *is* machine enforced is
-that the list cannot silently rot — `-D advisory-not-detected` promotes "this
-ignored advisory no longer matches anything" from a warning to an error, so the
-entry must be deleted the moment the migration lands.
+It was not always empty. SAK-218 accepted one entry with a review date of
+2027-02-06: `RUSTSEC-2026-0258`, `h2` 0.3.27 accepting and queueing unbounded
+empty DATA frames (low severity), reached as
+`fireup -> tonic 0.11 -> axum 0.6 -> hyper 0.14 -> h2 0.3.27`. The fix needed
+`h2 >= 0.4.16`, so hyper 1.x, so tonic >= 0.12 and prost 0.13 — and `Cargo.toml`
+pinned tonic 0.11 on purpose, to keep one prost version across the data plane and
+the export parser. SAK-220 did that migration (tonic 0.13 / prost 0.13, which
+pulls hyper 1.12 and h2 0.4.20, still one prost version) and deleted the entry in
+the same change.
+
+That pairing was not a matter of remembering. cargo-deny has no expiry mechanism
+for `ignore` entries, so the review date was a commitment rather than a gate —
+but `-D advisory-not-detected` promotes "this ignored advisory no longer matches
+anything" from a warning to an error, so the migration could not land while the
+entry was still there. An accepted vulnerability here cannot outlive its fix.
 
 ### `cargo audit` is not used
 
@@ -132,7 +136,7 @@ was run against the committed configuration and then reverted:
 
 | Mutation | Result |
 |---|---|
-| Delete the `RUSTSEC-2026-0258` entry from `[advisories] ignore` | `error[vulnerability]: h2 unbounded empty DATA frames` — `advisories FAILED`, exit 1 |
+| `cargo update -p h2 --precise 0.4.15` — put the tree back one patch below the fix | `error[vulnerability]: h2 unbounded empty DATA frames` / `RUSTSEC-2026-0258` — `advisories FAILED`, exit 101 |
 | Add a `RUSTSEC-2020-0001` entry that matches nothing | `error[advisory-not-detected]` — `advisories FAILED`, exit 1 (a *warning*, exit 0, without `-D advisory-not-detected`) |
 | Remove `"MIT"` from `[licenses] allow` | 47 `error[rejected]` diagnostics — `licenses FAILED` |
 
@@ -140,3 +144,10 @@ These are not automated. A Rust test shelling out to `cargo-deny` would either
 fail or vacuously skip on a machine without the binary installed, and the thing
 under test is a declarative config read by a third-party tool rather than
 first-party logic. Re-run the table by hand when `deny.toml` changes materially.
+
+What *is* automated is the narrower question of whether the lock file still has
+the properties these exceptions were about. `tests/dependency_pin_tests.rs`
+reads `Cargo.lock` directly — no network, no advisory database, no third-party
+binary — and fails if `h2` drops below 0.4.16, if `prost` resolves to more than
+one version, or if `RUSTSEC-2026-0258` reappears in `deny.toml`. It is a cheap
+local echo of the `cargo deny` job, not a replacement for it.

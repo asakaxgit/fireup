@@ -1,0 +1,358 @@
+//! Two dependency facts that `Cargo.toml` can only ask for, and that
+//! `Cargo.lock` is the only place to actually check.
+//!
+//! Both come out of SAK-220, the tonic 0.11 → 0.13 / prost 0.12 → 0.13
+//! migration, and both are the kind of thing a routine `cargo update` or a
+//! well-meant version bump can undo without anything going red.
+//!
+//! 1. **One prost.** `src/local/` (the gRPC data plane, from `tonic-build`) and
+//!    the managed-export parser (from `prost-build`) exchange generated types.
+//!    If the two ever resolve to different prost majors, a `prost::Message` from
+//!    one is not a `prost::Message` to the other, and the failure arrives as a
+//!    wall of trait-mismatch errors far away from the version that caused it.
+//!    This is why tonic was pinned at 0.11 for as long as it was.
+//!
+//! 2. **h2 at or above the patched version.** `h2` below 0.4.16 accepts and
+//!    queues unbounded empty DATA frames — RUSTSEC-2026-0258, which the repo
+//!    carried as an accepted exception in `deny.toml` until the migration landed.
+//!    CI's `cargo deny` job enforces this properly, but it needs the network and
+//!    a pinned third-party binary. This test needs neither, so a local
+//!    `cargo test` catches a reintroduction before the push.
+//!
+//! Reading `Cargo.lock` as text rather than running `cargo metadata` is
+//! deliberate: it keeps the test free of a toml dependency and of a subprocess,
+//! and the two fields it wants (`name`, `version`) are the first two lines of
+//! every `[[package]]` block in the v3/v4 lock format.
+//!
+//! The checks are written as functions over parsed text, not as assertions over
+//! the real file, so that the "and it really does fail" half can be committed
+//! too — see the `negative_controls` module at the bottom. A hand-edited
+//! `Cargo.lock` is not a usable mutation here: cargo re-resolves an inconsistent
+//! lock file before it runs the test, so breaking the real file on disk proves
+//! nothing.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+/// `h2` below this accepts unbounded empty DATA frames (RUSTSEC-2026-0258).
+const H2_PATCHED: (u64, u64, u64) = (0, 4, 16);
+
+type Versions = BTreeMap<String, Vec<String>>;
+
+/// Every `(name, version)` pair in a lock file, grouped by name.
+///
+/// A crate with two entries is a crate resolved to two versions, which is what
+/// the prost check below is about.
+fn parse_lock(lock: &str) -> Versions {
+    let mut versions: Versions = BTreeMap::new();
+    for block in lock.split("[[package]]").skip(1) {
+        let mut name = None;
+        let mut version = None;
+        for line in block.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let value = value.trim().trim_matches('"').to_string();
+            match key.trim() {
+                // First occurrence only: a `[[package]]` block can carry a
+                // `dependencies` list whose entries are not `key = value`, but
+                // a `[metadata]` tail could still contain either word.
+                "name" if name.is_none() => name = Some(value),
+                "version" if version.is_none() => version = Some(value),
+                _ => {}
+            }
+        }
+        if let (Some(name), Some(version)) = (name, version) {
+            versions.entry(name).or_default().push(version);
+        }
+    }
+    versions
+}
+
+/// `major.minor` of a semver string — the part that has to agree across the
+/// prost family, since prost makes breaking changes on the minor.
+fn minor_line(version: &str) -> String {
+    let mut parts = version.split('.');
+    let major = parts.next().unwrap_or_default();
+    let minor = parts.next().unwrap_or_default();
+    format!("{major}.{minor}")
+}
+
+/// `(major, minor, patch)`, ignoring any pre-release or build suffix, so
+/// `0.4.16-rc.1` compares as 0.4.16 for "is the fix in here".
+fn triple(version: &str) -> (u64, u64, u64) {
+    let parts: Vec<u64> = version
+        .split('.')
+        .map(|part| {
+            let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse().unwrap_or(0)
+        })
+        .collect();
+    (
+        parts.first().copied().unwrap_or(0),
+        parts.get(1).copied().unwrap_or(0),
+        parts.get(2).copied().unwrap_or(0),
+    )
+}
+
+/// `Err` with the message a developer needs if the prost family has split.
+fn check_prost_is_one_version(versions: &Versions) -> Result<(), String> {
+    let Some(prost) = versions.get("prost") else {
+        return Err("prost is a direct dependency but is not in the lock file".into());
+    };
+    if prost.len() != 1 {
+        return Err(format!(
+            "prost resolved to {prost:?}. The gRPC data plane (tonic-build) and \
+             the managed-export parser (prost-build) exchange generated types, \
+             so they have to share one prost. Whatever was just bumped needs to \
+             move tonic, tonic-build, prost, prost-types and prost-build \
+             together — see the comment on `tonic` in Cargo.toml."
+        ));
+    }
+
+    for crate_name in ["prost-types", "prost-build"] {
+        let Some(resolved) = versions.get(crate_name) else {
+            return Err(format!("{crate_name} is not in the lock file"));
+        };
+        if resolved.len() != 1 {
+            return Err(format!(
+                "{crate_name} resolved to {resolved:?}; it has to track prost exactly"
+            ));
+        }
+        if minor_line(&resolved[0]) != minor_line(&prost[0]) {
+            return Err(format!(
+                "{crate_name} {} does not match prost {}. prost breaks its API \
+                 on the minor version, so these move as a set.",
+                resolved[0], prost[0]
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `Err` if any resolved `h2` is below the version that patched the advisory.
+fn check_h2_is_patched(versions: &Versions) -> Result<(), String> {
+    let Some(resolved) = versions.get("h2") else {
+        return Err("h2 reaches the tree via tonic -> hyper but is not in the lock file".into());
+    };
+    for version in resolved {
+        if triple(version) < H2_PATCHED {
+            return Err(format!(
+                "h2 {version} is below 0.4.16, which reintroduces \
+                 RUSTSEC-2026-0258 (unbounded empty DATA frames). h2 0.4.x needs \
+                 hyper 1.x, which needs tonic >= 0.12 — a downgrade here means \
+                 the tonic pin moved back."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `Err` if `deny.toml` carries a live `ignore` entry for the h2 advisory.
+///
+/// The prose above `ignore` names the advisory on purpose, as history, so only
+/// an entry outside a comment counts as a live acceptance.
+fn check_advisory_not_reaccepted(deny: &str) -> Result<(), String> {
+    for line in deny.lines() {
+        let code = line.split('#').next().unwrap_or("");
+        if code.contains("RUSTSEC-2026-0258") {
+            return Err(format!(
+                "deny.toml accepts RUSTSEC-2026-0258 again: {}\n\
+                 The tonic 0.13 / prost 0.13 migration (SAK-220) fixed it. If \
+                 the advisory is back, fix the dependency rather than \
+                 re-accepting it.",
+                line.trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn repo_file(name: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} must be committed: {error}", path.display()))
+}
+
+fn committed_lock() -> Versions {
+    let versions = parse_lock(&repo_file("Cargo.lock"));
+    assert!(
+        versions.contains_key("fireup"),
+        "parsed {} packages out of Cargo.lock but not fireup itself, so the lock \
+         format changed under this test and its assertions check nothing",
+        versions.len()
+    );
+    versions
+}
+
+#[test]
+fn the_committed_lock_has_exactly_one_prost() {
+    if let Err(reason) = check_prost_is_one_version(&committed_lock()) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn the_committed_lock_has_h2_at_or_above_the_patched_version() {
+    if let Err(reason) = check_h2_is_patched(&committed_lock()) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_no_longer_accepts_the_h2_advisory() {
+    if let Err(reason) = check_advisory_not_reaccepted(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+/// The mutations, committed rather than run once by hand.
+///
+/// Each one is the regression this file exists to catch, fed to the same
+/// function the three tests above call. Without these, a refactor that made
+/// `check_*` return `Ok(())` unconditionally would leave every test above green.
+mod negative_controls {
+    use super::*;
+
+    /// A lock file with just the packages these checks look at.
+    fn lock_with(packages: &[(&str, &str)]) -> String {
+        let mut out = String::from("version = 4\n");
+        for (name, version) in packages {
+            out.push_str(&format!(
+                "\n[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n\
+                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+            ));
+        }
+        out
+    }
+
+    const GOOD: &[(&str, &str)] = &[
+        ("fireup", "0.1.0"),
+        ("h2", "0.4.20"),
+        ("prost", "0.13.5"),
+        ("prost-build", "0.13.5"),
+        ("prost-types", "0.13.5"),
+    ];
+
+    #[test]
+    fn the_parser_reads_a_lock_file_at_all() {
+        let versions = parse_lock(&lock_with(GOOD));
+        assert_eq!(versions["prost"], vec!["0.13.5"]);
+        assert_eq!(versions["h2"], vec!["0.4.20"]);
+        assert!(check_prost_is_one_version(&versions).is_ok());
+        assert!(check_h2_is_patched(&versions).is_ok());
+    }
+
+    #[test]
+    fn two_prost_versions_fail() {
+        let mut packages = GOOD.to_vec();
+        packages.push(("prost", "0.12.6"));
+        let error = check_prost_is_one_version(&parse_lock(&lock_with(&packages)))
+            .expect_err("two prost versions must fail");
+        assert!(
+            error.contains("0.12.6") && error.contains("0.13.5"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_prost_family_member_left_behind_fails() {
+        let mut packages: Vec<_> = GOOD
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != "prost-build")
+            .collect();
+        packages.push(("prost-build", "0.12.6"));
+        let error = check_prost_is_one_version(&parse_lock(&lock_with(&packages)))
+            .expect_err("prost-build on a different minor must fail");
+        assert!(error.contains("prost-build 0.12.6"), "{error}");
+    }
+
+    #[test]
+    fn a_missing_prost_fails_rather_than_passing_vacuously() {
+        let packages: Vec<_> = GOOD
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != "prost")
+            .collect();
+        assert!(check_prost_is_one_version(&parse_lock(&lock_with(&packages))).is_err());
+    }
+
+    #[test]
+    fn h2_one_patch_below_the_fix_fails() {
+        // 0.4.15 is the real last vulnerable release, not a made-up version.
+        let packages: Vec<_> = GOOD
+            .iter()
+            .copied()
+            .map(|(name, version)| {
+                if name == "h2" {
+                    (name, "0.4.15")
+                } else {
+                    (name, version)
+                }
+            })
+            .collect();
+        let error = check_h2_is_patched(&parse_lock(&lock_with(&packages)))
+            .expect_err("h2 0.4.15 must fail");
+        assert!(error.contains("RUSTSEC-2026-0258"), "{error}");
+    }
+
+    #[test]
+    fn the_old_h2_line_fails() {
+        // What the tonic 0.11 pin used to resolve to.
+        let packages: Vec<_> = GOOD
+            .iter()
+            .copied()
+            .map(|(name, version)| {
+                if name == "h2" {
+                    (name, "0.3.27")
+                } else {
+                    (name, version)
+                }
+            })
+            .collect();
+        assert!(check_h2_is_patched(&parse_lock(&lock_with(&packages))).is_err());
+    }
+
+    #[test]
+    fn a_second_h2_that_is_vulnerable_fails_even_beside_a_patched_one() {
+        let mut packages = GOOD.to_vec();
+        packages.push(("h2", "0.3.27"));
+        assert!(
+            check_h2_is_patched(&parse_lock(&lock_with(&packages))).is_err(),
+            "every resolved h2 has to be patched, not just the newest"
+        );
+    }
+
+    #[test]
+    fn a_missing_h2_fails_rather_than_passing_vacuously() {
+        let packages: Vec<_> = GOOD
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != "h2")
+            .collect();
+        assert!(check_h2_is_patched(&parse_lock(&lock_with(&packages))).is_err());
+    }
+
+    #[test]
+    fn a_reaccepted_advisory_fails_but_the_comment_about_it_does_not() {
+        let live = r#"
+ignore = [
+  { id = "RUSTSEC-2026-0258", reason = "it came back" },
+]
+"#;
+        assert!(check_advisory_not_reaccepted(live).is_err());
+
+        // The committed file explains the history in prose. That must stay legal,
+        // or the next person cannot write down why the entry is gone.
+        let history = r#"
+# There was one entry here: RUSTSEC-2026-0258 ("h2 unbounded empty DATA frames").
+ignore = []
+"#;
+        assert!(check_advisory_not_reaccepted(history).is_ok());
+
+        // Including when the comment trails a line of real config.
+        let trailing = r#"ignore = []  # was RUSTSEC-2026-0258, fixed by SAK-220"#;
+        assert!(check_advisory_not_reaccepted(trailing).is_ok());
+    }
+}

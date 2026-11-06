@@ -34,35 +34,24 @@ yanked = "deny"
 # that we have no way to replace.
 unmaintained = "workspace"
 
-ignore = [
-  # RUSTSEC-2026-0258 — h2 "unbounded empty DATA frames" (low severity).
-  #
-  # Path: fireup -> tonic 0.11 -> axum 0.6 -> hyper 0.14 -> h2 0.3.27.
-  #
-  # Not fixable by configuration or by `cargo update`. The fix is h2 >= 0.4.16,
-  # which requires hyper 1.x, which requires tonic >= 0.12 and prost 0.13.
-  # `Cargo.toml` pins tonic 0.11 on purpose so that the local data plane and the
-  # managed-export parser share a single prost version; moving off it is a real
-  # migration, tracked as its own ticket (SAK-220).
-  #
-  # Accepted because: the only thing in Fireup that serves h2 traffic is the
-  # `fireup local` gRPC surface, a local development emulator that binds a
-  # loopback port and is not intended to be exposed to the public internet. An
-  # attacker who can open streams against it already has local access.
-  #
-  # Reconsider by 2027-02-06 (three months). If the tonic/prost migration has
-  # not landed by then, the acceptance needs re-arguing on SAK-220, not a silent
-  # renewal.
-  #
-  # Be clear about what is and is not enforced here. cargo-deny has no expiry
-  # feature for `ignore` entries, and an ignored advisory prints nothing at all,
-  # so the date below is a promise to ourselves, not a gate. What *is* machine
-  # enforced: any advisory other than this one fails the build, and
-  # `-D advisory-not-detected` fails the build once this entry is obsolete. The
-  # CI job greps these reason strings into its log so the exception is at least
-  # visible on every run rather than buried in a config file.
-  { id = "RUSTSEC-2026-0258", reason = "h2 0.3.27 via pinned tonic 0.11; local-only gRPC surface. Fix needs the tonic 0.12/prost 0.13 migration (SAK-220). Reconsider by 2027-02-06." },
-]
+# No accepted advisories. Every advisory the database reports fails the build.
+#
+# There was one entry here: RUSTSEC-2026-0258 ("h2 unbounded empty DATA frames"),
+# reached through the tonic 0.11 pin as
+# `fireup -> tonic 0.11 -> axum 0.6 -> hyper 0.14 -> h2 0.3.27`. The fix needed
+# h2 >= 0.4.16, so hyper 1.x, so a tonic/prost major bump; SAK-220 did that
+# migration (tonic 0.13 / prost 0.13, h2 0.4.20) and removed the entry with it.
+#
+# Adding an entry back is a deliberate act, not a way to get CI green. Anything
+# listed here needs, in a comment above it: the dependency path, why it cannot be
+# fixed by `cargo update`, what makes the exposure acceptable for Fireup
+# specifically, a reconsider date, and a ticket that owns the real fix. Note that
+# cargo-deny has no expiry feature, and an ignored advisory prints nothing at
+# all, so a reconsider date is a promise rather than a gate — what *is* machine
+# enforced is that `-D advisory-not-detected` in the CI job fails the build as
+# soon as an entry here stops matching a real advisory, which is why this list
+# could not be left stale once the migration landed.
+ignore = []
 
 [licenses]
 # This list is the machine-enforced form of the decision already recorded in
