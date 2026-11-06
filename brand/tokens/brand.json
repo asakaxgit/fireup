@@ -2,7 +2,7 @@
   "$comment": "Fireup brand tokens — single source of truth. tokens/brand.css is generated from this file by `npm run tokens`. Do not edit the CSS by hand.",
   "name": "Fireup",
   "version": "0.1.0",
-  "status": "mark approved (round 5A); lockup is round 12 — the mark as the word's F, the accent 2 units over a U raised to the cap line and starting on that U's left edge, and the i's dot at 3 — and sign-off on it is still open (SAK-173)",
+  "status": "approved and locked 2026-11-06 (SAK-173, round 13) — the mark, the lockup (FireUp with the mark as its F, the ember accent exactly the width of the U and flush at both ends) and this palette; changes go back through the CEO and `npm run lock` fails the build on an unapproved one. Not settled by the sign-off: the fireup.pro name collision and the flame prior art, both legal questions",
   "color": {
     "ink": "#0B1220",
     "ink-raised": "#141E31",

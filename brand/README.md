@@ -1,6 +1,14 @@
 # Fireup brand guide
 
-**Status: the mark is approved; the lockup around it is round 13 and is not.**
+**Status: approved and locked — the mark, the lockup and the palette.**
+The lockup was signed off on **2026-11-06** at round 13: *"Signed off — this is
+the lockup."* The mark had already been settled at round 5. Nothing in the
+identity changes from here without going back through the CEO, and that is
+enforced rather than promised: `npm run lock` compares every approved drawing
+against `lock/signed-off.json` element by element and fails the build on a
+change, naming the shape and the two values. See
+[Changing something that is locked](#changing-something-that-is-locked).
+
 The round-5 mark — the F with the fire on the end of its bar, no muzzle — came
 back as *"A is perfect"*, so the drawing in `logo/mark.svg` is settled and does
 not change again without going back through the CEO. Everything since is the
@@ -21,14 +29,15 @@ capitals align. Round 12 is the first horizontal note — *"align left start of
 arrow and U's start"* — and moves the accent one unit right, so the tail's cap
 and the U's left stem share one edge. Round 13 is the first to **redraw** the
 accent rather than move it: the chord comes in from 30 to 28.55 so the arrow is
-exactly as wide as the U, flush at both ends. The lockup is in use on the
-marketing site in `site/`, but **sign-off on it has not been given** and is
-still open.
+exactly as wide as the U, flush at both ends — which is the drawing that was
+signed off, and it is what the marketing site in `site/` uses.
 
-This directory is in the public repository so the direction can be reviewed in a
-pull request. That is not approval. Until the mark is signed off, do not use it
-as the company's mark anywhere outside this repo — no published site, no
-external announcement, no profile or avatar.
+Sign-off settles the drawing. It does not settle the two things that were
+flagged alongside it and are still open: the **`fireup.pro` name collision** and
+the **flame prior art**, neither of which is mine to clear. Both are legal
+questions and both want a real search before this identity goes on anything
+published — a deployed site, an announcement, a store listing, an avatar. See
+[Open flags for the CEO](#open-flags-for-the-ceo).
 
 ---
 
@@ -482,6 +491,7 @@ and is not mine to give — see the open flags at the bottom of this file.
 | `logo/favicon-32.svg` | **Master.** Its own drawing, cut to a 32×32 pixel grid. |
 | `tokens/brand.json` | **Master.** Colour, type scale, spacing, radii. |
 | `tokens/brand.css` | Generated. CSS custom properties, same values. |
+| `lock/signed-off.json` | **The approval record.** The signed-off geometry of the mark, the lockup, the two favicons and the palette, one line per drawn element. Written only by `npm run lock -- --adopt`. |
 | `explore/` | Round 1–2. The rendered directions that were considered, including the rejected ones. |
 | `tune/` | One sheet per tuning axis of the round-2 mark, for choosing between variants by pointing at one. |
 | `fire/` | Round 3. The fire concepts, where the fire goes, and the shape of the tongue. |
@@ -492,6 +502,8 @@ and is not mine to give — see the open flags at the bottom of this file.
 | `gesture/` | Round 8. How long the arc is: four chords from the accent to the full "Up", and how much air each leaves the fire. The gesture was chosen here and then declined on cost; round 9 is row D. |
 | `tighten/` | Round 10. How much air the accent keeps over the U, in units measured off the ink: six values, and which end of the gap moves. |
 | `align/` | Round 11. The three answers applied one at a time; what the dot's new height does to the mark's size; and the two capitals against the F's own cap line. |
+| `edge/` | Round 12. Where the accent's left end starts, against the U's own left ink edge. **These thirteen sheets are drawn one unit right of their own captions** — see [Round 12](#round-12-where-the-accent-starts); they are kept exactly as they were reviewed. |
+| `flush/` | Round 13. The four ways the accent can become the width of the U, and the scan of which levers reach flush at all. |
 | `preview/` | What actually ships, at the sizes it ships at. Rendered from `site/assets/`, not from the masters. |
 | `../site/assets/` | Generated. Every variant, lockup, favicon, app icon and the social card. |
 
@@ -504,10 +516,10 @@ will overwrite it.
 ```bash
 cd brand
 npm install        # @resvg/resvg-js, the raster pipeline
-npm run check      # smoke test the pipeline, verify contrast, rebuild all assets
+npm run check      # smoke the pipeline, verify contrast, rebuild, check the lock
 ```
 
-`npm run check` is `smoke` + `contrast` + `build`:
+`npm run check` is `smoke` + `contrast` + `build` + `lock`:
 
 - `npm run smoke` renders a known SVG and asserts the PNG really is the
   requested size with the expected pixels. It is there because "the export
@@ -518,6 +530,15 @@ npm run check      # smoke test the pipeline, verify contrast, rebuild all asset
 - `npm run contrast` computes every palette pair the brand uses and fails if one
   misses its WCAG AA threshold. Nothing is eyeballed.
 - `npm run build` regenerates `tokens/brand.css` and all of `site/assets/`.
+- `npm run lock` compares the approved drawings against `lock/signed-off.json`
+  and fails on any change, naming the element and both values. It runs last,
+  after `build`, so it sees the assets the build just wrote rather than
+  whatever was in the tree. It locks the two masters, the two favicons, the
+  **built** dark lockup — because `build.mjs` decides the 1.5x scale, where the
+  word starts and where the accent lands, none of which a master pins — and the
+  colour tokens. It does not look at comments, prose or whitespace: the masters
+  are meant to be annotated by hand, and a note about why a curve sits where it
+  does should never fail a build.
 - `npm run explore` re-renders the round 1–2 exploration sheets.
 - `npm run tune` re-renders the four tuning sheets in `tune/`.
 - `npm run fire` re-renders the round 3 sheets in `fire/`.
@@ -540,17 +561,30 @@ npm run check      # smoke test the pipeline, verify contrast, rebuild all asset
   measuring it, so its sheets come out **byte-identical whether it is run
   against round 10's master or round 11's** — which is a standing check that
   the transcription into the drawing landed where the sheet said it would.
+- `npm run edge` re-renders the round 12 sheets in `edge/`. **Read the defect
+  note at the top of the script before using them**: every row is drawn one
+  unit right of its own caption.
+- `npm run flush` re-renders the round 13 sheets in `flush/`, scans which of
+  the arrow's levers can reach flush at all, and — the part worth keeping —
+  isolates the accent and the U *inside the built* `site/assets/`
+  `fireup-lockup-dark.svg`, renders them, reads the edges off the alpha and
+  throws if they are not flush. Every round since 7 made a claim in a comment
+  about the shipped lockup; this is the first one that fails when the claim
+  stops being true.
 - `npm run preview` re-renders `preview/` from the built assets.
 
 `explore`, `tune`, `fire`, `lighter`, `plain`, `mix`, `arrow`, `gesture`,
-`tighten` and `align` are
+`tighten`, `align`, `edge` and `flush` are
 deliberately outside `check`: they are the record of a decision, not shipped
-assets, and they should only change when the question being asked changes.
-`fire` and `tune` hold their own copy of the drawings they compare; `mix` and
-`arrow` read the masters, so they re-render when a letterform changes — on
-purpose, because a sheet frozen against a drawing we no longer ship is worse
-than one that moves. `preview` is outside it because looking at the
-result is a human step, not a gate.
+assets, and they should only change when the question being asked changes. Each
+one is pinned to its own round — `fire` and `tune` hold their own copy of the
+drawings they compare, and the rest ask `word.mjs` for the letters and the
+arrow **as that round drew them**, so editing the identity does not rewrite the
+evidence an earlier answer was given against. That was learned the hard way
+twice: see
+[Exploration sheets are pinned to their own round](#exploration-sheets-are-pinned-to-their-own-round).
+`preview` is outside `check` because looking at the result is a human step, not
+a gate.
 
 ## Deciding by looking, not by arguing
 
@@ -692,6 +726,41 @@ The scale is a 1.2 (minor third) ratio on a 16px base; see `size` in
    goes on anything published, and I am not qualified to give the opinion.
 3. **No licence file.** The repository has no `LICENSE`, so the site does not
    state one. It should before the site is published anywhere.
-4. **Sign-off.** The mark, wordmark and palette need approval before they are
-   locked. After that, changes come back through the CEO rather than being
-   edited here.
+4. ~~**Sign-off.**~~ **Closed 2026-11-06** — *"Signed off — this is the
+   lockup."* The mark, the lockup and the palette are approved and frozen in
+   `lock/signed-off.json`. Changes now come back through the CEO rather than
+   being edited here, and `npm run lock` is what makes that true rather than
+   stated; see
+   [Changing something that is locked](#changing-something-that-is-locked).
+
+Flags 1 to 3 are not mine to close. 1 and 2 are legal opinions; 3 is a
+repository-level decision. All three gate **publishing** the identity — a
+deployed site, an announcement, a store listing, an avatar — rather than
+keeping it in this repository, where it already is with the CEO's approval.
+
+## Changing something that is locked
+
+The identity is approved, so a change to it is a decision, not an edit. The
+order is: ask the CEO, get an answer, make the change, then re-freeze with the
+answer attached —
+
+```bash
+npm run lock -- --adopt "round 14 signed off: <the approval, in its own words>"
+```
+
+`--adopt` refuses to run without that text, so the lock file's `history` is a
+record of what was approved and when rather than a list of times the check was
+silenced. It rewrites the geometry from the current drawings in one go, which
+means the diff a reviewer sees is exactly the coordinates that moved.
+
+What the lock does **not** cover, by design: comments, prose, whitespace, the
+exploration sheets, the site, and anything outside the attribute whitelist in
+`scripts/lock.mjs`. It is the drawing that is frozen, not the file.
+
+It has been proved to fail, in both of the ways it needs to:
+
+- moving the F's middle arm one unit in `logo/mark.svg` — caught, with the
+  element and both values printed;
+- changing `SCALE` in `build.mjs` from 1.5 to 1.52 and rebuilding, which leaves
+  **every master byte-identical** — caught on the built lockup, which is the
+  case the masters alone cannot see and the reason that asset is locked too.
