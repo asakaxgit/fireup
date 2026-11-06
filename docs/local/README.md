@@ -190,9 +190,11 @@ immediately rather than after a scan.
 | `select()` projection, including keys-only (`__name__`) | served |
 | `limitToLast()` | served — the SDK flips the order and reverses client-side |
 | Filtering and ordering on `__name__` | served |
-| Collection group queries (`all_descendants`) | `UNIMPLEMENTED` |
-| Cursors (`startAt`/`startAfter`/`endAt`/`endBefore`) | `UNIMPLEMENTED` — use `limit`/`offset` |
-| Nested field paths (`a.b`) in filters, orders, projections, and masks | `UNIMPLEMENTED` |
+| Collection group queries (`all_descendants`) | served — every collection of that id below the request's parent |
+| Cursors (`startAt`/`startAfter`/`endAt`/`endBefore`) | served, including `startAfter(documentSnapshot)` paging |
+| Nested field paths (`a.b`) in filters, orders, projections, and read masks | served, with `` `a.b` `` for a field whose name contains a dot |
+| Nested field paths in an `update_mask` | `UNIMPLEMENTED` — a mask writes whole top-level fields |
+| A collection group query with no collection id | `UNIMPLEMENTED` — name the collection to scan |
 | Vector search (`find_nearest`) | `UNIMPLEMENTED` |
 | Aggregations (`count()`, `sum()`, `average()`) | `UNIMPLEMENTED` |
 
@@ -213,6 +215,27 @@ wrong. Fireup implements the published Firestore behaviour for each:
 - **`__name__` is appended to every `orderBy`** in the direction of the last
   explicit term, so results have a total order instead of depending on the
   order documents came out of the store.
+- **A cursor is a position, not a filter.** Its values line up positionally
+  with the leading `orderBy` terms, so `startAfter(31)` skips *every* document
+  whose first sort value is `31`, not just one of them. Passing a whole
+  document snapshot sends one value per term plus the document's name, which
+  is what makes `startAfter(lastDoc)` page without repeating or dropping a tie.
+  A cursor longer than the order, a cursor with no values, and a `__name__`
+  position that is not a `referenceValue` are all `INVALID_ARGUMENT`.
+- **Cursors are applied before `offset` and `limit`**, so the two compose:
+  the cursors choose the range and the offset/limit page within it.
+- **A field path walks into maps only.** `tags.0` addresses the `0` key of a
+  map called `tags` and matches nothing when `tags` is an array — Firestore
+  field paths do not index into arrays.
+- **A dot in a field path is structure, not a name.** `a.b` means "the `b`
+  inside `a`"; a field literally called `a.b` is addressed as `` `a.b` ``, and
+  the two never match each other's documents.
+- **A projection or read mask on a nested path keeps the nesting.** Selecting
+  `address.city` returns an `address` map holding only `city`, not a flattened
+  `address.city` key and not the whole of `address`.
+- **A collection group query is scoped to the request's parent.** Below the
+  database root it spans every matching collection at any depth; below a
+  document it spans only that document's descendants.
 
 ### Transactions
 
@@ -252,10 +275,13 @@ cursors, property transforms, and nested property masks are refused.
 
 ### Other known limits
 
-- **A query reads the whole collection.** Filtering, ordering, and limiting
-  happen in the server process, not in SQL, so that both stores answer a query
-  identically ([`src/local/query.rs`](../../src/local/query.rs) explains the
-  trade-off). Fine for local-development volumes; not a production query planner.
+- **A query reads the whole collection** — and a collection group query reads
+  every matching collection below its parent. Filtering, ordering, cursors, and
+  limiting happen in the server process, not in SQL, so that both stores answer
+  a query identically ([`src/local/query.rs`](../../src/local/query.rs) explains
+  the trade-off). In particular a cursor does not make the scan smaller, only
+  the result set. Fine for local-development volumes; not a production query
+  planner.
 - **No field transforms.** `serverTimestamp()`, `increment()`, and array
   union/remove are `UNIMPLEMENTED` rather than silently writing a wrong value.
 - **No field deletion through a mask.** A masked field that the request does not

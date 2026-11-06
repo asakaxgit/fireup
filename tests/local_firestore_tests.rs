@@ -14,11 +14,11 @@ use fireup::protos::google::firestore::v1::{
     run_query_request::QueryType, structured_query::field_filter::Operator as FieldOperator,
     structured_query::filter::FilterType, structured_query::CollectionSelector,
     structured_query::Direction, structured_query::FieldFilter, structured_query::FieldReference,
-    structured_query::Filter, structured_query::Order, value::ValueType, write::Operation,
-    BatchGetDocumentsRequest, BatchWriteRequest, BeginTransactionRequest, CommitRequest,
-    CreateDocumentRequest, DeleteDocumentRequest,
+    structured_query::Filter, structured_query::Order, structured_query::Projection,
+    value::ValueType, write::Operation, BatchGetDocumentsRequest, BatchWriteRequest,
+    BeginTransactionRequest, CommitRequest, CreateDocumentRequest, Cursor, DeleteDocumentRequest,
     Document, DocumentMask, GetDocumentRequest, ListCollectionIdsRequest, ListDocumentsRequest,
-    ListDocumentsResponse, PartitionQueryRequest, Precondition, RollbackRequest,
+    ListDocumentsResponse, MapValue, PartitionQueryRequest, Precondition, RollbackRequest,
     RunAggregationQueryRequest, RunQueryRequest, StructuredQuery, Value, Write,
 };
 use fireup::protos::google::r#type::LatLng;
@@ -513,33 +513,47 @@ async fn run_query(
     client: &mut FirestoreClient<Channel>,
     query: StructuredQuery,
 ) -> Result<Vec<String>, tonic::Status> {
+    run_query_under(client, ROOT, query).await.map(|documents| {
+        documents
+            .into_iter()
+            .map(|document| {
+                document
+                    .name
+                    .rsplit('/')
+                    .next()
+                    .expect("a name has segments")
+                    .to_string()
+            })
+            .collect()
+    })
+}
+
+/// Run a query below `parent` and return the documents themselves, in order.
+async fn run_query_under(
+    client: &mut FirestoreClient<Channel>,
+    parent: &str,
+    query: StructuredQuery,
+) -> Result<Vec<Document>, tonic::Status> {
     let mut stream = client
         .run_query(RunQueryRequest {
-            parent: ROOT.to_string(),
+            parent: parent.to_string(),
             query_type: Some(QueryType::StructuredQuery(query)),
             ..Default::default()
         })
         .await?
         .into_inner();
 
-    let mut ids = Vec::new();
+    let mut documents = Vec::new();
     while let Some(response) = stream.message().await? {
         assert!(
             response.read_time.is_some(),
             "every response carries the read time"
         );
         if let Some(document) = response.document {
-            ids.push(
-                document
-                    .name
-                    .rsplit('/')
-                    .next()
-                    .expect("a name has segments")
-                    .to_string(),
-            );
+            documents.push(document);
         }
     }
-    Ok(ids)
+    Ok(documents)
 }
 
 #[tokio::test]
@@ -631,28 +645,655 @@ async fn run_query_with_no_matches_still_answers() {
     server.shutdown().await.expect("clean shutdown");
 }
 
-#[tokio::test]
-async fn run_query_rejects_a_collection_group_query_clearly() {
-    let (server, mut client) = start().await;
+// --- Collection group queries (SAK-191) ------------------------------------
 
-    let status = run_query(
+fn collection_group(collection_id: &str) -> Vec<CollectionSelector> {
+    vec![CollectionSelector {
+        collection_id: collection_id.to_string(),
+        all_descendants: true,
+    }]
+}
+
+/// A document at an arbitrary path below the root, with one `age` field.
+fn aged(path: &str, age: i64) -> Document {
+    Document {
+        name: format!("{ROOT}/{path}"),
+        fields: fields([("age", integer_value(age))]),
+        ..Default::default()
+    }
+}
+
+/// The paths a query returned, relative to the documents root.
+fn paths(documents: &[Document]) -> Vec<String> {
+    documents
+        .iter()
+        .map(|document| {
+            document
+                .name
+                .strip_prefix(&format!("{ROOT}/"))
+                .expect("a result is under the root")
+                .to_string()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_collection_group_query_spans_every_depth() {
+    let (server, mut client) = start().await;
+    seed(
         &mut client,
+        vec![
+            aged("members/top", 30),
+            aged("teams/a/members/amy", 20),
+            aged("teams/b/members/zoe", 40),
+            aged("teams/a/squads/x/members/deep", 10),
+            // Same depth, different collection: must not be swept in.
+            aged("teams/a/guests/gil", 15),
+        ],
+    )
+    .await;
+
+    let found = run_query_under(
+        &mut client,
+        ROOT,
         StructuredQuery {
-            from: vec![CollectionSelector {
-                collection_id: "people".to_string(),
-                all_descendants: true,
+            from: collection_group("members"),
+            order_by: vec![Order {
+                field: Some(FieldReference {
+                    field_path: "age".to_string(),
+                }),
+                direction: Direction::Ascending as i32,
             }],
             ..Default::default()
         },
     )
     .await
-    .expect_err("collection group queries are not served");
+    .expect("a collection group query is served");
+
+    assert_eq!(
+        paths(&found),
+        vec![
+            "teams/a/squads/x/members/deep",
+            "teams/a/members/amy",
+            "members/top",
+            "teams/b/members/zoe",
+        ],
+        "every `members` collection at any depth, ordered by age"
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_collection_group_query_is_scoped_to_its_parent() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            aged("teams/a/members/amy", 20),
+            aged("teams/a/squads/x/members/deep", 10),
+            aged("teams/b/members/zoe", 40),
+        ],
+    )
+    .await;
+
+    let found = run_query_under(
+        &mut client,
+        &format!("{ROOT}/teams/a"),
+        StructuredQuery {
+            from: collection_group("members"),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a parent-scoped collection group query is served");
+
+    assert_eq!(
+        paths(&found),
+        vec!["teams/a/members/amy", "teams/a/squads/x/members/deep"],
+        "team b's members are outside the parent"
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_collection_group_query_still_filters_and_limits() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            aged("teams/a/members/amy", 20),
+            aged("teams/b/members/zoe", 20),
+            aged("teams/c/members/cat", 40),
+        ],
+    )
+    .await;
+
+    let found = run_query_under(
+        &mut client,
+        ROOT,
+        StructuredQuery {
+            from: collection_group("members"),
+            r#where: equals("age", integer_value(20)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("filters still apply");
+
+    assert_eq!(
+        paths(&found),
+        vec!["teams/a/members/amy", "teams/b/members/zoe"]
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_collection_group_query_without_a_collection_id_is_refused() {
+    let (server, mut client) = start().await;
+
+    let status = run_query(
+        &mut client,
+        StructuredQuery {
+            from: collection_group(""),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("a kindless scan is not served");
 
     assert_eq!(status.code(), Code::Unimplemented);
+    server.shutdown().await.expect("clean shutdown");
+}
+
+// --- Cursors (SAK-191) -----------------------------------------------------
+
+fn cursor(values: Vec<Value>, before: bool) -> Option<Cursor> {
+    Some(Cursor { values, before })
+}
+
+fn reference_value(name: &str) -> Value {
+    Value {
+        value_type: Some(ValueType::ReferenceValue(name.to_string())),
+    }
+}
+
+fn by_age(descending: bool) -> Vec<Order> {
+    vec![Order {
+        field: Some(FieldReference {
+            field_path: "age".to_string(),
+        }),
+        direction: if descending {
+            Direction::Descending as i32
+        } else {
+            Direction::Ascending as i32
+        },
+    }]
+}
+
+#[tokio::test]
+async fn cursors_bound_the_result_range_at_both_ends() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            person("alice", "Tokyo", 25),
+            person("bob", "Kyoto", 31),
+            person("carol", "Osaka", 41),
+            person("dan", "Nara", 55),
+        ],
+    )
+    .await;
+
+    let range = |start, end| StructuredQuery {
+        from: from("people"),
+        order_by: by_age(false),
+        start_at: start,
+        end_at: end,
+        ..Default::default()
+    };
+
+    // startAt(31) / startAfter(31)
+    assert_eq!(
+        run_query(
+            &mut client,
+            range(cursor(vec![integer_value(31)], true), None)
+        )
+        .await
+        .expect("startAt runs"),
+        vec!["bob", "carol", "dan"]
+    );
+    assert_eq!(
+        run_query(
+            &mut client,
+            range(cursor(vec![integer_value(31)], false), None)
+        )
+        .await
+        .expect("startAfter runs"),
+        vec!["carol", "dan"]
+    );
+    // endAt(41) / endBefore(41)
+    assert_eq!(
+        run_query(
+            &mut client,
+            range(None, cursor(vec![integer_value(41)], false))
+        )
+        .await
+        .expect("endAt runs"),
+        vec!["alice", "bob", "carol"]
+    );
+    assert_eq!(
+        run_query(
+            &mut client,
+            range(None, cursor(vec![integer_value(41)], true))
+        )
+        .await
+        .expect("endBefore runs"),
+        vec!["alice", "bob"]
+    );
+    // Both ends at once.
+    assert_eq!(
+        run_query(
+            &mut client,
+            range(
+                cursor(vec![integer_value(31)], true),
+                cursor(vec![integer_value(55)], true)
+            )
+        )
+        .await
+        .expect("a bounded range runs"),
+        vec!["bob", "carol"]
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// The paging shape an SDK produces from `startAfter(lastSnapshot)`: one cursor
+/// value per order term, ending in the document's own name.
+#[tokio::test]
+async fn a_snapshot_cursor_pages_without_repeating_or_skipping_a_tie() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            // Three documents share an age, so only `__name__` separates them.
+            person("alice", "Tokyo", 31),
+            person("bob", "Kyoto", 31),
+            person("carol", "Osaka", 31),
+            person("dan", "Nara", 55),
+        ],
+    )
+    .await;
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut after: Option<Cursor> = None;
+    loop {
+        let page = run_query_under(
+            &mut client,
+            ROOT,
+            StructuredQuery {
+                from: from("people"),
+                order_by: by_age(false),
+                start_at: after.clone(),
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("each page runs");
+
+        if page.is_empty() {
+            break;
+        }
+        let last = page.last().expect("a non-empty page").clone();
+        after = cursor(
+            vec![
+                last.fields.get("age").expect("age is set").clone(),
+                reference_value(&last.name),
+            ],
+            false,
+        );
+        seen.extend(page.iter().map(|document| {
+            document
+                .name
+                .rsplit('/')
+                .next()
+                .expect("a name has segments")
+                .to_string()
+        }));
+        assert!(seen.len() <= 4, "paging must terminate: {seen:?}");
+    }
+
+    assert_eq!(
+        seen,
+        vec!["alice", "bob", "carol", "dan"],
+        "every document exactly once, in order, across the pages"
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_cursor_follows_a_descending_order() {
+    let (server, mut client) = start().await;
+    seed(
+        &mut client,
+        vec![
+            person("alice", "Tokyo", 25),
+            person("bob", "Kyoto", 31),
+            person("carol", "Osaka", 41),
+        ],
+    )
+    .await;
+
+    let found = run_query(
+        &mut client,
+        StructuredQuery {
+            from: from("people"),
+            order_by: by_age(true),
+            start_at: cursor(vec![integer_value(41)], false),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the query runs");
+
+    assert_eq!(
+        found,
+        vec!["bob", "alice"],
+        "descending, 'after 41' is the smaller ages"
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_cursor_the_query_cannot_position_is_an_invalid_argument() {
+    let (server, mut client) = start().await;
+
+    let rejected = |query| async {
+        run_query(&mut client.clone(), query)
+            .await
+            .expect_err("the cursor is not positionable")
+            .code()
+    };
+
+    assert_eq!(
+        rejected(StructuredQuery {
+            from: from("people"),
+            start_at: cursor(vec![], true),
+            ..Default::default()
+        })
+        .await,
+        Code::InvalidArgument,
+        "a cursor with no values has no position"
+    );
+    assert_eq!(
+        rejected(StructuredQuery {
+            from: from("people"),
+            // The implicit order is `__name__` alone.
+            start_at: cursor(vec![integer_value(1), integer_value(2)], true),
+            ..Default::default()
+        })
+        .await,
+        Code::InvalidArgument,
+        "a cursor must not be longer than the order"
+    );
+    assert_eq!(
+        rejected(StructuredQuery {
+            from: from("people"),
+            end_at: cursor(vec![string_value("bob")], false),
+            ..Default::default()
+        })
+        .await,
+        Code::InvalidArgument,
+        "a __name__ position must be a reference, not a string"
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+// --- Nested field paths (SAK-191) ------------------------------------------
+
+fn map_value<const N: usize>(pairs: [(&str, Value); N]) -> Value {
+    Value {
+        value_type: Some(ValueType::MapValue(MapValue {
+            fields: fields(pairs),
+        })),
+    }
+}
+
+/// `{ address: { city, zip }, name }`, plus a field literally called
+/// `address.city` on `dan`.
+async fn seed_addressed(client: &mut FirestoreClient<Channel>) {
+    let resident = |id: &str, city: &str, zip: &str| Document {
+        name: format!("{ROOT}/people/{id}"),
+        fields: fields([
+            (
+                "address",
+                map_value([("city", string_value(city)), ("zip", string_value(zip))]),
+            ),
+            ("name", string_value(id)),
+        ]),
+        ..Default::default()
+    };
+    seed(
+        client,
+        vec![
+            resident("alice", "Tokyo", "100-0001"),
+            resident("bob", "Kyoto", "600-8216"),
+            Document {
+                name: format!("{ROOT}/people/dan"),
+                fields: fields([("address.city", string_value("Tokyo"))]),
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_filter_on_a_nested_path_reads_inside_the_map() {
+    let (server, mut client) = start().await;
+    seed_addressed(&mut client).await;
+
+    let found = run_query(
+        &mut client,
+        StructuredQuery {
+            from: from("people"),
+            r#where: equals("address.city", string_value("Tokyo")),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a nested filter is served");
+
+    assert_eq!(
+        found,
+        vec!["alice"],
+        "dan's field is only spelled `address.city`; it is not nested"
+    );
+
+    let quoted = run_query(
+        &mut client,
+        StructuredQuery {
+            from: from("people"),
+            r#where: equals("`address.city`", string_value("Tokyo")),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a quoted path is served");
+
+    assert_eq!(
+        quoted,
+        vec!["dan"],
+        "backticks make it one literal field name"
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn ordering_by_a_nested_path_drops_documents_that_lack_it() {
+    let (server, mut client) = start().await;
+    seed_addressed(&mut client).await;
+
+    let found = run_query(
+        &mut client,
+        StructuredQuery {
+            from: from("people"),
+            order_by: vec![Order {
+                field: Some(FieldReference {
+                    field_path: "address.city".to_string(),
+                }),
+                direction: Direction::Ascending as i32,
+            }],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a nested order is served");
+
+    assert_eq!(
+        found,
+        vec!["bob", "alice"],
+        "Kyoto before Tokyo; dan has no nested address.city"
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_nested_projection_keeps_the_nesting() {
+    let (server, mut client) = start().await;
+    seed_addressed(&mut client).await;
+
+    let found = run_query_under(
+        &mut client,
+        ROOT,
+        StructuredQuery {
+            from: from("people"),
+            r#where: equals("address.city", string_value("Tokyo")),
+            select: Some(Projection {
+                fields: vec![FieldReference {
+                    field_path: "address.city".to_string(),
+                }],
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a nested projection is served");
+
+    let only = found.first().expect("alice matched");
     assert!(
-        status.message().contains("all_descendants"),
-        "the message should name the unsupported feature: {}",
-        status.message()
+        !only.fields.contains_key("address.city"),
+        "the path must not arrive flattened: {:?}",
+        only.fields
+    );
+    assert!(!only.fields.contains_key("name"), "name was not selected");
+    let Some(ValueType::MapValue(address)) = &only
+        .fields
+        .get("address")
+        .expect("address survives")
+        .value_type
+    else {
+        panic!("address stays a map: {:?}", only.fields);
+    };
+    assert!(address.fields.contains_key("city"));
+    assert!(
+        !address.fields.contains_key("zip"),
+        "an unselected sibling inside the map is dropped"
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_nested_read_mask_selects_the_leaf_it_names() {
+    let (server, mut client) = start().await;
+    seed_addressed(&mut client).await;
+
+    let document = client
+        .get_document(GetDocumentRequest {
+            name: format!("{ROOT}/people/alice"),
+            mask: Some(DocumentMask {
+                field_paths: vec!["address.zip".to_string()],
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("a nested read mask is served")
+        .into_inner();
+
+    assert!(!document.fields.contains_key("name"));
+    let Some(ValueType::MapValue(address)) = &document
+        .fields
+        .get("address")
+        .expect("address survives")
+        .value_type
+    else {
+        panic!("address stays a map: {:?}", document.fields);
+    };
+    assert!(address.fields.contains_key("zip"));
+    assert!(
+        !address.fields.contains_key("city"),
+        "city was not masked in"
+    );
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_malformed_field_path_is_an_invalid_argument() {
+    let (server, mut client) = start().await;
+
+    let status = run_query(
+        &mut client,
+        StructuredQuery {
+            from: from("people"),
+            r#where: equals("address..city", string_value("Tokyo")),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("a malformed path is rejected");
+    assert_eq!(status.code(), Code::InvalidArgument);
+
+    let masked = client
+        .get_document(GetDocumentRequest {
+            name: format!("{ROOT}/people/alice"),
+            mask: Some(DocumentMask {
+                field_paths: vec!["`unterminated".to_string()],
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a malformed mask path is rejected");
+    assert_eq!(masked.code(), Code::InvalidArgument);
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_nested_update_mask_is_still_refused() {
+    let (server, mut client) = start().await;
+    seed_addressed(&mut client).await;
+
+    let status = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: vec![Write {
+                operation: Some(Operation::Update(Document {
+                    name: format!("{ROOT}/people/alice"),
+                    fields: fields([("address", map_value([("city", string_value("Nara"))]))]),
+                    ..Default::default()
+                })),
+                update_mask: Some(DocumentMask {
+                    field_paths: vec!["address.city".to_string()],
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("a nested update mask is not served");
+
+    assert_eq!(
+        status.code(),
+        Code::Unimplemented,
+        "merging into a stored map is a write-path change, not a query one"
     );
     server.shutdown().await.expect("clean shutdown");
 }
