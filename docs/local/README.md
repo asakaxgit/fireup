@@ -153,6 +153,9 @@ Every row below is checked, not just written down:
 row with the official SDKs, and `cargo test --test fidelity_matrix_tests` fails
 if this table and that suite stop agreeing. See [Tests](#tests).
 
+For the same rows set beside floci-gcp, Google's Firebase Emulator Suite, and
+the production service, see [`COMPARISON.md`](COMPARISON.md).
+
 ### RPCs
 
 All 17 RPCs of `google.firestore.v1.Firestore`. The first 12 marked **served**

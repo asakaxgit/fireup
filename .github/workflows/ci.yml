@@ -1,0 +1,74 @@
+name: CI
+
+# The workflow the README's CI badge reports on, and the only one in this
+# directory that runs on every commit.
+#
+# Scope is chosen so that red means "the code is broken", never "a service did
+# not come up": everything here runs with nothing but a Rust toolchain — no
+# PostgreSQL, no Node, no Docker, no network. The suites that need those live in
+# `local_firestore.yml` (the official-SDK conformance layer) and
+# `integration_tests.yml`, which stay manual for now.
+#
+# Deliberately not here yet: `cargo fmt --check` and `cargo clippy -D warnings`.
+# Both are currently failing on `main` for reasons that predate this workflow,
+# so adding them would ship a permanently red badge and teach everyone to
+# ignore it. Cleaning them up and adding them as a job is its own task.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: build and test (no external services)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          cargo --version && rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-ci-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      - name: Unit tests
+        run: cargo test --locked --lib
+
+      # The static checks that keep the documented promises honest: the fidelity
+      # matrix, the comparison document, and the README badges all have to agree
+      # with tests/conformance/matrix.json.
+      - name: Docs and matrix are in sync
+        run: cargo test --locked --test fidelity_matrix_tests
+
+      # Each of these starts what it needs in-process and talks to it over real
+      # gRPC or real HTTP/1.1.
+      - name: Local data plane
+        run: |
+          cargo test --locked --test local_firestore_tests
+          cargo test --locked --test local_firestore_listen_tests
+          cargo test --locked --test local_datastore_tests
+          cargo test --locked --test local_auth_tests
+
+      - name: Export parsing and the library/CLI surface
+        run: |
+          cargo test --locked --test real_export_validation
+          cargo test --locked --test export_fidelity_tests
+          cargo test --locked --test library_api_tests
+          cargo test --locked --test cli_exit_code_tests

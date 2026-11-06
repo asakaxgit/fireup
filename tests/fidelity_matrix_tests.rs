@@ -57,17 +57,18 @@ fn normalize_status(cell: &str) -> String {
 /// The rows of the first markdown table after `heading`, as `(label, status)`.
 /// `status_column` is the 0-based index of the status cell, or `None` for a
 /// table that has no status column — the Field transforms table puts it third,
-/// after the SDK spelling.
-fn table_rows(
-    readme: &str,
+/// after the SDK spelling. `doc` names the file, for the panic messages.
+fn table_rows_in(
+    doc: &str,
+    text: &str,
     heading: &str,
     status_column: Option<usize>,
 ) -> Vec<(String, Option<String>)> {
-    let mut lines = readme.lines();
+    let mut lines = text.lines();
     lines
         .by_ref()
         .find(|line| line.trim() == heading)
-        .unwrap_or_else(|| panic!("docs/local/README.md has no heading {heading:?}"));
+        .unwrap_or_else(|| panic!("{doc} has no heading {heading:?}"));
 
     let mut rows = Vec::new();
     let mut seen_header = false;
@@ -110,9 +111,18 @@ fn table_rows(
 
     assert!(
         !rows.is_empty(),
-        "no table rows found under {heading:?} in docs/local/README.md"
+        "no table rows found under {heading:?} in {doc}"
     );
     rows
+}
+
+/// `table_rows_in` against the fidelity matrix's own document.
+fn table_rows(
+    readme: &str,
+    heading: &str,
+    status_column: Option<usize>,
+) -> Vec<(String, Option<String>)> {
+    table_rows_in("docs/local/README.md", readme, heading, status_column)
 }
 
 #[test]
@@ -341,4 +351,147 @@ fn every_matrix_entry_is_claimed_by_a_conformance_probe() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// docs/local/COMPARISON.md — the same rule, applied to the comparison tables.
+//
+// The comparison puts Fireup beside floci-gcp, Google's emulator, and the
+// production service. The other three columns are a reading of someone else's
+// documentation and nothing here can check them. Fireup's column is different:
+// it makes the same claims as the fidelity matrix, in a second place, which is
+// exactly how a document starts lying. So every comparison row whose label
+// matches a matrix row is compared against `matrix.json`, and the number of
+// rows that match has a floor — otherwise the linkage could be removed by
+// rewording the labels, and the test would still pass while checking nothing.
+// ---------------------------------------------------------------------------
+
+const COMPARISON_DOC: &str = "docs/local/COMPARISON.md";
+
+/// Section headings in the comparison whose second column is Fireup's verdict.
+const COMPARISON_TABLES: [&str; 7] = [
+    "## Firestore RPCs",
+    "## Queries",
+    "## Field transforms",
+    "## Where the local implementations diverge from production",
+    "## Datastore",
+    "### Datastore property masks",
+    "## Firebase Auth / Identity Toolkit",
+];
+
+/// Below this many cross-checked rows, assume the comparison drifted away from
+/// the matrix rather than that the matrix shrank. Raise it when rows are added.
+const COMPARISON_CROSS_CHECKED_FLOOR: usize = 57;
+
+/// A comparison cell is a verdict, sometimes followed by an em-dash
+/// explanation: "documented-divergence — read the link from …". The verdict is
+/// what has to agree with the matrix.
+fn comparison_verdict(cell: &str) -> String {
+    let verdict = cell.split('—').next().unwrap_or(cell);
+    normalize_status(verdict)
+}
+
+#[test]
+fn the_comparison_doc_agrees_with_matrix_json_about_fireup() {
+    let comparison = read(&repo_root().join(COMPARISON_DOC));
+    let matrix = matrix();
+
+    let by_label: BTreeMap<String, &serde_json::Value> = matrix["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|feature| (normalize_label(feature["label"].as_str().unwrap()), feature))
+        .collect();
+
+    let mut cross_checked = 0usize;
+    for heading in COMPARISON_TABLES {
+        // Column 1 is Fireup: the tables are | subject | fireup | floci-gcp |
+        // Firebase emulator | GCP |.
+        for (label, verdict) in table_rows_in(COMPARISON_DOC, &comparison, heading, Some(1)) {
+            let Some(feature) = by_label.get(&label) else {
+                continue; // a product-level row with no matrix entry, by design
+            };
+            let verdict = comparison_verdict(verdict.as_deref().unwrap());
+            let claimed = feature["status"].as_str().unwrap();
+            assert_eq!(
+                verdict, claimed,
+                "{COMPARISON_DOC}, table {heading:?}, says Fireup's {label:?} is {verdict:?}, \
+                 but tests/conformance/matrix.json says {claimed:?}. The matrix is the one with \
+                 a probe behind it; fix the comparison."
+            );
+            cross_checked += 1;
+        }
+    }
+
+    assert!(
+        cross_checked >= COMPARISON_CROSS_CHECKED_FLOOR,
+        "only {cross_checked} rows of {COMPARISON_DOC} matched a matrix.json label, expected at \
+         least {COMPARISON_CROSS_CHECKED_FLOOR}. Comparison rows are tied to the matrix by their \
+         label, so rewording one silently stops it being checked — keep the label verbatim from \
+         the fidelity matrix."
+    );
+}
+
+#[test]
+fn the_readme_fidelity_badge_counts_what_the_matrix_says() {
+    // The badge in README.md is a number about the matrix, sitting far away
+    // from the matrix. Pin it, or it rots: a feature landing flips a status in
+    // matrix.json and nobody thinks about a shields.io URL.
+    let readme = read(&repo_root().join("README.md"));
+    let features = matrix()["features"].as_array().unwrap().clone();
+    let served = features
+        .iter()
+        .filter(|feature| feature["status"].as_str() == Some("served"))
+        .count();
+    let expected = format!("fidelity%20matrix-{served}%2F{}%20served", features.len());
+
+    assert!(
+        readme.contains(&expected),
+        "README.md has no fidelity-matrix badge reading {expected:?}. \
+         tests/conformance/matrix.json now holds {} rows, {served} of them served; \
+         update the badge URL to match.",
+        features.len()
+    );
+}
+
+#[test]
+fn the_coverage_floor_is_the_same_number_everywhere() {
+    // The floor is written in three places that cannot see each other: the
+    // script that enforces it, the workflow that runs the script, and the badge
+    // that advertises it. Two of them agreeing is not enough — a badge claiming
+    // a floor nobody enforces is worse than no badge.
+    let script = read(&repo_root().join("scripts/coverage.sh"));
+    let workflow = read(&repo_root().join(".github/workflows/coverage.yml"));
+    let readme = read(&repo_root().join("README.md"));
+
+    let after = |text: &str, marker: &str| -> String {
+        let start = text
+            .find(marker)
+            .unwrap_or_else(|| panic!("no {marker:?} found; the coverage floor moved"))
+            + marker.len();
+        text[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect()
+    };
+
+    let script_floor = after(&script, "FIREUP_COVERAGE_MIN:-");
+    let workflow_floor = after(&workflow, "FIREUP_COVERAGE_MIN: ");
+    assert_eq!(
+        script_floor, workflow_floor,
+        "scripts/coverage.sh defaults to a {script_floor}% floor but \
+         .github/workflows/coverage.yml sets {workflow_floor}%"
+    );
+
+    // %E2%89%A5 is "≥", URL-escaped for shields.io.
+    let badge = format!("line%20coverage-%E2%89%A5{script_floor}%25");
+    assert!(
+        readme.contains(&badge),
+        "README.md's coverage badge does not advertise the {script_floor}% floor that \
+         scripts/coverage.sh enforces; it should contain {badge:?}"
+    );
+    assert!(
+        readme.contains(&format!("fails under {script_floor}% line coverage")),
+        "README.md should say in words that CI fails under {script_floor}% line coverage"
+    );
 }
