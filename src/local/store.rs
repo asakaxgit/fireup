@@ -19,6 +19,12 @@
 //!   built from. Filtering, ordering, and limiting live in
 //!   [`query`](crate::local::query) rather than in each backend, so both
 //!   stores answer a query identically.
+//!
+//! [`Store::scan_collection_filtered`] is the one concession to backend
+//! strengths: a backend may use a query's [`Prefilter`] to return fewer rows,
+//! but only ever a superset of the matching ones, so it changes how much is
+//! read and never what a query means. The default implementation ignores the
+//! pre-filter, which is what [`MemoryStore`] uses.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
@@ -26,6 +32,7 @@ use std::sync::{Arc, RwLock};
 use prost_types::Timestamp;
 use tonic::Status;
 
+use crate::local::query::Prefilter;
 use crate::local::transforms::{self, FieldTransform};
 use crate::protos::google::firestore::v1::{Document, Value};
 
@@ -340,7 +347,9 @@ pub enum WriteOutcome {
     /// A delete, and whether it actually removed anything. Firestore deletes
     /// are idempotent, so "nothing to delete" is a successful outcome and not
     /// an error.
-    Deleted { existed: bool },
+    Deleted {
+        existed: bool,
+    },
     /// A [`Mutation::Verify`] whose precondition held. Nothing was written.
     Verified,
 }
@@ -419,6 +428,30 @@ pub trait Store: Send + Sync + 'static {
         collection_id: &str,
     ) -> StoreResult<Vec<Document>>;
 
+    /// Like [`Store::scan_collection`], but allowed to leave out documents the
+    /// query cannot match.
+    ///
+    /// The contract is deliberately one-sided: the result must contain **every**
+    /// document [`scan_collection`](Store::scan_collection) would return that
+    /// `prefilter` can match, and may contain any number of documents that it
+    /// cannot. A backend that drops a matching row produces a wrong query
+    /// result; a backend that keeps a non-matching row only costs one in-process
+    /// comparison, which the caller was going to do anyway.
+    ///
+    /// The default implementation returns the whole collection. That is always
+    /// correct, so a backend opts into pushdown rather than having to implement
+    /// it — and `MemoryStore` deliberately does not, which keeps the in-process
+    /// engine the thing CI tests.
+    async fn scan_collection_filtered(
+        &self,
+        parent: &str,
+        collection_id: &str,
+        prefilter: Prefilter<'_>,
+    ) -> StoreResult<Vec<Document>> {
+        let _ = prefilter;
+        self.scan_collection(parent, collection_id).await
+    }
+
     /// Every document whose collection id is `kind` anywhere under
     /// `documents_root`, ordered by resource name.
     ///
@@ -426,6 +459,23 @@ pub trait Store: Send + Sync + 'static {
     /// ancestry; Firestore collection reads do not. This is the store shape
     /// that makes the two APIs share one table without lying about either.
     async fn scan_kind(&self, documents_root: &str, kind: &str) -> StoreResult<Vec<Document>>;
+
+    /// Like [`Store::scan_kind`], under the same one-sided contract as
+    /// [`Store::scan_collection_filtered`]: the result may omit documents
+    /// `prefilter` cannot match, and must omit none that it can.
+    ///
+    /// Worth having separately from the collection form because this is the
+    /// wider read — a Firestore collection group query, or a Datastore kind
+    /// query, spans every matching collection under the root rather than one.
+    async fn scan_kind_filtered(
+        &self,
+        documents_root: &str,
+        kind: &str,
+        prefilter: Prefilter<'_>,
+    ) -> StoreResult<Vec<Document>> {
+        let _ = prefilter;
+        self.scan_kind(documents_root, kind).await
+    }
 
     /// The distinct first path segments of every document name beneath
     /// `prefix`, sorted in UTF-8 byte order.
@@ -454,7 +504,10 @@ pub trait Store: Send + Sync + 'static {
     /// matching the documented Firestore behaviour that `create_time` only
     /// advances when a document is deleted and recreated.
     async fn put(&self, document: Document, now: Timestamp) -> StoreResult<WriteOutcome> {
-        single(self.commit(vec![PendingWrite::new(Mutation::Put(document))], now).await?)
+        single(
+            self.commit(vec![PendingWrite::new(Mutation::Put(document))], now)
+                .await?,
+        )
     }
 
     /// Merge `fields` into an existing document, creating it if absent. Only
@@ -639,7 +692,9 @@ impl Store for MemoryStore {
                 // documents root — the same rule `parse_document_name` uses.
                 let rest = name.strip_prefix(&prefix)?;
                 let segments: Vec<&str> = rest.split('/').collect();
-                if segments.len() >= 2 && segments.len() % 2 == 0 && segments[segments.len() - 2] == kind
+                if segments.len() >= 2
+                    && segments.len() % 2 == 0
+                    && segments[segments.len() - 2] == kind
                 {
                     Some(document.clone())
                 } else {
@@ -712,7 +767,9 @@ pub mod conformance {
     pub fn doc(name: &str, field: &str, text: &str) -> Document {
         Document {
             name: name.to_string(),
-            fields: [(field.to_string(), string_value(text))].into_iter().collect(),
+            fields: [(field.to_string(), string_value(text))]
+                .into_iter()
+                .collect(),
             create_time: None,
             update_time: None,
         }
@@ -732,7 +789,7 @@ pub mod conformance {
         merge_creates_a_missing_document(store, &name("merge-create")).await;
         delete_reports_whether_the_document_existed(store, &name("delete")).await;
         missing_documents_read_as_none(store, &name("absent")).await;
-        counts_reflect_writes_and_deletes(store, &name("count")).await;
+        writes_and_deletes_change_what_a_read_returns(store, &name("count")).await;
         preconditions_are_enforced_by_the_store(store, &name("precondition")).await;
         a_failed_precondition_abandons_the_whole_batch(store, &name("atomic")).await;
         a_batch_reads_its_own_earlier_writes(store, &name("ordered")).await;
@@ -749,7 +806,11 @@ pub mod conformance {
             WriteOutcome::Created
         );
 
-        let found = store.get(name).await.expect("get").expect("document stored");
+        let found = store
+            .get(name)
+            .await
+            .expect("get")
+            .expect("document stored");
         assert_eq!(found.name, name);
         assert_eq!(found.create_time, Some(ts(10)));
         assert_eq!(found.update_time, Some(ts(10)));
@@ -760,7 +821,10 @@ pub mod conformance {
     async fn overwrite_keeps_create_time_and_advances_update_time(store: &dyn Store, name: &str) {
         store.put(doc(name, "k", "v1"), ts(10)).await.expect("put");
         assert_eq!(
-            store.put(doc(name, "k", "v2"), ts(20)).await.expect("overwrite"),
+            store
+                .put(doc(name, "k", "v2"), ts(20))
+                .await
+                .expect("overwrite"),
             WriteOutcome::Updated
         );
 
@@ -771,16 +835,28 @@ pub mod conformance {
     }
 
     async fn overwrite_drops_fields_absent_from_the_new_document(store: &dyn Store, name: &str) {
-        store.put(doc(name, "keep", "v"), ts(10)).await.expect("put");
-        store.put(doc(name, "other", "v"), ts(20)).await.expect("overwrite");
+        store
+            .put(doc(name, "keep", "v"), ts(10))
+            .await
+            .expect("put");
+        store
+            .put(doc(name, "other", "v"), ts(20))
+            .await
+            .expect("overwrite");
 
         let found = store.get(name).await.expect("get").expect("still present");
-        assert!(!found.fields.contains_key("keep"), "put replaces all fields");
+        assert!(
+            !found.fields.contains_key("keep"),
+            "put replaces all fields"
+        );
         assert!(found.fields.contains_key("other"));
     }
 
     async fn merge_only_touches_named_fields(store: &dyn Store, name: &str) {
-        store.put(doc(name, "keep", "v"), ts(10)).await.expect("put");
+        store
+            .put(doc(name, "keep", "v"), ts(10))
+            .await
+            .expect("put");
         assert_eq!(
             store
                 .merge(name, vec![("added".to_string(), string_value("x"))], ts(20))
@@ -813,7 +889,10 @@ pub mod conformance {
         store.put(doc(name, "k", "v"), ts(10)).await.expect("put");
 
         assert!(store.delete(name).await.expect("delete"));
-        assert!(!store.delete(name).await.expect("second delete"), "deletes are idempotent");
+        assert!(
+            !store.delete(name).await.expect("second delete"),
+            "deletes are idempotent"
+        );
         assert!(!store.contains(name).await.expect("contains"));
         assert!(store.get(name).await.expect("get").is_none());
     }
@@ -823,12 +902,73 @@ pub mod conformance {
         assert!(!store.contains(name).await.expect("contains"));
     }
 
-    async fn counts_reflect_writes_and_deletes(store: &dyn Store, name: &str) {
-        let before = store.count().await.expect("count");
+    /// A write becomes visible to a collection read, and a delete stops being
+    /// visible.
+    ///
+    /// This is the race-free half of what used to be a [`Store::count`]
+    /// assertion. `count` is **store-wide**, so an absolute total cannot be
+    /// asserted from here: the PostgreSQL backend shares one table across every
+    /// test in its binary, and a sibling test writing in between made
+    /// `before + 1` fail for a reason that has nothing to do with counting
+    /// (~1 run in 8 once a second document-writing test joined that binary,
+    /// SAK-192). Asserting the *direction* of the change is no better — a
+    /// concurrent insert masks the delete, giving `11 -> 11`.
+    ///
+    /// Scoping the read to this test's own collection makes it exact again.
+    /// The store-wide behaviour of `count` itself is asserted in
+    /// [`assert_exclusive_count_contract`], from a test that owns its store.
+    async fn writes_and_deletes_change_what_a_read_returns(store: &dyn Store, name: &str) {
+        let present = |documents: &[Document]| documents.iter().any(|d| d.name == name);
+        // `name` is `…/contract/count`, so this reads the collection holding it.
+        let (parent, collection) = name
+            .rsplit_once('/')
+            .map(|(parent, _)| parent.rsplit_once('/').expect("a rooted name"))
+            .expect("a rooted name");
+
         store.put(doc(name, "k", "v"), ts(10)).await.expect("put");
-        assert_eq!(store.count().await.expect("count"), before + 1);
+        let after_put = store
+            .scan_collection(parent, collection)
+            .await
+            .expect("scan");
+        assert!(present(&after_put), "a stored document has to be readable");
+        assert!(store.contains(name).await.expect("contains"));
+
         store.delete(name).await.expect("delete");
-        assert_eq!(store.count().await.expect("count"), before);
+        let after_delete = store
+            .scan_collection(parent, collection)
+            .await
+            .expect("scan");
+        assert!(
+            !present(&after_delete),
+            "a deleted document must not come back from a read"
+        );
+        assert!(!store.contains(name).await.expect("contains"));
+    }
+
+    /// That [`Store::count`] tracks writes and deletes exactly.
+    ///
+    /// **Requires exclusive use of `store`**, because `count` is store-wide.
+    /// Kept out of [`assert_store_contract`] for that reason: the PostgreSQL
+    /// conformance test shares its table with every other test in its binary,
+    /// so an exact total there is a coin flip rather than a check. Call this
+    /// only from a test that owns the whole store.
+    pub async fn assert_exclusive_count_contract(store: &dyn Store, root: &str) {
+        let name = format!("{root}/exclusive-count/doc");
+        let before = store.count().await.expect("count");
+
+        store.put(doc(&name, "k", "v"), ts(10)).await.expect("put");
+        assert_eq!(
+            store.count().await.expect("count"),
+            before + 1,
+            "a stored document has to be counted"
+        );
+
+        store.delete(&name).await.expect("delete");
+        assert_eq!(
+            store.count().await.expect("count"),
+            before,
+            "a deleted document has to stop being counted"
+        );
     }
 
     /// All three precondition kinds, with the exact failure each must report —
@@ -854,7 +994,10 @@ pub mod conformance {
             "{failure}"
         );
 
-        store.commit(vec![put(false)], ts(10)).await.expect("exists=false creates");
+        store
+            .commit(vec![put(false)], ts(10))
+            .await
+            .expect("exists=false creates");
         let failure = store
             .commit(vec![put(false)], ts(20))
             .await
@@ -958,10 +1101,7 @@ pub mod conformance {
 
     /// A read-set verification writes nothing, and fails the batch — as a
     /// conflict, not as a client error — when the document moved on.
-    async fn a_verification_changes_nothing_but_can_fail_the_batch(
-        store: &dyn Store,
-        name: &str,
-    ) {
+    async fn a_verification_changes_nothing_but_can_fail_the_batch(store: &dyn Store, name: &str) {
         let read = format!("{name}-read");
         let written = format!("{name}-written");
         store.put(doc(&read, "k", "v"), ts(10)).await.expect("put");
@@ -969,9 +1109,7 @@ pub mod conformance {
         let batch = |expected: Timestamp, target: &str| {
             vec![
                 PendingWrite::guarded(
-                    Mutation::Verify {
-                        name: read.clone(),
-                    },
+                    Mutation::Verify { name: read.clone() },
                     Some(Precondition::UpdateTime(expected)),
                 ),
                 PendingWrite::new(Mutation::Put(doc(target, "k", "v"))),
@@ -1121,13 +1259,20 @@ pub mod conformance {
         }
 
         let found = store.scan_collection(name, "items").await.expect("scan");
-        let names: Vec<&str> = found.iter().map(|document| document.name.as_str()).collect();
+        let names: Vec<&str> = found
+            .iter()
+            .map(|document| document.name.as_str())
+            .collect();
         assert_eq!(
             names,
             vec![format!("{name}/items/a"), format!("{name}/items/b")],
             "a collection read returns its direct children, sorted by document id"
         );
-        assert_eq!(found[0].fields["k"], string_value("v"), "documents come back whole");
+        assert_eq!(
+            found[0].fields["k"],
+            string_value("v"),
+            "documents come back whole"
+        );
 
         assert!(
             store
@@ -1151,7 +1296,10 @@ pub mod conformance {
             .await
             .expect("put");
         store
-            .put(doc(&format!("{name}/ghostly/never-written/deep/d1"), "k", "v"), ts(10))
+            .put(
+                doc(&format!("{name}/ghostly/never-written/deep/d1"), "k", "v"),
+                ts(10),
+            )
             .await
             .expect("put");
 
@@ -1188,6 +1336,16 @@ mod tests {
     async fn memory_store_satisfies_the_store_contract() {
         let store = MemoryStore::new();
         assert_store_contract(&store, "projects/demo/databases/(default)/documents").await;
+    }
+
+    /// `count` is store-wide, so its exact contract is asserted here rather
+    /// than in `assert_store_contract`: this store is this test's alone, while
+    /// the PostgreSQL conformance test shares its table with its siblings.
+    #[tokio::test]
+    async fn an_exclusively_owned_store_counts_exactly() {
+        let store = MemoryStore::new();
+        assert_exclusive_count_contract(&store, "projects/demo/databases/(default)/documents")
+            .await;
     }
 
     #[tokio::test]

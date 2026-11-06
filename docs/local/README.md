@@ -289,6 +289,80 @@ wrong:
   than — and usually a fraction of a millisecond before — the document's
   `update_time`.
 
+### Query pushdown (Postgres only)
+
+With `--postgres-url`, a query's equality and range predicates are translated
+into SQL so the database returns the rows that could match instead of the whole
+collection. It applies to both query reads — one collection, and the collection
+group form that spans every matching collection below the parent. The in-memory
+store does not do this and reads everything.
+
+**It cannot change an answer.** The translation is *sound, not exact*: it must
+keep every row the query could match, and is free to keep rows the query will
+then reject. The in-process engine runs afterwards either way and has the only
+vote on the result, so the two backends cannot drift apart — and a predicate
+that cannot be translated faithfully is simply not translated. The differential
+test in [`tests/local_query_pushdown_tests.rs`](../../tests/local_query_pushdown_tests.rs)
+runs every query shape both ways against a real database and requires identical
+answers.
+
+Pushed into SQL:
+
+| Predicate | On |
+|---|---|
+| `==`, `in` | `null`, booleans, numbers, timestamps, strings, bytes, references, geo points, `__name__` |
+| `<`, `<=`, `>`, `>=` | numbers, booleans, strings, references, timestamps, `__name__` |
+| `IS_NULL`, `IS_NAN` | any field (exactly) |
+| `IS_NOT_NULL`, `IS_NOT_NAN` | any field (narrowed to "the field is present") |
+| `orderBy()` | as "the document carries the sort field", which excludes the rest |
+| `AND` | if any child is pushable |
+| `OR` | only if *every* child is pushable |
+
+All of the above work on a nested path (`profile.plan`) as well as a top-level
+field: the translation walks the stored map shape, one
+`-> 'mapValue' -> 'fields'` hop per extra segment, rather than looking for a
+field whose name contains a dot.
+
+Still filtered in the server process — these read the collection (or the part of
+it an `AND` sibling narrowed) and decide in Rust:
+
+| Case | Why |
+|---|---|
+| `!=`, `not-in` | Negating an approximate translation is not sound, and neither is selective enough to be worth an exact one. |
+| `array-contains`, `array-contains-any` | Firestore compares elements by value, where `1` equals `1.0`; JSONB containment compares them as written. |
+| `==` on an array or map value | Same reason, applied at every depth inside the value. |
+| `<`/`>` on bytes | Stored base64, which does not sort like the bytes it encodes. |
+| `<`/`>` on null, geo points, arrays, maps | No cheap SQL ordering, and no real query uses them. |
+| `OR` with one unpushable branch | That branch could match any row, so the whole `OR` could. |
+| `limit()`, `offset()`, cursors | All three are positional, resolved against the ordered result the pre-filter has already fed, so there is no way to know which rows they would keep. |
+| Datastore `RunQuery` | Has its own filter language and its own in-process evaluator; only the Firestore path is pushed down so far. |
+
+#### Where the speedup actually comes from
+
+Two separate effects, worth keeping apart because they kick in at different
+sizes:
+
+1. **Fewer rows shipped and decoded.** This is most of it. Decoding a row's
+   JSONB back into a `Document` is the expensive part of a collection read, and
+   a filtered scan skips that for every row that cannot match. Reproduce with
+   `cargo run --release --example pushdown_scale` against a test database: with
+   20,000 documents in one collection, a 1-in-1000 equality reads 20 rows
+   instead of 20,000 and a 1-in-7 equality reads 2,857. On the development box
+   that was roughly **4–10× less wall clock** depending on selectivity; the row
+   counts are the part that does not vary.
+2. **An index seek**, once the collection is big enough to be worth one. The
+   schema carries a GIN index on `fields`, and the `@>` spelling of equality is
+   what lets the planner use it. At 20,000 rows it still chooses a sequential
+   scan — correctly, since scanning is cheaper than the index at that size — and
+   at 200,000 rows it switches to a bitmap index scan on
+   `fireup_local_documents_fields_idx`. So effect 1 is what you get at small
+   volumes and effect 2 arrives on its own later.
+
+Range comparisons are JSONB expressions and are not indexed at all; they get
+effect 1 only. Per-field expression indexes would fix that and are deliberately
+not created — the server cannot know which fields a project queries, and
+guessing would cost every write.
+
 ### Transactions
 
 - **Atomic:** every write in a `Commit` applies or none does.
@@ -374,13 +448,16 @@ field before the transform runs, noted above.
 
 ### Other known limits
 
-- **A query reads the whole collection** — and a collection group query reads
-  every matching collection below its parent. Filtering, ordering, cursors, and
-  limiting happen in the server process, not in SQL, so that both stores answer
-  a query identically ([`src/local/query.rs`](../../src/local/query.rs) explains
-  the trade-off). In particular a cursor does not make the scan smaller, only
-  the result set. Fine for local-development volumes; not a production query
-  planner.
+- **A query is decided in the server process, not in SQL.** Filtering,
+  ordering, cursors, and limiting all happen in Rust, so both stores answer a
+  query identically ([`src/local/query.rs`](../../src/local/query.rs) explains
+  the trade-off). The Postgres store narrows *what it reads* first — see
+  [Query pushdown](#query-pushdown-postgres-only) — but the answer is always the
+  in-process one, and a cursor still narrows only the result set and never the
+  scan. The in-memory store reads the whole collection every time, and a
+  collection group query reads every matching collection below its parent.
+  Either way this is a local-development engine, not a production query planner:
+  there is no cost model, no index selection, and no `EXPLAIN`.
 - **No `property_mask` on a Datastore mutation.** Masked entity updates are
   still `UNIMPLEMENTED`, which is why a Datastore `increment` needs the written
   entity to carry the current value (see above).
@@ -676,6 +753,7 @@ src/local/
   names.rs           resource-name parsing (projects/*/databases/*/documents/**)
   store.rs           the Store trait, MemoryStore, and the conformance suite
   postgres_store.rs  the durable Store implementation
+  postgres_filter.rs Firestore filter → SQL WHERE fragment, for pushdown
   query.rs           StructuredQuery compilation and evaluation
   transactions.rs    transaction tokens, read sets, and the conflict check
   value_json.rs      Firestore Value ⇄ JSON, the format of data at rest
@@ -712,9 +790,13 @@ advisory lock, because `CREATE TABLE IF NOT EXISTS` is not race-safe):
 | Column | Why |
 |---|---|
 | `name` | Primary key: the full Firestore resource name. |
-| `project_id`, `database_id`, `parent`, `collection_id`, `document_id` | What collection reads and queries will filter and order on. Deriving them from `name` at query time would mean no index could help. |
-| `fields` (`jsonb`) | The document's fields in the public Firestore REST value shape: `{"rank": {"integerValue": "7"}}`. Legible to SQL, and usable by the query engine later. |
+| `project_id`, `database_id`, `parent`, `collection_id`, `document_id` | What collection reads and queries filter and order on. Deriving them from `name` at query time would mean no index could help. |
+| `fields` (`jsonb`) | The document's fields in the public Firestore REST value shape: `{"rank": {"integerValue": "7"}}`. Legible to SQL, which is what makes [query pushdown](#query-pushdown-postgres-only) possible. |
 | `create_time_seconds` / `_nanos`, `update_time_seconds` / `_nanos` | Exact. `timestamptz` only keeps microseconds, and clients compare `update_time` exactly — it is a write precondition — so rounding it would break a precondition that should succeed. |
+
+Two indexes come with it: a btree on `(parent, collection_id, document_id)`,
+which *is* the collection read, and a GIN index on `fields`, which serves the
+pushed-down equality and field-presence filters.
 
 The table is created in the connection's default schema, so a role whose
 `search_path` changes between runs would look at a different table.
