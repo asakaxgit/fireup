@@ -1,0 +1,655 @@
+{
+  "target": "fireup local (in-memory store)",
+  "measuredAt": "2026-11-06T03:34:25.479Z",
+  "hosts": {
+    "firestore": "127.0.0.1:4589",
+    "datastore": "127.0.0.1:4589"
+  },
+  "projectId": "fireup-local",
+  "runId": "mw4f7air7079",
+  "timeoutMs": 90000,
+  "tally": {
+    "serves": 67,
+    "refuses": 6,
+    "not-measurable": 15
+  },
+  "rows": [
+    {
+      "id": "firestore.GetDocument",
+      "label": "GetDocument",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.ListDocuments",
+      "label": "ListDocuments",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.CreateDocument",
+      "label": "CreateDocument",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.UpdateDocument",
+      "label": "UpdateDocument",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.DeleteDocument",
+      "label": "DeleteDocument",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.BatchGetDocuments",
+      "label": "BatchGetDocuments",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.BeginTransaction",
+      "label": "BeginTransaction",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.Commit",
+      "label": "Commit",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.Rollback",
+      "label": "Rollback",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.RunQuery",
+      "label": "RunQuery",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.BatchWrite",
+      "label": "BatchWrite",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.ListCollectionIds",
+      "label": "ListCollectionIds",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.Listen",
+      "label": "Listen",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "firestore.Write",
+      "label": "Write (streaming)",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "unimplemented",
+      "observed": "refuses",
+      "detail": "12 UNIMPLEMENTED: fireup local does not serve the streaming Write RPC yet (Commit covers the SDK write path). See docs/local/README.md for the full fidelity matrix."
+    },
+    {
+      "id": "firestore.RunAggregationQuery",
+      "label": "RunAggregationQuery",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "unimplemented",
+      "observed": "refuses",
+      "detail": "12 UNIMPLEMENTED: fireup local does not serve RunAggregationQuery yet (post-query-engine). See docs/local/README.md for the full fidelity matrix."
+    },
+    {
+      "id": "firestore.PartitionQuery",
+      "label": "PartitionQuery",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "unimplemented",
+      "observed": "refuses",
+      "detail": "12 UNIMPLEMENTED: fireup local does not serve PartitionQuery yet (out of scope). See docs/local/README.md for the full fidelity matrix."
+    },
+    {
+      "id": "firestore.ExecutePipeline",
+      "label": "ExecutePipeline",
+      "docTable": "firestore-rpcs",
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "query.comparison-operators",
+      "label": "where() with ==, !=, <, <=, >, >=",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "query.membership-and-array-operators",
+      "label": "where() with in, not-in, array-contains, array-contains-any",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "query.unary-filters",
+      "label": "IS_NULL / IS_NOT_NULL / IS_NAN / IS_NOT_NAN",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "query.composite-filters",
+      "label": "AND and OR composite filters, nested",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "query.order-by",
+      "label": "orderBy(), ascending and descending, several terms",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "query.limit-offset",
+      "label": "limit(), offset()",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "query.projection",
+      "label": "select() projection, including keys-only (__name__)",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "query.limit-to-last",
+      "label": "limitToLast()",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "query.document-id-filter-and-order",
+      "label": "Filtering and ordering on __name__",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "query.collection-group",
+      "label": "Collection group queries (all_descendants)",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "query.cursors",
+      "label": "Cursors (startAt/startAfter/endAt/endBefore)",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "query.nested-field-paths",
+      "label": "Nested field paths (a.b) in filters, orders, projections, and read masks",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "query.nested-update-mask",
+      "label": "Nested field paths in an update_mask",
+      "docTable": "queries",
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "query.collection-group-without-id",
+      "label": "A collection group query with no collection id",
+      "docTable": "queries",
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "query.vector-search",
+      "label": "Vector search (find_nearest)",
+      "docTable": "queries",
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "query.aggregations",
+      "label": "Aggregations (count(), sum(), average())",
+      "docTable": "queries",
+      "fireupStatus": "unimplemented",
+      "observed": "refuses",
+      "detail": "12 UNIMPLEMENTED: fireup local does not serve RunAggregationQuery yet (post-query-engine). See docs/local/README.md for the full fidelity matrix."
+    },
+    {
+      "id": "transform.server-timestamp",
+      "label": "set_to_server_value: REQUEST_TIME",
+      "docTable": "field-transforms",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "transform.increment",
+      "label": "increment",
+      "docTable": "field-transforms",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "transform.array-union",
+      "label": "append_missing_elements",
+      "docTable": "field-transforms",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "transform.array-remove",
+      "label": "remove_all_from_array",
+      "docTable": "field-transforms",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "transform.maximum-minimum",
+      "label": "maximum / minimum",
+      "docTable": "field-transforms",
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "transform.nested-field-path",
+      "label": "Nested field path (a.b) on a transform",
+      "docTable": "field-transforms",
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.Lookup",
+      "label": "Lookup",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.RunQuery",
+      "label": "RunQuery",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.Commit",
+      "label": "Commit",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.BeginTransaction-Rollback",
+      "label": "BeginTransaction / Rollback",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.AllocateIds",
+      "label": "AllocateIds",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.ReserveIds",
+      "label": "ReserveIds",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.RunAggregationQuery",
+      "label": "RunAggregationQuery",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "unimplemented",
+      "observed": "refuses",
+      "detail": "12 UNIMPLEMENTED: fireup local does not serve RunAggregationQuery yet (aggregations land after Phase 3)"
+    },
+    {
+      "id": "semantics.missing-field-never-matches",
+      "label": "A document without the filtered field never matches",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "semantics.missing-order-field-absent",
+      "label": "A document without the ordered field is absent from the results",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "semantics.inequality-does-not-cross-types",
+      "label": "An inequality does not cross types",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "semantics.nan-equality-never-matches",
+      "label": "== NaN never matches; IS_NAN selects it and NaN sorts first",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "semantics.integer-double-compare-numerically",
+      "label": "Integers and doubles compare numerically",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "semantics.name-appended-to-order",
+      "label": "__name__ is appended to every orderBy, in the last term's direction",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "transaction.atomic-commit",
+      "label": "Every write in a Commit applies or none does",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "transaction.optimistic-concurrency",
+      "label": "A concurrent write to a read document aborts the commit",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "transaction.absent-read-is-checked",
+      "label": "A document read as absent is in the read set too",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "transaction.read-only",
+      "label": "Read-only transactions are served; read-only at a read_time is refused",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "transform.runs-after-its-mutation",
+      "label": "A transform runs after the mutation it rides on",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "transform.increment-numeric-rules",
+      "label": "increment sets a missing or non-numeric field, and a double makes the sum a double",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "transform.array-missing-field-is-empty",
+      "label": "The array transforms treat a missing or non-array field as the empty array",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "semantics.cursor-is-a-position",
+      "label": "A cursor is a position, not a filter: startAfter skips every document at that value",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "semantics.cursors-before-offset-and-limit",
+      "label": "Cursors are applied before offset and limit, so the two compose",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "semantics.dotted-field-name-is-escaped",
+      "label": "A dot in a field path is structure; a field literally called a.b is addressed as `a.b`",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "semantics.projection-keeps-nesting",
+      "label": "A projection on a nested path keeps the nesting",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "semantics.collection-group-scoped-to-parent",
+      "label": "A collection group query is scoped to the request's parent",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.transform.server-value",
+      "label": "set_to_server_value: REQUEST_TIME",
+      "docTable": "datastore-property-transforms",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.transform.increment",
+      "label": "increment",
+      "docTable": "datastore-property-transforms",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.transform.array-union",
+      "label": "append_missing_elements",
+      "docTable": "datastore-property-transforms",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.transform.array-remove",
+      "label": "remove_all_from_array",
+      "docTable": "datastore-property-transforms",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.transform.maximum-minimum",
+      "label": "maximum / minimum",
+      "docTable": "datastore-property-transforms",
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.transform.property-path",
+      "label": "A property path (foo.bar) or an escaped property name",
+      "docTable": "datastore-property-transforms",
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.transform.runs-after-the-operation",
+      "label": "A Datastore transform runs after the operation, so an unmasked update resets the property first",
+      "docTable": null,
+      "fireupStatus": "documented-divergence",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.transform.on-delete",
+      "label": "A transform on a delete mutation is INVALID_ARGUMENT",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "limits.read-time-consistency",
+      "label": "Point-in-time reads (any read_time consistency selector)",
+      "docTable": null,
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "query.masked-field-deletion",
+      "label": "A top-level update_mask path the write does not carry",
+      "docTable": "queries",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.namespaces",
+      "label": "Datastore non-default namespaces",
+      "docTable": null,
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.gql",
+      "label": "Datastore GQL queries",
+      "docTable": null,
+      "fireupStatus": "unimplemented",
+      "observed": "refuses",
+      "detail": "12 UNIMPLEMENTED: fireup local does not serve Datastore GQL yet (pass a structured Query; GQL is not served yet)"
+    },
+    {
+      "id": "datastore.projection-queries",
+      "label": "Datastore projection queries",
+      "docTable": null,
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.cursors",
+      "label": "Datastore query cursors",
+      "docTable": null,
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.nested-property-mask",
+      "label": "Datastore nested property masks",
+      "docTable": null,
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.property-mask.writes-a-carried-path",
+      "label": "A path the entity carries",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.deletes-an-omitted-path",
+      "label": "A path the entity omits",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.leaves-unnamed-properties",
+      "label": "A property the mask does not name",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.key-is-accepted-and-ignored",
+      "label": "__key__",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.nested-path",
+      "label": "A property path (foo.bar) or an escaped name",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.property-mask.empty-path",
+      "label": "An empty path",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.reserved-path",
+      "label": "Any other reserved (__-wrapped) name",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.ignored-on-delete",
+      "label": "property_mask is ignored on a delete mutation",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.transform-accumulates",
+      "label": "A masked mutation lets a property transform accumulate across commits",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    }
+  ]
+}

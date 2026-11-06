@@ -1,0 +1,230 @@
+{
+  "target": "cloud-firestore-emulator v1.22.0 --database-mode=datastore-mode",
+  "measuredAt": "2026-11-06T03:38:30.764Z",
+  "hosts": {
+    "firestore": "127.0.0.1:18081",
+    "datastore": "127.0.0.1:18081"
+  },
+  "projectId": "fireup-local",
+  "runId": "mw4fbozd8146",
+  "timeoutMs": 90000,
+  "tally": {
+    "serves": 20,
+    "error": 1,
+    "not-measurable": 8
+  },
+  "rows": [
+    {
+      "id": "datastore.Lookup",
+      "label": "Lookup",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.RunQuery",
+      "label": "RunQuery",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.Commit",
+      "label": "Commit",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.BeginTransaction-Rollback",
+      "label": "BeginTransaction / Rollback",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "served",
+      "observed": "error",
+      "detail": "gRPC 4: 4 DEADLINE_EXCEEDED: Deadline exceeded after 60.001s,LB pick: 0.001s,remote_addr=127.0.0.1:18081"
+    },
+    {
+      "id": "datastore.AllocateIds",
+      "label": "AllocateIds",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.ReserveIds",
+      "label": "ReserveIds",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.RunAggregationQuery",
+      "label": "RunAggregationQuery",
+      "docTable": "datastore-rpcs",
+      "fireupStatus": "unimplemented",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.transform.server-value",
+      "label": "set_to_server_value: REQUEST_TIME",
+      "docTable": "datastore-property-transforms",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.transform.increment",
+      "label": "increment",
+      "docTable": "datastore-property-transforms",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.transform.array-union",
+      "label": "append_missing_elements",
+      "docTable": "datastore-property-transforms",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.transform.array-remove",
+      "label": "remove_all_from_array",
+      "docTable": "datastore-property-transforms",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.transform.maximum-minimum",
+      "label": "maximum / minimum",
+      "docTable": "datastore-property-transforms",
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.transform.property-path",
+      "label": "A property path (foo.bar) or an escaped property name",
+      "docTable": "datastore-property-transforms",
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.transform.runs-after-the-operation",
+      "label": "A Datastore transform runs after the operation, so an unmasked update resets the property first",
+      "docTable": null,
+      "fireupStatus": "documented-divergence",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.transform.on-delete",
+      "label": "A transform on a delete mutation is INVALID_ARGUMENT",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.namespaces",
+      "label": "Datastore non-default namespaces",
+      "docTable": null,
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.gql",
+      "label": "Datastore GQL queries",
+      "docTable": null,
+      "fireupStatus": "unimplemented",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.projection-queries",
+      "label": "Datastore projection queries",
+      "docTable": null,
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.cursors",
+      "label": "Datastore query cursors",
+      "docTable": null,
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.nested-property-mask",
+      "label": "Datastore nested property masks",
+      "docTable": null,
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.property-mask.writes-a-carried-path",
+      "label": "A path the entity carries",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.deletes-an-omitted-path",
+      "label": "A path the entity omits",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.leaves-unnamed-properties",
+      "label": "A property the mask does not name",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.key-is-accepted-and-ignored",
+      "label": "__key__",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.nested-path",
+      "label": "A property path (foo.bar) or an escaped name",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "unimplemented",
+      "observed": "not-measurable",
+      "detail": "the probe has no `served` branch"
+    },
+    {
+      "id": "datastore.property-mask.empty-path",
+      "label": "An empty path",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.reserved-path",
+      "label": "Any other reserved (__-wrapped) name",
+      "docTable": "datastore-property-mask",
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.ignored-on-delete",
+      "label": "property_mask is ignored on a delete mutation",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "datastore.property-mask.transform-accumulates",
+      "label": "A masked mutation lets a property transform accumulate across commits",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    }
+  ]
+}

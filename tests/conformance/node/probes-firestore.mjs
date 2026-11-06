@@ -364,6 +364,28 @@ export const firestoreProbes = [
         { names: /Write/ },
       )
     },
+    // Dormant while the matrix says `unimplemented` — the runner only runs the
+    // branch the status names. It exists so observe.mjs can *measure* the row
+    // against an implementation that does serve it, which is the only evidence
+    // behind "floci-gcp serves what Fireup refuses" in docs/local/COMPARISON.md.
+    served: async ({ raw, projectId, runId }) => {
+      const message = await duplexFirstOutcome(raw.firestore, 'Write', {
+        database: databaseName(projectId),
+        writes: [
+          {
+            update: {
+              name: documentName(projectId, `conf_${runId}_streamwrite/d1`),
+              fields: { n: value.integer(1) },
+            },
+          },
+        ],
+      })
+      assert.ok(message, 'the streaming Write must answer, not just end the stream')
+      assert.ok(
+        message.stream_id !== undefined || (message.write_results?.length ?? 0) > 0,
+        `expected a stream id or a write result, got ${JSON.stringify(message)}`,
+      )
+    },
   },
 
   {
@@ -394,6 +416,31 @@ export const firestoreProbes = [
           }),
         { names: /PartitionQuery/ },
       )
+    },
+    // Dormant for Fireup; see the note on `firestore.Write`. A collection this
+    // small legitimately partitions into *nothing* — proto3 omits an empty
+    // repeated field, so a bare `{}` is a valid answer meaning "read it in one
+    // go". What this measures is whether the RPC is answered at all; what it
+    // pins is that any partition that does come back is a cursor.
+    served: async ({ raw, db, projectId, runId }) => {
+      const collection = `conf_${runId}_partition`
+      await db.doc(`${collection}/d1`).set({ n: 1 })
+
+      const response = await unary(raw.firestore, 'PartitionQuery', {
+        parent: `${documentsRoot(projectId)}/__partition__/__partition__`,
+        structured_query: {
+          from: [{ collection_id: collection, all_descendants: true }],
+          order_by: [{ field: { field_path: '__name__' }, direction: 'ASCENDING' }],
+        },
+        partition_count: '2',
+      })
+      assert.ok(response, 'PartitionQuery must answer')
+      for (const partition of response.partitions ?? []) {
+        assert.ok(
+          Array.isArray(partition.values),
+          `a partition must be a cursor over values, got ${JSON.stringify(partition)}`,
+        )
+      }
     },
   },
 
