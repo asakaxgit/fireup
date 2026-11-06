@@ -1,0 +1,5 @@
+# Google's official Python client libraries, Apache-2.0. Pinned loosely: the
+# point of this layer is that *the real SDK* agrees with us, so a newer minor
+# version disagreeing is a finding, not a problem to pin away.
+google-cloud-firestore>=2.16,<3
+google-cloud-datastore>=2.19,<3
