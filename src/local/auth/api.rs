@@ -24,8 +24,9 @@
 use std::sync::Arc;
 
 use serde_json::{json, Map, Value as Json};
-use tracing::debug;
+use tracing::{debug, info};
 
+use super::oob::{self, OobCode, OobRequestType};
 use super::store::{InsertOutcome, SharedUserStore, UpdateOutcome};
 use super::token::{self, RefreshToken, SessionContext, TokenError};
 use super::user::{AuthUser, PasswordHash, SignInProvider};
@@ -92,7 +93,11 @@ pub fn handles(path: &str) -> bool {
         || path == "/v1/token"
         || path.starts_with("/v1/projects/")
         || path.starts_with("/v2/")
-        || path.starts_with("/emulator/v1/")
+        // The whole `/emulator/` namespace, not just `/emulator/v1/`: the links
+        // this surface mints point at `/emulator/action`, and a link that 404s
+        // because the prefix check was narrower than the link builder would be
+        // a bug nobody finds until a developer clicks one.
+        || path.starts_with("/emulator/")
 }
 
 /// Build the Identity Toolkit error envelope.
@@ -305,8 +310,15 @@ impl AuthApi {
             return not_served("the Identity Platform v2 surface (MFA, tenants)");
         }
 
+        // The landing page for a minted link. Not a production route — see
+        // [`oob::ACTION_PATH`] — so it is matched before the `/emulator/v1/`
+        // control endpoints and never mistaken for one.
+        if path == oob::ACTION_PATH {
+            return self.route_action(method, request.query, now_millis).await;
+        }
+
         if let Some(rest) = path.strip_prefix("/emulator/v1/projects/") {
-            return self.route_emulator(method, rest).await;
+            return self.route_emulator(method, rest, now_millis).await;
         }
 
         // Admin endpoints are project-scoped in the path; client endpoints are
@@ -338,9 +350,12 @@ impl AuthApi {
             "lookup" => self.client_lookup(&body, now_millis).await,
             "update" => self.client_update(&body, now_millis).await,
             "delete" => self.client_delete(&body, now_millis).await,
-            "sendOobCode" | "resetPassword" => {
-                not_served("out-of-band email (verification and password-reset links)")
+            "sendOobCode" => {
+                self.send_oob_code(&body, now_millis, false, request.query)
+                    .await
             }
+            "resetPassword" => self.reset_password(&body, now_millis).await,
+            "signInWithEmailLink" => self.sign_in_with_email_link(&body, now_millis).await,
             "sendVerificationCode" | "signInWithPhoneNumber" => not_served("phone authentication"),
             "signInWithIdp" | "createAuthUri" => {
                 not_served("federated identity providers")
@@ -684,13 +699,56 @@ impl AuthApi {
         )
     }
 
-    /// `POST /v1/accounts:update` — the signed-in account changes itself.
+    /// `POST /v1/accounts:update` — the signed-in account changes itself, or an
+    /// email action link is applied.
+    ///
+    /// The `oobCode` form takes **no** `idToken`, which is what makes it work:
+    /// `applyActionCode` is called from whatever page the link opened, which is
+    /// usually not signed in at all. The code is the authorisation.
     async fn client_update(&self, body: &Map<String, Json>, now_millis: i64) -> (u16, Json) {
+        if let Some(oob_code) = string_field(body, "oobCode") {
+            return self.apply_action_code(&oob_code, now_millis).await;
+        }
+
         let user = match self.user_from_id_token(body, now_millis).await {
             Ok(user) => user,
             Err(response) => return response,
         };
         self.apply_update(user, body, now_millis, false).await
+    }
+
+    /// The `oobCode` arm of `accounts:update`: the SDK's `applyActionCode`.
+    async fn apply_action_code(&self, oob_code: &str, now_millis: i64) -> (u16, Json) {
+        let code = match self.redeemable_code(oob_code, now_millis).await {
+            Ok(code) => code,
+            Err(response) => return response,
+        };
+        let user = match self.apply_email_action(&code, now_millis).await {
+            Ok(user) => user,
+            Err(response) => return response,
+        };
+
+        let mut response = Map::new();
+        response.insert(
+            "kind".into(),
+            Json::from("identitytoolkit#SetAccountInfoResponse"),
+        );
+        response.insert("localId".into(), Json::from(user.local_id.clone()));
+        if let Some(email) = &user.email {
+            response.insert("email".into(), Json::from(email.clone()));
+        }
+        if let Some(display_name) = &user.display_name {
+            response.insert("displayName".into(), Json::from(display_name.clone()));
+        }
+        if let Some(photo_url) = &user.photo_url {
+            response.insert("photoUrl".into(), Json::from(photo_url.clone()));
+        }
+        response.insert("emailVerified".into(), Json::from(user.email_verified));
+        let providers = user.provider_user_info();
+        if !providers.is_empty() {
+            response.insert("providerUserInfo".into(), Json::Array(providers));
+        }
+        (200, Json::Object(response))
     }
 
     /// `POST /v1/accounts:delete` — the signed-in account deletes itself.
@@ -823,6 +881,13 @@ impl AuthApi {
             ("POST", "accounts:update") => self.admin_update(&body, now_millis).await,
             ("POST", "accounts:delete") => self.admin_delete(&body).await,
             ("GET", "accounts:batchGet") => self.admin_batch_get(&body).await,
+            // The admin form of the same endpoint, and the only one that hands
+            // the link back: this is what `generatePasswordResetLink` and
+            // `generateEmailVerificationLink` call, with `returnOobLink` set.
+            ("POST", "accounts:sendOobCode") => {
+                self.send_oob_code(&body, now_millis, true, request.query)
+                    .await
+            }
             ("POST", "accounts:batchDelete") => {
                 not_served("batch account deletion (delete accounts one at a time)")
             }
@@ -1063,19 +1128,39 @@ impl AuthApi {
     ///
     /// These are the publicly documented local-only control endpoints, not part
     /// of the production API.
-    async fn route_emulator(&self, method: &str, rest: &str) -> (u16, Json) {
+    async fn route_emulator(&self, method: &str, rest: &str, now_millis: i64) -> (u16, Json) {
         let (project, tail) = rest.split_once('/').unwrap_or((rest, ""));
         if let Some(response) = self.check_project(project) {
             return response;
         }
 
         match (method, tail) {
-            ("DELETE", "accounts") => match self.users.delete_all(self.project_id()).await {
-                // The documented response is an empty object; the count is
+            ("DELETE", "accounts") => {
+                let removed = match self.users.delete_all(self.project_id()).await {
+                    Ok(removed) => removed,
+                    Err(error) => return store_failure("clearing accounts", error),
+                };
+                // Pending links go with the accounts they were minted for.
+                // Leaving them would let a reset link survive the wipe a test
+                // suite does between cases and apply to whatever account later
+                // takes that uid.
+                let codes = match self.users.delete_oob_codes(self.project_id()).await {
+                    Ok(codes) => codes,
+                    Err(error) => return store_failure("clearing out-of-band codes", error),
+                };
+                // The documented response is an empty object; the counts are
                 // Fireup's own addition, so a developer can see it worked.
-                Ok(removed) => (200, json!({ "removedAccounts": removed })),
-                Err(error) => store_failure("clearing accounts", error),
+                (
+                    200,
+                    json!({ "removedAccounts": removed, "removedOobCodes": codes }),
+                )
+            }
+            ("GET" | "HEAD", "oobCodes") => self.list_oob_codes(now_millis).await,
+            ("DELETE", "oobCodes") => match self.users.delete_oob_codes(self.project_id()).await {
+                Ok(removed) => (200, json!({ "removedOobCodes": removed })),
+                Err(error) => store_failure("clearing out-of-band codes", error),
             },
+            (_, "oobCodes") => self.wrong_method(method, "oobCodes", "GET or DELETE"),
             ("GET" | "HEAD", "config") => (
                 200,
                 json!({
@@ -1088,6 +1173,587 @@ impl AuthApi {
             (_, "accounts") => self.wrong_method(method, "accounts", "DELETE or GET"),
             _ => self.unknown(&format!("/emulator/v1/projects/{project}/{tail}")),
         }
+    }
+
+    // ----- out-of-band email flows ------------------------------------------
+
+    /// Where the links this server mints point.
+    fn action_base_url(&self) -> String {
+        oob::action_base_url(self.config.addr)
+    }
+
+    /// `POST /v1/accounts:sendOobCode`, and its admin twin
+    /// `POST /v1/projects/{p}/accounts:sendOobCode`.
+    ///
+    /// Mints a single-use code and reports the address it was "sent" to. There
+    /// is no mail transport (see [`oob`]), so the link is logged at `info` and
+    /// listed at `GET /emulator/v1/projects/{p}/oobCodes`. `admin` gates
+    /// `returnOobLink`, which is how the Admin SDK's `generate*Link` methods ask
+    /// for the link in the response instead of in an email — a client must not
+    /// be able to ask for another account's reset link that way.
+    async fn send_oob_code(
+        &self,
+        body: &Map<String, Json>,
+        now_millis: i64,
+        admin: bool,
+        query: &str,
+    ) -> (u16, Json) {
+        let Some(raw_type) = string_field(body, "requestType") else {
+            return bad_request("MISSING_REQ_TYPE");
+        };
+        let Some(request_type) = OobRequestType::parse(&raw_type) else {
+            // Name the non-goal when the request type *is* one, so a developer
+            // learns which gap they hit rather than doubting their spelling.
+            if raw_type == "PHONE_VERIFICATION" {
+                return not_served("phone authentication");
+            }
+            return bad_request(&format!(
+                "INVALID_REQ_TYPE : {raw_type} is not a request type fireup local serves"
+            ));
+        };
+
+        let continue_url = string_field(body, "continueUrl");
+
+        let code = match request_type {
+            // Reset is addressed by email and needs no session: that is the
+            // whole point of "I forgot my password".
+            OobRequestType::PasswordReset => {
+                let Some(email) = string_field(body, "email") else {
+                    return bad_request("MISSING_EMAIL");
+                };
+                let user = match self.account_by_email(&email).await {
+                    Ok(user) => user,
+                    Err(response) => return response,
+                };
+                OobCode::new(request_type, user.email.clone().unwrap_or(email), now_millis)
+                    .for_account(&user.local_id)
+            }
+            // Verification is about one account's own address, so the client
+            // surface takes it from the session. The admin surface cannot:
+            // `generateEmailVerificationLink(email)` has no session at all, and
+            // addresses the account by email.
+            OobRequestType::VerifyEmail => {
+                let user = match self.subject_account(body, now_millis, admin).await {
+                    Ok(user) => user,
+                    Err(response) => return response,
+                };
+                let Some(email) = user.email.clone() else {
+                    // An anonymous account has nothing to verify.
+                    return bad_request("MISSING_EMAIL");
+                };
+                OobCode::new(request_type, email, now_millis).for_account(&user.local_id)
+            }
+            // A sign-in link may name an address with no account yet;
+            // following it creates one.
+            OobRequestType::EmailSignin => {
+                let Some(email) = string_field(body, "email") else {
+                    return bad_request("MISSING_EMAIL");
+                };
+                if !is_plausible_email(&email) {
+                    return bad_request("INVALID_EMAIL");
+                }
+                let normalized = AuthUser::normalize_email(&email);
+                let existing = match self.users.get_by_email(self.project_id(), &normalized).await
+                {
+                    Ok(existing) => existing,
+                    Err(error) => return store_failure("looking the account up by email", error),
+                };
+                if existing.as_ref().is_some_and(|user| user.disabled) {
+                    return bad_request("USER_DISABLED");
+                }
+                let code = OobCode::new(request_type, normalized, now_millis);
+                match existing {
+                    Some(user) => code.for_account(&user.local_id),
+                    None => code,
+                }
+            }
+            // The link goes to the *new* address, because that is the mailbox
+            // that has to prove it exists before the account moves to it.
+            OobRequestType::VerifyAndChangeEmail => {
+                let user = match self.subject_account(body, now_millis, admin).await {
+                    Ok(user) => user,
+                    Err(response) => return response,
+                };
+                let Some(new_email) = string_field(body, "newEmail") else {
+                    return bad_request("MISSING_NEW_EMAIL");
+                };
+                if !is_plausible_email(&new_email) {
+                    return bad_request("INVALID_NEW_EMAIL");
+                }
+                let normalized = AuthUser::normalize_email(&new_email);
+                // Refuse here rather than at redemption: telling the user their
+                // new address is taken while they are still in the app is far
+                // better than having the link they were mailed fail later.
+                match self.users.get_by_email(self.project_id(), &normalized).await {
+                    Ok(Some(other)) if other.local_id != user.local_id => {
+                        return bad_request("EMAIL_EXISTS")
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        return store_failure("checking whether the new email is taken", error)
+                    }
+                }
+                OobCode::new(request_type, normalized.clone(), now_millis)
+                    .for_account(&user.local_id)
+                    .with_new_email(normalized)
+            }
+        };
+
+        // Client endpoints carry `?key=<apiKey>`; nothing validates it (see the
+        // module docs), but the link has to carry it back — the official SDK's
+        // link parser refuses a link without an `apiKey` at all.
+        let api_key = string_field(&parse_pairs(query), "key");
+        let code = code.with_continue_url(continue_url).with_api_key(api_key);
+        let link = code.action_link(&self.action_base_url());
+        let email = code.email.clone();
+
+        if let Err(error) = self.users.insert_oob_code(self.project_id(), code).await {
+            return store_failure("storing the out-of-band code", error);
+        }
+
+        // The log line *is* the mailbox. At `info` so it shows up without
+        // raising the log level, and with the whole link so it can be copied
+        // out of a terminal.
+        info!(
+            request_type = request_type.as_str(),
+            %email,
+            %link,
+            "fireup local does not send email; this is the link that would have been sent"
+        );
+
+        let mut response = Map::new();
+        response.insert(
+            "kind".into(),
+            Json::from("identitytoolkit#GetOobConfirmationCodeResponse"),
+        );
+        response.insert("email".into(), Json::from(email));
+        // Only the admin surface hands the link back, and only when asked —
+        // the client response stays the shape production sends.
+        if admin && bool_field(body, "returnOobLink").unwrap_or(false) {
+            response.insert("oobLink".into(), Json::from(link));
+        }
+        (200, Json::Object(response))
+    }
+
+    /// `POST /v1/accounts:resetPassword`.
+    ///
+    /// Two calls in one endpoint, as the published contract has it: with only an
+    /// `oobCode` it reports what the code is for (the client SDK's
+    /// `verifyPasswordResetCode`), and with a `newPassword` it applies the reset
+    /// (`confirmPasswordReset`).
+    async fn reset_password(&self, body: &Map<String, Json>, now_millis: i64) -> (u16, Json) {
+        let Some(oob_code) = string_field(body, "oobCode") else {
+            return bad_request("MISSING_OOB_CODE");
+        };
+        let code = match self.redeemable_code(&oob_code, now_millis).await {
+            Ok(code) => code,
+            Err(response) => return response,
+        };
+        if code.request_type != OobRequestType::PasswordReset {
+            // A verification link is not a reset link. Treated as invalid
+            // rather than as a wrong-type error, because to a client that is
+            // what it is: this code cannot be redeemed here.
+            return bad_request("INVALID_OOB_CODE");
+        }
+
+        let mut response = Map::new();
+        response.insert(
+            "kind".into(),
+            Json::from("identitytoolkit#ResetPasswordResponse"),
+        );
+        response.insert("email".into(), Json::from(code.email.clone()));
+        response.insert(
+            "requestType".into(),
+            Json::from(code.request_type.as_str()),
+        );
+
+        // No new password: the caller is checking the code is good before
+        // showing a form. The code is deliberately *not* consumed, or the form
+        // it is about to render could never be submitted.
+        let Some(new_password) = string_field(body, "newPassword") else {
+            return (200, Json::Object(response));
+        };
+
+        if new_password.chars().count() < MIN_PASSWORD_LENGTH {
+            return bad_request(&format!(
+                "WEAK_PASSWORD : Password should be at least {MIN_PASSWORD_LENGTH} characters"
+            ));
+        }
+
+        let mut user = match self.account_for_code(&code).await {
+            Ok(user) => user,
+            Err(response) => return response,
+        };
+        if user.disabled {
+            return bad_request("USER_DISABLED");
+        }
+
+        user.password = Some(PasswordHash::new(&new_password));
+        if user.provider == SignInProvider::Anonymous {
+            // An account that now has a password is no longer anonymous, the
+            // same upgrade `accounts:update` performs.
+            user.provider = SignInProvider::Password;
+        }
+        // Completing a reset proves control of the mailbox, so the address is
+        // verified as a side effect — and the old sessions die, which is the
+        // point of resetting a password you think someone else has.
+        user.email_verified = true;
+        user.valid_since_millis = now_millis;
+
+        match self.users.update(self.project_id(), user).await {
+            Ok(UpdateOutcome::Updated) => {}
+            Ok(UpdateOutcome::NotFound) => return bad_request("USER_NOT_FOUND"),
+            Ok(UpdateOutcome::EmailExists) => return bad_request("EMAIL_EXISTS"),
+            Err(error) => return store_failure("applying the password reset", error),
+        }
+
+        // Consume last: a link whose reset failed must still be usable.
+        if let Err(error) = self.users.consume_oob_code(self.project_id(), &oob_code).await {
+            return store_failure("redeeming the out-of-band code", error);
+        }
+        (200, Json::Object(response))
+    }
+
+    /// `POST /v1/accounts:signInWithEmailLink` — passwordless sign-in.
+    ///
+    /// The `email` is required alongside the code, and must match the address
+    /// the link was issued for. That is not ceremony: it is what stops a link
+    /// forwarded to someone else from signing *them* in, which is why the
+    /// documented client flow asks the user to confirm their address when it
+    /// cannot remember it.
+    async fn sign_in_with_email_link(
+        &self,
+        body: &Map<String, Json>,
+        now_millis: i64,
+    ) -> (u16, Json) {
+        let Some(email) = string_field(body, "email") else {
+            return bad_request("MISSING_EMAIL");
+        };
+        let Some(oob_code) = string_field(body, "oobCode") else {
+            return bad_request("MISSING_OOB_CODE");
+        };
+        let code = match self.redeemable_code(&oob_code, now_millis).await {
+            Ok(code) => code,
+            Err(response) => return response,
+        };
+        if code.request_type != OobRequestType::EmailSignin {
+            return bad_request("INVALID_OOB_CODE");
+        }
+        if AuthUser::normalize_email(&email) != code.email {
+            return bad_request("INVALID_EMAIL");
+        }
+
+        let existing = match self.users.get_by_email(self.project_id(), &code.email).await {
+            Ok(existing) => existing,
+            Err(error) => return store_failure("looking the account up by email", error),
+        };
+        let is_new_user = existing.is_none();
+
+        let mut user = existing.unwrap_or_else(|| {
+            // Email-link sign-in reports `password` as its provider — the
+            // documented `providerId` for the email provider, whose two sign-in
+            // methods are a password and a link. The account simply has no
+            // password hash until it sets one.
+            let mut created =
+                AuthUser::new(super::generate_uid(), SignInProvider::Password, now_millis);
+            created.set_email(&code.email);
+            created
+        });
+        if user.disabled {
+            return bad_request("USER_DISABLED");
+        }
+        // Following the link proves control of the mailbox.
+        user.email_verified = true;
+        user.last_login_at_millis = Some(now_millis);
+
+        let stored = if is_new_user {
+            self.users
+                .insert(self.project_id(), user.clone())
+                .await
+                .map(|outcome| outcome == InsertOutcome::Inserted)
+        } else {
+            self.users
+                .update(self.project_id(), user.clone())
+                .await
+                .map(|outcome| outcome == UpdateOutcome::Updated)
+        };
+        match stored {
+            Ok(true) => {}
+            Ok(false) => {
+                return error_response(
+                    500,
+                    "INTERNAL_ERROR : the account changed while signing in; retry",
+                )
+            }
+            Err(error) => return store_failure("storing the account", error),
+        }
+
+        if let Err(error) = self.users.consume_oob_code(self.project_id(), &oob_code).await {
+            return store_failure("redeeming the out-of-band code", error);
+        }
+
+        let session = self.open_session(&user, now_millis);
+        let mut response = Map::new();
+        response.insert(
+            "kind".into(),
+            Json::from("identitytoolkit#EmailLinkSigninResponse"),
+        );
+        response.insert("localId".into(), Json::from(user.local_id.clone()));
+        response.insert("email".into(), Json::from(code.email));
+        response.insert("isNewUser".into(), Json::from(is_new_user));
+        (200, Json::Object(self.with_session(response, &session)))
+    }
+
+    /// `GET /emulator/v1/projects/{p}/oobCodes` — the stand-in for a mailbox.
+    ///
+    /// Expired codes are left out. A harness that reads the last entry wants
+    /// the link it can still use, and an expired one in that list is a
+    /// confusing failure two calls later.
+    async fn list_oob_codes(&self, now_millis: i64) -> (u16, Json) {
+        let codes = match self.users.list_oob_codes(self.project_id()).await {
+            Ok(codes) => codes,
+            Err(error) => return store_failure("listing out-of-band codes", error),
+        };
+        let base_url = self.action_base_url();
+        (
+            200,
+            json!({
+                "oobCodes": codes
+                    .iter()
+                    .filter(|code| code.is_live_at(now_millis))
+                    .map(|code| code.to_listing_entry(&base_url))
+                    .collect::<Vec<_>>(),
+            }),
+        )
+    }
+
+    /// `GET /emulator/action?mode=…&oobCode=…` — where a minted link points.
+    ///
+    /// **Not a production route.** Production links land on a Google-hosted
+    /// page; this is Fireup's own JSON so that a link is something a developer
+    /// can actually follow with `curl` or a browser instead of a 404.
+    ///
+    /// Clicking a verification link applies it, which is what clicking one does
+    /// in the real flow. A reset or sign-in link cannot be completed by a visit
+    /// — one needs a new password, the other the address to confirm — so those
+    /// report the pending action and the call that finishes it, and leave the
+    /// code redeemable.
+    async fn route_action(&self, method: &str, query: &str, now_millis: i64) -> (u16, Json) {
+        if method != "GET" && method != "HEAD" {
+            return self.wrong_method(method, oob::ACTION_PATH, "GET");
+        }
+
+        let parameters = parse_pairs(query);
+        let Some(oob_code) = string_field(&parameters, "oobCode") else {
+            return bad_request("MISSING_OOB_CODE");
+        };
+        let code = match self.redeemable_code(&oob_code, now_millis).await {
+            Ok(code) => code,
+            Err(response) => return response,
+        };
+        // `mode` is informational in the link — the code already knows what it
+        // is for — but a mismatch means the link was edited, and acting on it
+        // would apply an action the developer did not mean to trigger.
+        if let Some(mode) = string_field(&parameters, "mode") {
+            if OobRequestType::from_link_mode(&mode) != Some(code.request_type) {
+                return bad_request(&format!(
+                    "INVALID_OOB_CODE : this code is a {} link, not {mode}",
+                    code.request_type.link_mode()
+                ));
+            }
+        }
+
+        let mut response = Map::new();
+        response.insert(
+            "notice".into(),
+            Json::from(
+                "fireup local's own landing route for an email action link. \
+                 Not a Google page and not part of the Identity Toolkit API.",
+            ),
+        );
+        response.insert("mode".into(), Json::from(code.request_type.link_mode()));
+        response.insert(
+            "requestType".into(),
+            Json::from(code.request_type.as_str()),
+        );
+        response.insert("email".into(), Json::from(code.email.clone()));
+        response.insert("oobCode".into(), Json::from(code.oob_code.clone()));
+        if let Some(continue_url) = &code.continue_url {
+            response.insert("continueUrl".into(), Json::from(continue_url.clone()));
+        }
+
+        match code.request_type {
+            OobRequestType::VerifyEmail | OobRequestType::VerifyAndChangeEmail => {
+                let user = match self.apply_email_action(&code, now_millis).await {
+                    Ok(user) => user,
+                    Err(response) => return response,
+                };
+                response.insert("applied".into(), Json::from(true));
+                response.insert("localId".into(), Json::from(user.local_id));
+                response.insert("email".into(), Json::from(user.email.unwrap_or_default()));
+                response.insert("emailVerified".into(), Json::from(user.email_verified));
+            }
+            OobRequestType::PasswordReset => {
+                response.insert("applied".into(), Json::from(false));
+                response.insert(
+                    "finishWith".into(),
+                    json!({
+                        "method": "POST",
+                        "path": "/v1/accounts:resetPassword",
+                        "body": { "oobCode": code.oob_code, "newPassword": "<the new password>" },
+                    }),
+                );
+            }
+            OobRequestType::EmailSignin => {
+                response.insert("applied".into(), Json::from(false));
+                response.insert(
+                    "finishWith".into(),
+                    json!({
+                        "method": "POST",
+                        "path": "/v1/accounts:signInWithEmailLink",
+                        "body": { "oobCode": code.oob_code, "email": code.email },
+                    }),
+                );
+            }
+        }
+        (200, Json::Object(response))
+    }
+
+    /// Read a code and refuse it if it is unknown or past its expiry.
+    ///
+    /// The two are different answers on purpose: `EXPIRED_OOB_CODE` tells a
+    /// developer to ask for a new link, while `INVALID_OOB_CODE` tells them the
+    /// code is wrong or already used. Collapsing them would make a working
+    /// flow that sat idle for an hour look like a bug in the code.
+    async fn redeemable_code(
+        &self,
+        oob_code: &str,
+        now_millis: i64,
+    ) -> Result<OobCode, (u16, Json)> {
+        match self.users.get_oob_code(self.project_id(), oob_code).await {
+            Ok(Some(code)) if code.is_live_at(now_millis) => Ok(code),
+            Ok(Some(_)) => Err(bad_request("EXPIRED_OOB_CODE")),
+            Ok(None) => Err(bad_request("INVALID_OOB_CODE")),
+            Err(error) => Err(store_failure("reading the out-of-band code", error)),
+        }
+    }
+
+    /// The account a code names.
+    async fn account_for_code(&self, code: &OobCode) -> Result<AuthUser, (u16, Json)> {
+        let Some(local_id) = &code.local_id else {
+            return Err(bad_request("USER_NOT_FOUND"));
+        };
+        match self.users.get_by_local_id(self.project_id(), local_id).await {
+            Ok(Some(user)) => Ok(user),
+            // The account was deleted while the link sat in a terminal.
+            Ok(None) => Err(bad_request("USER_NOT_FOUND")),
+            Err(error) => Err(store_failure("reading the account the link names", error)),
+        }
+    }
+
+    /// The account an email action is *about*, for the two flows that act on
+    /// one account's own address.
+    ///
+    /// A client names it with its `idToken` — it can only act on itself. An
+    /// admin names it with `email`, because the Admin SDK's `generate*Link`
+    /// methods take an address and have no session; the bearer token that would
+    /// authorise them in production is not checked here (see the module docs),
+    /// so this split is about matching the published request shapes, not about
+    /// being a security boundary.
+    async fn subject_account(
+        &self,
+        body: &Map<String, Json>,
+        now_millis: i64,
+        admin: bool,
+    ) -> Result<AuthUser, (u16, Json)> {
+        if !admin {
+            return self.user_from_id_token(body, now_millis).await;
+        }
+        let Some(email) = string_field(body, "email") else {
+            return Err(bad_request("MISSING_EMAIL"));
+        };
+        self.account_by_email(&email).await
+    }
+
+    /// The account registered to `email`, for the flows addressed by mailbox.
+    async fn account_by_email(&self, email: &str) -> Result<AuthUser, (u16, Json)> {
+        let normalized = AuthUser::normalize_email(email);
+        match self.users.get_by_email(self.project_id(), &normalized).await {
+            Ok(Some(user)) if user.disabled => Err(bad_request("USER_DISABLED")),
+            Ok(Some(user)) => Ok(user),
+            // `EMAIL_NOT_FOUND` is the documented code, and the one SDKs turn
+            // into `auth/user-not-found`. It does leak whether an address has
+            // an account — which is exactly what the published contract does,
+            // and this is local-development tooling either way.
+            Ok(None) => Err(bad_request("EMAIL_NOT_FOUND")),
+            Err(error) => Err(store_failure("looking the account up by email", error)),
+        }
+    }
+
+    /// Apply a verification or email-change code, and redeem it.
+    ///
+    /// Shared by `accounts:update` (what the SDK's `applyActionCode` calls) and
+    /// the landing route, so a clicked link and an SDK call cannot end up
+    /// meaning different things.
+    async fn apply_email_action(
+        &self,
+        code: &OobCode,
+        now_millis: i64,
+    ) -> Result<AuthUser, (u16, Json)> {
+        let mut user = self.account_for_code(code).await?;
+        if user.disabled {
+            return Err(bad_request("USER_DISABLED"));
+        }
+
+        match code.request_type {
+            OobRequestType::VerifyEmail => {
+                // Verify the address the link was issued for, not whatever the
+                // account holds now: an account that changed its email after
+                // the link was sent must not have the *new* address marked
+                // verified by a link sent to the old one.
+                if user.email.as_deref() != Some(code.email.as_str()) {
+                    return Err(bad_request(
+                        "INVALID_OOB_CODE : the account's email changed after this link was sent",
+                    ));
+                }
+                user.email_verified = true;
+            }
+            OobRequestType::VerifyAndChangeEmail => {
+                let Some(new_email) = &code.new_email else {
+                    return Err(error_response(
+                        500,
+                        "INTERNAL_ERROR : an email-change code has no new address",
+                    ));
+                };
+                user.email = Some(new_email.clone());
+                user.email_verified = true;
+                // Changing the email is a credential change, so existing
+                // sessions go — the same rule `accounts:update` applies.
+                user.valid_since_millis = now_millis;
+            }
+            other => {
+                return Err(bad_request(&format!(
+                    "INVALID_OOB_CODE : a {} code cannot be applied here",
+                    other.as_str()
+                )))
+            }
+        }
+
+        match self.users.update(self.project_id(), user.clone()).await {
+            Ok(UpdateOutcome::Updated) => {}
+            Ok(UpdateOutcome::NotFound) => return Err(bad_request("USER_NOT_FOUND")),
+            Ok(UpdateOutcome::EmailExists) => return Err(bad_request("EMAIL_EXISTS")),
+            Err(error) => return Err(store_failure("applying the email action", error)),
+        }
+
+        if let Err(error) = self
+            .users
+            .consume_oob_code(self.project_id(), &code.oob_code)
+            .await
+        {
+            return Err(store_failure("redeeming the out-of-band code", error));
+        }
+        Ok(user)
     }
 
     // ----- shared update logic ----------------------------------------------
@@ -1332,6 +1998,24 @@ mod tests {
         .await
     }
 
+    /// `GET <path>?<query>`.
+    async fn get_at(api: &AuthApi, path: &str, query: &str, now: i64) -> (u16, Json) {
+        api.route_at(
+            &AuthRequest {
+                method: "GET",
+                path,
+                query,
+                body: b"",
+            },
+            now,
+        )
+        .await
+    }
+
+    async fn get(api: &AuthApi, path: &str, query: &str) -> (u16, Json) {
+        get_at(api, path, query, NOW).await
+    }
+
     fn message(body: &Json) -> String {
         body["error"]["message"]
             .as_str()
@@ -1389,6 +2073,9 @@ mod tests {
             "/v1/token",
             "/v1/projects/demo/accounts",
             "/emulator/v1/projects/demo/accounts",
+            // The links this surface mints land here, so it has to be claimed
+            // or every generated link 404s.
+            oob::ACTION_PATH,
         ] {
             assert!(handles(mine), "{mine} must route to auth");
         }
@@ -1401,9 +2088,16 @@ mod tests {
     async fn an_unserved_endpoint_says_so_instead_of_404ing_vaguely() {
         let api = api();
 
-        let (status, body) = post(&api, "/v1/accounts:sendOobCode", json!({})).await;
+        // Phone verification arrives as a `requestType` on an endpoint that is
+        // otherwise served, so the refusal has to come from the handler.
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "PHONE_VERIFICATION", "email": "a@b.com" }),
+        )
+        .await;
         assert_eq!(status, 501);
-        assert!(message(&body).contains("out-of-band"), "{body}");
+        assert!(message(&body).contains("phone"), "{body}");
 
         let (status, body) = post(&api, "/v1/accounts:sendVerificationCode", json!({})).await;
         assert_eq!(status, 501);
@@ -2441,6 +3135,1064 @@ mod tests {
         assert_eq!(status, 200, "{body}");
         assert_eq!(body["signIn"]["allowDuplicateEmails"], false);
         assert_eq!(body["name"], "projects/demo/config");
+    }
+
+    // ----- out-of-band email flows ------------------------------------------
+
+    /// The only way a client learns a code, since nothing is mailed: read the
+    /// newest entry off the control endpoint. Every test below goes through
+    /// this rather than reaching into the store, so what it asserts is what a
+    /// developer or a test harness can actually get at.
+    async fn newest_oob_code(api: &AuthApi) -> Json {
+        let (status, body) =
+            request(api, "GET", "/emulator/v1/projects/demo/oobCodes", "").await;
+        assert_eq!(status, 200, "{body}");
+        body["oobCodes"]
+            .as_array()
+            .expect("an array of pending codes")
+            .last()
+            .unwrap_or_else(|| panic!("no pending codes: {body}"))
+            .clone()
+    }
+
+    /// The pending code of a given `requestType`.
+    ///
+    /// Used where a test has more than one link outstanding: these tests mint
+    /// everything at one frozen instant, so "the newest" is not well defined
+    /// among codes sharing a millisecond.
+    async fn pending_oob_code_of(api: &AuthApi, request_type: &str) -> Json {
+        let (status, body) =
+            request(api, "GET", "/emulator/v1/projects/demo/oobCodes", "").await;
+        assert_eq!(status, 200, "{body}");
+        body["oobCodes"]
+            .as_array()
+            .expect("an array of pending codes")
+            .iter()
+            .find(|entry| entry["requestType"] == request_type)
+            .unwrap_or_else(|| panic!("no pending {request_type} code: {body}"))
+            .clone()
+    }
+
+    async fn requested_reset(api: &AuthApi, email: &str) -> String {
+        let (status, body) = post(
+            api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "PASSWORD_RESET", "email": email }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["kind"], "identitytoolkit#GetOobConfirmationCodeResponse");
+        assert_eq!(body["email"], email);
+        // The client response must not carry the link: production sends it by
+        // email, and a client that could read it could read anyone's.
+        assert!(body.get("oobLink").is_none(), "{body}");
+
+        newest_oob_code(api).await["oobCode"]
+            .as_str()
+            .expect("a code string")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_password_reset_runs_end_to_end_and_the_old_password_stops_working() {
+        let api = api();
+        signed_up(&api, "ada@example.com", "secret12").await;
+
+        let code = requested_reset(&api, "ada@example.com").await;
+
+        // Checking the code first is what `verifyPasswordResetCode` does, and
+        // it must not consume the code — the form has not been submitted yet.
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": code }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["kind"], "identitytoolkit#ResetPasswordResponse");
+        assert_eq!(body["email"], "ada@example.com");
+        assert_eq!(body["requestType"], "PASSWORD_RESET");
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": code, "newPassword": "brand-new-one" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["email"], "ada@example.com");
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:signInWithPassword",
+            json!({ "email": "ada@example.com", "password": "brand-new-one" }),
+        )
+        .await;
+        assert_eq!(status, 200, "the new password must work: {body}");
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:signInWithPassword",
+            json!({ "email": "ada@example.com", "password": "secret12" }),
+        )
+        .await;
+        assert_eq!(status, 400, "the old password must not: {body}");
+        assert_eq!(message(&body), "INVALID_PASSWORD");
+    }
+
+    #[tokio::test]
+    async fn a_reset_revokes_the_sessions_that_were_open_when_it_was_requested() {
+        // The reason to reset a password is that someone else may have it. A
+        // reset that left their refresh token working would not accomplish
+        // anything.
+        let api = api();
+        let session = signed_up(&api, "ada@example.com", "secret12").await;
+        let refresh = session["refreshToken"].as_str().expect("refresh token");
+
+        let code = requested_reset(&api, "ada@example.com").await;
+        // A second later, so the revocation instant is after the token was
+        // issued rather than in the same millisecond.
+        let (status, _) = post_at(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": code, "newPassword": "brand-new-one" }),
+            NOW + 1_000,
+        )
+        .await;
+        assert_eq!(status, 200);
+
+        let (status, body) = post_at(
+            &api,
+            "/v1/token",
+            json!({ "grant_type": "refresh_token", "refresh_token": refresh }),
+            NOW + 2_000,
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "TOKEN_EXPIRED");
+    }
+
+    #[tokio::test]
+    async fn a_reset_code_works_once() {
+        let api = api();
+        signed_up(&api, "ada@example.com", "secret12").await;
+        let code = requested_reset(&api, "ada@example.com").await;
+
+        let (status, _) = post(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": code, "newPassword": "first-new-one" }),
+        )
+        .await;
+        assert_eq!(status, 200);
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": code, "newPassword": "second-new-one" }),
+        )
+        .await;
+        assert_eq!(status, 400, "a redeemed link must not work twice: {body}");
+        assert_eq!(message(&body), "INVALID_OOB_CODE");
+
+        // And the first reset is the one that stuck.
+        let (status, _) = post(
+            &api,
+            "/v1/accounts:signInWithPassword",
+            json!({ "email": "ada@example.com", "password": "first-new-one" }),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn an_expired_link_says_it_expired_rather_than_that_it_is_wrong() {
+        let api = api();
+        signed_up(&api, "ada@example.com", "secret12").await;
+        let code = requested_reset(&api, "ada@example.com").await;
+
+        let an_hour_later = NOW + oob::TTL_SECONDS * 1000;
+        let (status, body) = post_at(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": code, "newPassword": "brand-new-one" }),
+            an_hour_later,
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(
+            message(&body),
+            "EXPIRED_OOB_CODE",
+            "a developer who waited needs told to ask for a new link"
+        );
+
+        // An expired code also drops out of the listing, so a harness that
+        // takes the newest entry does not pick up a link it cannot use.
+        let (status, body) =
+            get_at(&api, "/emulator/v1/projects/demo/oobCodes", "", an_hour_later).await;
+        assert_eq!(status, 200);
+        assert!(
+            body["oobCodes"].as_array().expect("array").is_empty(),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reset_for_an_unknown_or_disabled_account_is_refused_by_name() {
+        let api = api();
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "PASSWORD_RESET", "email": "nobody@example.com" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "EMAIL_NOT_FOUND");
+
+        signed_up(&api, "ada@example.com", "secret12").await;
+        let (status, _) = post(
+            &api,
+            "/v1/projects/demo/accounts:update",
+            json!({ "email": "ada@example.com", "disableUser": true }),
+        )
+        .await;
+        assert_eq!(status, 400, "the admin endpoint takes a localId, not an email");
+
+        let user = post(
+            &api,
+            "/v1/projects/demo/accounts:lookup",
+            json!({ "email": ["ada@example.com"] }),
+        )
+        .await
+        .1;
+        let local_id = user["users"][0]["localId"].as_str().expect("uid").to_string();
+        let (status, _) = post(
+            &api,
+            "/v1/projects/demo/accounts:update",
+            json!({ "localId": local_id, "disableUser": true }),
+        )
+        .await;
+        assert_eq!(status, 200);
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "PASSWORD_RESET", "email": "ada@example.com" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "USER_DISABLED");
+    }
+
+    #[tokio::test]
+    async fn send_oob_code_rejects_what_it_cannot_act_on() {
+        let api = api();
+
+        let (status, body) = post(&api, "/v1/accounts:sendOobCode", json!({})).await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "MISSING_REQ_TYPE");
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "OLD_EMAIL_AGREE", "email": "a@b.com" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert!(message(&body).starts_with("INVALID_REQ_TYPE"), "{body}");
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "PASSWORD_RESET" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "MISSING_EMAIL");
+
+        // Verification is addressed by session, so no token is a token error.
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "VERIFY_EMAIL" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "MISSING_ID_TOKEN");
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "EMAIL_SIGNIN", "email": "not-an-email" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "INVALID_EMAIL");
+    }
+
+    #[tokio::test]
+    async fn email_verification_runs_end_to_end_through_the_sdk_shaped_calls() {
+        let api = api();
+        let session = signed_up(&api, "ada@example.com", "secret12").await;
+        let id_token = session["idToken"].as_str().expect("id token").to_string();
+
+        // A fresh password sign-up is unverified, which is the point.
+        let (status, body) = post(&api, "/v1/accounts:lookup", json!({ "idToken": id_token })).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["users"][0]["emailVerified"], false);
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "VERIFY_EMAIL", "idToken": id_token }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["email"], "ada@example.com");
+
+        let entry = newest_oob_code(&api).await;
+        assert_eq!(entry["requestType"], "VERIFY_EMAIL");
+        let code = entry["oobCode"].as_str().expect("code").to_string();
+
+        // `applyActionCode` posts the code with no idToken at all: the page the
+        // link opened is usually not signed in.
+        let (status, body) = post(&api, "/v1/accounts:update", json!({ "oobCode": code })).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["kind"], "identitytoolkit#SetAccountInfoResponse");
+        assert_eq!(body["emailVerified"], true);
+        assert_eq!(body["email"], "ada@example.com");
+
+        let (status, body) = post(&api, "/v1/accounts:lookup", json!({ "idToken": id_token })).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["users"][0]["emailVerified"], true);
+
+        // Verification is not a credential change, so the session it was
+        // requested from keeps working — otherwise every app would sign its
+        // user out the moment they verified their address.
+        let (status, refreshed) = post_at(
+            &api,
+            "/v1/token",
+            json!({
+                "grant_type": "refresh_token",
+                "refresh_token": session["refreshToken"].as_str().expect("refresh"),
+            }),
+            NOW + 2_000,
+        )
+        .await;
+        assert_eq!(status, 200, "{refreshed}");
+        assert_eq!(
+            id_token_claims(&refreshed)["email_verified"],
+            true,
+            "and the refreshed token reports the address as verified"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_verification_link_does_not_verify_an_address_the_account_moved_to() {
+        // Sent to the old address, then the user changes their email. Applying
+        // the stale link must not mark the *new* address verified.
+        let api = api();
+        let session = signed_up(&api, "old@example.com", "secret12").await;
+        let id_token = session["idToken"].as_str().expect("id token").to_string();
+
+        let (status, _) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "VERIFY_EMAIL", "idToken": id_token }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let code = newest_oob_code(&api).await["oobCode"]
+            .as_str()
+            .expect("code")
+            .to_string();
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:update",
+            json!({ "idToken": id_token, "email": "new@example.com" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+
+        let (status, body) = post(&api, "/v1/accounts:update", json!({ "oobCode": code })).await;
+        assert_eq!(status, 400, "{body}");
+        assert!(message(&body).contains("changed after this link was sent"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn verify_and_change_email_moves_the_account_once_the_new_address_is_confirmed() {
+        let api = api();
+        let session = signed_up(&api, "old@example.com", "secret12").await;
+        let id_token = session["idToken"].as_str().expect("id token").to_string();
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({
+                "requestType": "VERIFY_AND_CHANGE_EMAIL",
+                "idToken": id_token,
+                "newEmail": "New@Example.com",
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["email"], "new@example.com",
+            "the link goes to the address that has to prove it exists"
+        );
+
+        // Until the link is followed, the account still holds the old address.
+        let (_, body) = post(&api, "/v1/accounts:lookup", json!({ "idToken": id_token })).await;
+        assert_eq!(body["users"][0]["email"], "old@example.com");
+
+        let code = newest_oob_code(&api).await["oobCode"]
+            .as_str()
+            .expect("code")
+            .to_string();
+        // A second later, so revocation lands after the session was opened.
+        let (status, body) = post_at(
+            &api,
+            "/v1/accounts:update",
+            json!({ "oobCode": code }),
+            NOW + 1_000,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["email"], "new@example.com");
+        assert_eq!(body["emailVerified"], true);
+
+        // The move is a credential change, so the old session is gone.
+        let (status, body) = post(&api, "/v1/accounts:lookup", json!({ "idToken": id_token })).await;
+        assert_eq!(status, 200, "an unexpired ID token still reads: {body}");
+        let (status, body) = post_at(
+            &api,
+            "/v1/token",
+            json!({
+                "grant_type": "refresh_token",
+                "refresh_token": session["refreshToken"].as_str().expect("refresh"),
+            }),
+            NOW + 2_000,
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "TOKEN_EXPIRED");
+
+        let (status, _) = post(
+            &api,
+            "/v1/accounts:signInWithPassword",
+            json!({ "email": "new@example.com", "password": "secret12" }),
+        )
+        .await;
+        assert_eq!(status, 200, "the account signs in at its new address");
+    }
+
+    #[tokio::test]
+    async fn an_email_change_to_an_address_already_taken_is_refused_while_the_user_is_still_there()
+    {
+        // Refusing at `sendOobCode` rather than at redemption: the user is in
+        // the app and can pick another address, instead of finding out from a
+        // link that fails later.
+        let api = api();
+        signed_up(&api, "taken@example.com", "secret12").await;
+        let session = signed_up(&api, "mine@example.com", "secret12").await;
+        let id_token = session["idToken"].as_str().expect("id token").to_string();
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({
+                "requestType": "VERIFY_AND_CHANGE_EMAIL",
+                "idToken": id_token,
+                "newEmail": "taken@example.com",
+            }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "EMAIL_EXISTS");
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "VERIFY_AND_CHANGE_EMAIL", "idToken": id_token }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "MISSING_NEW_EMAIL");
+    }
+
+    #[tokio::test]
+    async fn an_email_link_signs_in_a_new_account_and_then_an_existing_one() {
+        let api = api();
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({
+                "requestType": "EMAIL_SIGNIN",
+                "email": "link@example.com",
+                "continueUrl": "http://localhost:3000/finish",
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "a link may name an address with no account: {body}");
+
+        let entry = newest_oob_code(&api).await;
+        assert_eq!(entry["requestType"], "EMAIL_SIGNIN");
+        assert!(
+            entry["oobLink"]
+                .as_str()
+                .expect("a link")
+                .contains("mode=signIn"),
+            "{entry}"
+        );
+        let code = entry["oobCode"].as_str().expect("code").to_string();
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:signInWithEmailLink",
+            json!({ "email": "link@example.com", "oobCode": code }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["kind"], "identitytoolkit#EmailLinkSigninResponse");
+        assert_eq!(body["isNewUser"], true);
+        assert_eq!(body["email"], "link@example.com");
+        let claims = id_token_claims(&body);
+        assert_eq!(claims["email"], "link@example.com");
+        assert_eq!(
+            claims["email_verified"], true,
+            "following the link proves the mailbox"
+        );
+        assert_eq!(
+            claims["firebase"]["sign_in_provider"], "password",
+            "the email provider's id is `password`, whichever of its two methods was used"
+        );
+
+        // A second link for the same address signs the same account in.
+        let (status, _) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "EMAIL_SIGNIN", "email": "link@example.com" }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let code = newest_oob_code(&api).await["oobCode"]
+            .as_str()
+            .expect("code")
+            .to_string();
+
+        let (status, second) = post(
+            &api,
+            "/v1/accounts:signInWithEmailLink",
+            json!({ "email": "link@example.com", "oobCode": code }),
+        )
+        .await;
+        assert_eq!(status, 200, "{second}");
+        assert_eq!(second["isNewUser"], false);
+        assert_eq!(second["localId"], body["localId"]);
+    }
+
+    #[tokio::test]
+    async fn an_email_link_refuses_an_address_it_was_not_issued_for() {
+        // A forwarded link must not sign in whoever received it. The documented
+        // client flow asks the user to confirm their address for this reason.
+        let api = api();
+        let (status, _) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "EMAIL_SIGNIN", "email": "mine@example.com" }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let code = newest_oob_code(&api).await["oobCode"]
+            .as_str()
+            .expect("code")
+            .to_string();
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:signInWithEmailLink",
+            json!({ "email": "someone-else@example.com", "oobCode": code }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "INVALID_EMAIL");
+
+        // Case and surrounding space are not a mismatch, though — the address
+        // is normalised the same way everywhere else.
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:signInWithEmailLink",
+            json!({ "email": " Mine@Example.COM ", "oobCode": code }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_code_cannot_be_redeemed_at_the_wrong_endpoint() {
+        let api = api();
+        signed_up(&api, "ada@example.com", "secret12").await;
+        let reset = requested_reset(&api, "ada@example.com").await;
+
+        // A reset code is not a sign-in link, and not an action code.
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:signInWithEmailLink",
+            json!({ "email": "ada@example.com", "oobCode": reset }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "INVALID_OOB_CODE");
+
+        let (status, body) = post(&api, "/v1/accounts:update", json!({ "oobCode": reset })).await;
+        assert_eq!(status, 400, "{body}");
+        assert!(message(&body).starts_with("INVALID_OOB_CODE"), "{body}");
+
+        // And the reset code still works where it belongs: a wrong-endpoint
+        // attempt must not burn it.
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": reset, "newPassword": "brand-new-one" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+    }
+
+    #[tokio::test]
+    async fn redeeming_endpoints_name_the_field_they_are_missing() {
+        let api = api();
+
+        for (path, body, expected) in [
+            ("/v1/accounts:resetPassword", json!({}), "MISSING_OOB_CODE"),
+            (
+                "/v1/accounts:signInWithEmailLink",
+                json!({ "oobCode": "whatever" }),
+                "MISSING_EMAIL",
+            ),
+            (
+                "/v1/accounts:signInWithEmailLink",
+                json!({ "email": "a@b.com" }),
+                "MISSING_OOB_CODE",
+            ),
+        ] {
+            let (status, response) = post(&api, path, body.clone()).await;
+            assert_eq!(status, 400, "{path} {body} -> {response}");
+            assert_eq!(message(&response), expected, "{path} {body}");
+        }
+
+        // An unknown code is invalid, not a 500 or a 404.
+        let (status, response) = post(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": "never-minted" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{response}");
+        assert_eq!(message(&response), "INVALID_OOB_CODE");
+    }
+
+    #[tokio::test]
+    async fn a_weak_new_password_is_refused_and_leaves_the_link_usable() {
+        let api = api();
+        signed_up(&api, "ada@example.com", "secret12").await;
+        let code = requested_reset(&api, "ada@example.com").await;
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": code, "newPassword": "short" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert!(message(&body).starts_with("WEAK_PASSWORD"), "{body}");
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": code, "newPassword": "long-enough" }),
+        )
+        .await;
+        assert_eq!(
+            status, 200,
+            "a rejected password must not burn the link: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_link_for_a_deleted_account_reports_the_account_not_the_link() {
+        let api = api();
+        let session = signed_up(&api, "ada@example.com", "secret12").await;
+        let code = requested_reset(&api, "ada@example.com").await;
+
+        let (status, _) = post(
+            &api,
+            "/v1/accounts:delete",
+            json!({ "idToken": session["idToken"].as_str().expect("id token") }),
+        )
+        .await;
+        assert_eq!(status, 200);
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": code, "newPassword": "brand-new-one" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(
+            message(&body),
+            "USER_NOT_FOUND",
+            "the link was fine; the account is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_admin_endpoint_hands_back_the_link_and_the_client_one_does_not() {
+        // This is `generatePasswordResetLink` / `generateEmailVerificationLink`:
+        // the Admin SDK asks for the link instead of an email being sent.
+        let api = api();
+        signed_up(&api, "ada@example.com", "secret12").await;
+
+        let (status, body) = post(
+            &api,
+            "/v1/projects/demo/accounts:sendOobCode",
+            json!({
+                "requestType": "PASSWORD_RESET",
+                "email": "ada@example.com",
+                "returnOobLink": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let link = body["oobLink"].as_str().expect("a link");
+        assert!(link.starts_with("http://127.0.0.1:4589/emulator/action?"), "{link}");
+        assert!(link.contains("mode=resetPassword"), "{link}");
+
+        // Without `returnOobLink` the admin response is the plain one.
+        let (status, body) = post(
+            &api,
+            "/v1/projects/demo/accounts:sendOobCode",
+            json!({ "requestType": "PASSWORD_RESET", "email": "ada@example.com" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.get("oobLink").is_none(), "{body}");
+
+        // And a client asking for it is ignored rather than obliged: a reset
+        // link for any address is exactly what an attacker would want.
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({
+                "requestType": "PASSWORD_RESET",
+                "email": "ada@example.com",
+                "returnOobLink": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.get("oobLink").is_none(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_admin_endpoint_addresses_verification_by_email_not_by_session() {
+        // `generateEmailVerificationLink(email)` and
+        // `generateVerifyAndChangeEmailLink(email, newEmail)` have no session to
+        // offer. Requiring an idToken there would make both Admin SDK methods
+        // unusable while looking like a client-side mistake.
+        let api = api();
+        signed_up(&api, "ada@example.com", "secret12").await;
+
+        let (status, body) = post(
+            &api,
+            "/v1/projects/demo/accounts:sendOobCode",
+            json!({
+                "requestType": "VERIFY_EMAIL",
+                "email": "ada@example.com",
+                "returnOobLink": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body["oobLink"]
+                .as_str()
+                .expect("a link")
+                .contains("mode=verifyEmail"),
+            "{body}"
+        );
+
+        let (status, body) = post(
+            &api,
+            "/v1/projects/demo/accounts:sendOobCode",
+            json!({
+                "requestType": "VERIFY_AND_CHANGE_EMAIL",
+                "email": "ada@example.com",
+                "newEmail": "moved@example.com",
+                "returnOobLink": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["email"], "moved@example.com");
+
+        // Applying it moves the account, so the admin-generated link is a real
+        // one and not just a string. Two links are outstanding at the same
+        // frozen instant, so pick by type rather than by order.
+        let code = pending_oob_code_of(&api, "VERIFY_AND_CHANGE_EMAIL").await["oobCode"]
+            .as_str()
+            .expect("code")
+            .to_string();
+        let (status, body) = post(&api, "/v1/accounts:update", json!({ "oobCode": code })).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["email"], "moved@example.com");
+
+        // And an unknown address is reported as such rather than as a missing
+        // token.
+        let (status, body) = post(
+            &api,
+            "/v1/projects/demo/accounts:sendOobCode",
+            json!({ "requestType": "VERIFY_EMAIL", "email": "nobody@example.com" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "EMAIL_NOT_FOUND");
+
+        let (status, body) = post(
+            &api,
+            "/v1/projects/demo/accounts:sendOobCode",
+            json!({ "requestType": "VERIFY_EMAIL" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "MISSING_EMAIL");
+    }
+
+    #[tokio::test]
+    async fn the_admin_send_endpoint_still_refuses_another_project() {
+        let api = api();
+        let (status, body) = post(
+            &api,
+            "/v1/projects/other/accounts:sendOobCode",
+            json!({ "requestType": "PASSWORD_RESET", "email": "ada@example.com" }),
+        )
+        .await;
+        assert_eq!(status, 404, "{body}");
+        assert!(message(&body).starts_with("PROJECT_NOT_FOUND"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn following_a_verification_link_applies_it() {
+        let api = api();
+        let session = signed_up(&api, "ada@example.com", "secret12").await;
+        let id_token = session["idToken"].as_str().expect("id token").to_string();
+
+        let (status, _) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({ "requestType": "VERIFY_EMAIL", "idToken": id_token }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let entry = newest_oob_code(&api).await;
+        let code = entry["oobCode"].as_str().expect("code").to_string();
+
+        let (status, body) = get(
+            &api,
+            oob::ACTION_PATH,
+            &format!("mode=verifyEmail&oobCode={code}&lang=en"),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["applied"], true);
+        assert_eq!(body["emailVerified"], true);
+        assert!(
+            body["notice"].as_str().expect("a notice").contains("Not a Google page"),
+            "the landing route must not pass itself off as Google's: {body}"
+        );
+
+        let (_, body) = post(&api, "/v1/accounts:lookup", json!({ "idToken": id_token })).await;
+        assert_eq!(body["users"][0]["emailVerified"], true);
+    }
+
+    #[tokio::test]
+    async fn following_a_reset_link_reports_the_call_that_finishes_it_without_consuming_it() {
+        let api = api();
+        signed_up(&api, "ada@example.com", "secret12").await;
+        let code = requested_reset(&api, "ada@example.com").await;
+
+        let (status, body) = get(
+            &api,
+            oob::ACTION_PATH,
+            &format!("mode=resetPassword&oobCode={code}"),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["applied"], false, "a visit cannot invent a password");
+        assert_eq!(body["mode"], "resetPassword");
+        assert_eq!(body["email"], "ada@example.com");
+        assert_eq!(body["finishWith"]["path"], "/v1/accounts:resetPassword");
+
+        // The code survives the visit, or the form it points at could never be
+        // submitted.
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": code, "newPassword": "brand-new-one" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_edited_link_is_refused_rather_than_applying_a_different_action() {
+        let api = api();
+        signed_up(&api, "ada@example.com", "secret12").await;
+        let code = requested_reset(&api, "ada@example.com").await;
+
+        let (status, body) = get(
+            &api,
+            oob::ACTION_PATH,
+            &format!("mode=verifyEmail&oobCode={code}"),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert!(message(&body).starts_with("INVALID_OOB_CODE"), "{body}");
+
+        let (status, body) = get(&api, oob::ACTION_PATH, "mode=verifyEmail").await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "MISSING_OOB_CODE");
+
+        let (status, body) = request(&api, "POST", oob::ACTION_PATH, "").await;
+        assert_eq!(status, 405, "{body}");
+        assert!(message(&body).contains("GET"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_continue_url_survives_the_round_trip_through_the_link() {
+        let api = api();
+        let app_url = "http://localhost:3000/finish?next=/dashboard&tab=1";
+        let (status, _) = post(
+            &api,
+            "/v1/accounts:sendOobCode",
+            json!({
+                "requestType": "EMAIL_SIGNIN",
+                "email": "link@example.com",
+                "continueUrl": app_url,
+            }),
+        )
+        .await;
+        assert_eq!(status, 200);
+
+        let entry = newest_oob_code(&api).await;
+        let link = entry["oobLink"].as_str().expect("a link");
+        let query = link.split_once('?').expect("a query string").1;
+        let parameters = parse_pairs(query);
+
+        assert_eq!(
+            parameters["continueUrl"], app_url,
+            "an app's own query must not be mangled by being nested in the link: {link}"
+        );
+        assert_eq!(parameters["mode"], "signIn");
+        assert_eq!(parameters["oobCode"], entry["oobCode"]);
+
+        // And the landing route echoes it, so a page that opened the link knows
+        // where to send the user next.
+        let (status, body) = get(&api, oob::ACTION_PATH, query).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["continueUrl"], app_url);
+    }
+
+    #[tokio::test]
+    async fn clearing_the_project_clears_pending_links_too() {
+        // A reset link that survived a test suite's wipe could apply to
+        // whatever account later takes that uid.
+        let api = api();
+        signed_up(&api, "ada@example.com", "secret12").await;
+        let code = requested_reset(&api, "ada@example.com").await;
+
+        let (status, body) =
+            request(&api, "DELETE", "/emulator/v1/projects/demo/accounts", "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["removedAccounts"], 1);
+        assert_eq!(body["removedOobCodes"], 1);
+
+        let (status, body) = post(
+            &api,
+            "/v1/accounts:resetPassword",
+            json!({ "oobCode": code, "newPassword": "brand-new-one" }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(message(&body), "INVALID_OOB_CODE");
+    }
+
+    #[tokio::test]
+    async fn pending_links_can_be_cleared_without_touching_the_accounts() {
+        let api = api();
+        signed_up(&api, "ada@example.com", "secret12").await;
+        requested_reset(&api, "ada@example.com").await;
+
+        let (status, body) =
+            request(&api, "DELETE", "/emulator/v1/projects/demo/oobCodes", "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["removedOobCodes"], 1);
+
+        let (status, body) =
+            request(&api, "GET", "/emulator/v1/projects/demo/oobCodes", "").await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body["oobCodes"].as_array().expect("array").is_empty(), "{body}");
+
+        let (status, _) = post(
+            &api,
+            "/v1/accounts:signInWithPassword",
+            json!({ "email": "ada@example.com", "password": "secret12" }),
+        )
+        .await;
+        assert_eq!(status, 200, "the account must still be there");
+    }
+
+    #[tokio::test]
+    async fn the_oob_listing_refuses_a_method_it_does_not_serve() {
+        let api = api();
+        let (status, body) =
+            request(&api, "POST", "/emulator/v1/projects/demo/oobCodes", "").await;
+        assert_eq!(status, 405, "{body}");
+        assert!(message(&body).contains("GET or DELETE"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_broken_store_fails_the_oob_flows_as_a_500_with_the_reason() {
+        let api = failing_api();
+
+        for (path, body) in [
+            (
+                "/v1/accounts:sendOobCode",
+                json!({ "requestType": "PASSWORD_RESET", "email": "ada@example.com" }),
+            ),
+            (
+                "/v1/accounts:resetPassword",
+                json!({ "oobCode": "whatever", "newPassword": "brand-new-one" }),
+            ),
+            (
+                "/v1/accounts:signInWithEmailLink",
+                json!({ "email": "ada@example.com", "oobCode": "whatever" }),
+            ),
+        ] {
+            let (status, response) = post(&api, path, body.clone()).await;
+            assert_eq!(status, 500, "{path} -> {response}");
+            assert!(
+                message(&response).contains("deliberately unavailable"),
+                "{path} must report the backend's own reason: {response}"
+            );
+        }
+
+        let (status, response) =
+            request(&api, "GET", "/emulator/v1/projects/demo/oobCodes", "").await;
+        assert_eq!(status, 500, "{response}");
     }
 
     // ----- malformed input and broken storage -------------------------------

@@ -195,7 +195,7 @@ FIRESTORE: document CRUD, StructuredQuery, collection listings, and transactions
 
 DATASTORE: Lookup, RunQuery, Commit, BeginTransaction, AllocateIds on the same store as Firestore (kinds map to collections). GQL, aggregations, namespaces, and property transforms return UNIMPLEMENTED.
 
-AUTH: email/password sign-up and sign-in, anonymous sign-in, custom-token sign-in, token refresh, and admin account CRUD. Phone auth, multi-factor enrolment, federated providers, and out-of-band email flows are not served.
+AUTH: email/password sign-up and sign-in, anonymous sign-in, custom-token sign-in, token refresh, admin account CRUD, and the email flows (password reset, email verification, email-link sign-in). No mail is sent: the link is logged and readable at GET /emulator/v1/projects/{p}/oobCodes. Phone auth, multi-factor enrolment, and federated providers are not served.
 
 Storage is in-memory unless --postgres-url is given, in which case documents and accounts are stored in PostgreSQL and survive a restart.
 

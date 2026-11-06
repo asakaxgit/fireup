@@ -25,7 +25,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use fireup::local::auth::postgres_store::{PostgresUserStore, USERS_TABLE};
+use fireup::local::auth::postgres_store::{PostgresUserStore, OOB_CODES_TABLE, USERS_TABLE};
 use fireup::local::auth::store::{conformance, SharedUserStore};
 use fireup::local::{self, LocalConfig};
 use serde_json::{json, Value as Json};
@@ -80,17 +80,19 @@ async fn client(url: &str) -> deadpool_postgres::Object {
         .expect("connection")
 }
 
-/// Remove every account belonging to `project_id`, including the conformance
-/// suite's sibling project.
+/// Remove every account and pending link belonging to `project_id`, including
+/// the conformance suite's sibling project.
 async fn cleanup(url: &str, project_id: &str) {
     let client = client(url).await;
-    client
-        .execute(
-            &format!("DELETE FROM {USERS_TABLE} WHERE project_id LIKE $1"),
-            &[&format!("{project_id}%")],
-        )
-        .await
-        .expect("delete this test's accounts");
+    for table in [USERS_TABLE, OOB_CODES_TABLE] {
+        client
+            .execute(
+                &format!("DELETE FROM {table} WHERE project_id LIKE $1"),
+                &[&format!("{project_id}%")],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("delete this test's rows from {table}: {error}"));
+    }
 }
 
 /// Start a server backed by `url`.
@@ -235,6 +237,168 @@ async fn a_refresh_token_still_works_after_a_restart() {
     assert_eq!(refreshed["user_id"], signed_up["localId"]);
 
     second.shutdown().await.expect("clean shutdown");
+    cleanup(&url, &project_id).await;
+}
+
+#[tokio::test]
+async fn a_reset_link_still_works_after_a_restart() {
+    // The reason pending links are stored rather than kept in a process-local
+    // map: a developer recompiles while a reset link sits in their terminal,
+    // and the link has to still work.
+    let Some(url) = test_url() else { return };
+    let project_id = unique_project("auth-oob-restart");
+
+    let first = start(&url, &project_id).await;
+    let (status, body) = post(
+        first.addr,
+        &format!("{IDENTITY}/accounts:signUp"),
+        json!({ "email": "ada@example.com", "password": "secret12" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = post(
+        first.addr,
+        &format!("{IDENTITY}/accounts:sendOobCode"),
+        json!({ "requestType": "PASSWORD_RESET", "email": "ada@example.com" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    // Read the stored row directly, so this asserts the code is in the
+    // database rather than only in the answering process's memory.
+    let client = client(&url).await;
+    let row = client
+        .query_one(
+            &format!(
+                "SELECT oob_code, request_type, email, local_id, expires_at_millis
+                   FROM {OOB_CODES_TABLE} WHERE project_id = $1"
+            ),
+            &[&project_id],
+        )
+        .await
+        .expect("the code must be a row, not process state");
+    let code: String = row.get("oob_code");
+    let request_type: String = row.get("request_type");
+    let email: String = row.get("email");
+    let local_id: Option<String> = row.get("local_id");
+    assert_eq!(request_type, "PASSWORD_RESET");
+    assert_eq!(email, "ada@example.com");
+    assert!(local_id.is_some(), "a reset code names the account it resets");
+
+    first.shutdown().await.expect("clean shutdown");
+
+    let second = start(&url, &project_id).await;
+    let (status, body) = post(
+        second.addr,
+        &format!("{IDENTITY}/accounts:resetPassword"),
+        json!({ "oobCode": code, "newPassword": "brand-new-one" }),
+    )
+    .await;
+    assert_eq!(status, 200, "a link must survive a restart: {body}");
+
+    let (status, body) = post(
+        second.addr,
+        &format!("{IDENTITY}/accounts:signInWithPassword"),
+        json!({ "email": "ada@example.com", "password": "brand-new-one" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    // Redeeming it removed the row, so the single-use rule is the database's
+    // too and not just the in-memory store's.
+    let remaining: i64 = client
+        .query_one(
+            &format!("SELECT count(*) FROM {OOB_CODES_TABLE} WHERE project_id = $1"),
+            &[&project_id],
+        )
+        .await
+        .expect("count codes")
+        .get(0);
+    assert_eq!(remaining, 0, "a redeemed code must be gone from the table");
+
+    second.shutdown().await.expect("clean shutdown");
+    cleanup(&url, &project_id).await;
+}
+
+#[tokio::test]
+async fn pending_links_live_in_their_own_table_away_from_accounts_and_documents() {
+    let Some(url) = test_url() else { return };
+    let project_id = unique_project("auth-oob-table");
+    let server = start(&url, &project_id).await;
+
+    let (status, body) = post(
+        server.addr,
+        &format!("{IDENTITY}/accounts:sendOobCode"),
+        json!({ "requestType": "EMAIL_SIGNIN", "email": "link@example.com" }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "a sign-in link needs no account, so no FK may block it: {body}"
+    );
+
+    let client = client(&url).await;
+    // No account was created, so a sign-in code has to be storable with a null
+    // `local_id`.
+    let accounts: i64 = client
+        .query_one(
+            &format!("SELECT count(*) FROM {USERS_TABLE} WHERE project_id = $1"),
+            &[&project_id],
+        )
+        .await
+        .expect("count accounts")
+        .get(0);
+    assert_eq!(accounts, 0, "requesting a link must not create an account");
+
+    let row = client
+        .query_one(
+            &format!(
+                "SELECT local_id, new_email, continue_url FROM {OOB_CODES_TABLE}
+                  WHERE project_id = $1"
+            ),
+            &[&project_id],
+        )
+        .await
+        .expect("the code row");
+    assert_eq!(row.get::<_, Option<String>>("local_id"), None);
+    assert_eq!(row.get::<_, Option<String>>("new_email"), None);
+    assert_eq!(row.get::<_, Option<String>>("continue_url"), None);
+
+    // And following it creates the account, in the accounts table.
+    let code: String = client
+        .query_one(
+            &format!("SELECT oob_code FROM {OOB_CODES_TABLE} WHERE project_id = $1"),
+            &[&project_id],
+        )
+        .await
+        .expect("the code")
+        .get(0);
+    let (status, body) = post(
+        server.addr,
+        &format!("{IDENTITY}/accounts:signInWithEmailLink"),
+        json!({ "email": "link@example.com", "oobCode": code }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["isNewUser"], true);
+
+    let accounts: i64 = client
+        .query_one(
+            &format!("SELECT count(*) FROM {USERS_TABLE} WHERE project_id = $1"),
+            &[&project_id],
+        )
+        .await
+        .expect("count accounts")
+        .get(0);
+    assert_eq!(accounts, 1);
+    assert_eq!(
+        server.store.count().await.expect("count documents"),
+        0,
+        "identity data must not land in the documents table"
+    );
+
+    server.shutdown().await.expect("clean shutdown");
     cleanup(&url, &project_id).await;
 }
 

@@ -2,7 +2,7 @@
 
 > First-party Fireup code is licensed under **Apache-2.0** (see root `LICENSE`). Brand assets under `brand/` are carved out — see `brand/LICENSE`. Dependency-tree audit: [`CARGO_LICENSE_AUDIT.md`](CARGO_LICENSE_AUDIT.md).
 
-**Status:** current as of SAK-190 — Firestore field transforms. Prior: SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
+**Status:** current as of SAK-193 — Phase L.1 serves the out-of-band email flows (no mail transport). Prior: SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -117,8 +117,9 @@ public Rust crates already present transitively.
 disassembled, or binary-analysed, and no proprietary emulator source, asset, or
 data file was copied or consulted. Where behaviour is not publicly documented it
 is **not implemented**: phone auth, multi-factor enrolment and the rest of the
-Identity Platform `v2` surface, federated providers, and out-of-band email flows
-all answer `501` with a message naming the gap. Reading Google's own
+Identity Platform `v2` surface, and federated providers all answer `501` with a
+message naming the gap. (Out-of-band email flows were in that list until
+SAK-193; see the Phase L.1 notes below.) Reading Google's own
 Apache-2.0-licensed *client* libraries to learn what a client expects is use of
 open source, not reverse engineering of a closed binary.
 
@@ -160,6 +161,64 @@ claims to be the Firebase Emulator Suite or to be affiliated with Google. The
 discovery document at `GET /` carries the independent-implementation notice, and
 `identitytoolkit.googleapis.com` appears only as the name of the *public API
 contract being implemented*.
+
+### Phase L.1 (SAK-193) notes — out-of-band email flows
+
+**No new Google or Firebase artefact was introduced**, and no new dependency of
+any kind: this is `src/local/auth/oob.rs` plus handlers, a table, and tests. The
+previous Phase L note listed out-of-band email flows among the gaps that answer
+`501`; they are now served, and that sentence is superseded by this section.
+
+#### What the implementation was written from
+
+| Source | Status | How it was used |
+|---|---|---|
+| Public Identity Toolkit REST reference for `accounts:sendOobCode`, `accounts:resetPassword`, `accounts:update`, `accounts:signInWithEmailLink` | Published Google documentation | Endpoint paths, the `requestType` enum values (`PASSWORD_RESET`, `VERIFY_EMAIL`, `EMAIL_SIGNIN`, `VERIFY_AND_CHANGE_EMAIL`), the `kind` discriminators, and the error codes clients match on (`INVALID_OOB_CODE`, `EXPIRED_OOB_CODE`, `MISSING_OOB_CODE`, `INVALID_REQ_TYPE`, `EMAIL_NOT_FOUND`, …) |
+| Public "email action link" / custom-email-handler documentation | Published Google documentation | The link's query parameters and their names: `mode`, `oobCode`, `apiKey`, `continueUrl`, `lang`, and the `mode` values `resetPassword`, `verifyEmail`, `signIn`, `verifyAndChangeEmail` |
+| Public Auth emulator documentation | Published Google documentation | That the local convention for "no mail transport" is a REST endpoint listing the pending codes — `GET /emulator/v1/projects/{p}/oobCodes` — rather than an SMTP client |
+| Behaviour of Google's **open-source** client SDK (`firebase-js-sdk`, Apache-2.0) | Open source, public repository | That its `ActionCodeURL` link parser asserts on `apiKey`, `oobCode` and a known `mode` together and yields nothing without all three. Found by running the SDK against this server, then confirmed in its published source. This is why the link carries an `apiKey` even though nothing here validates one. |
+| Admin SDK `generate*Link` request shapes (`firebase-admin-node`, Apache-2.0) | Open source, public repository | That those methods POST to `/v1/projects/{p}/accounts:sendOobCode` with `returnOobLink: true` and address the account by `email` rather than by session |
+
+**No reverse engineering.** Nothing was decompiled, disassembled, or
+binary-analysed, and no proprietary emulator source, asset, data file, or
+rendered page was copied or consulted. Reading Google's own Apache-2.0 *client*
+libraries to learn what a client requires is use of open source.
+
+#### First-party, not a reimplementation of anything Google ships
+
+- **The landing page is not a copy of anyone's.** Production links land on a
+  Google-hosted page. Fireup serves `GET /emulator/action`, its own route under
+  the local-only `/emulator/` namespace, answering **JSON** that names the
+  pending action and the call that completes it. It exists so a generated link
+  resolves to something instead of a 404, and its response carries a notice
+  saying it is not a Google page and not part of the Identity Toolkit API. No
+  Google page's markup, copy, or styling was reproduced.
+- **The code format is Fireup's own**: 32 random bytes as base64url. An
+  `oobCode` is opaque to clients by contract — they hand it back verbatim — so
+  there was no wire format to match, exactly as with refresh tokens.
+- **The one-hour lifetime is Fireup's choice**, applied uniformly to all four
+  request types. It is the published default for a password reset link; a single
+  number for every type is one fewer thing to be surprised by locally, and the
+  shortest documented default is the conservative pick. It is not a claim about
+  what any other implementation does.
+- **The code storage layout** (`fireup_local_auth_oob_codes`, its own table with
+  no foreign key to the accounts table, epoch-millisecond `bigint` timestamps)
+  is Fireup's own choice. No emulator storage format was inspected.
+- **The `apiKey` placeholder** in a link requested without one is the sentence
+  `fireup-local-does-not-check-api-keys`, deliberately not key-shaped: the
+  parameter is required by the official client parser, and nothing here
+  validates it. No real or realistic API key appears anywhere in the repository.
+- **First-party additions to documented responses:** `removedOobCodes` in the
+  clear responses, and the `notice` / `mode` / `applied` / `finishWith` fields
+  on the landing route, which is a first-party route to begin with.
+
+#### What is still not served
+
+Phone verification as an OOB request type (`requestType:
+PHONE_VERIFICATION`) answers `501` naming phone auth as the non-goal, alongside
+the rest of the Phase L gaps. Nothing sends email. Tokens remain unsigned and
+labelled as such in the code, the CLI `--help`, the startup log, and
+`docs/local/README.md`.
 
 ### Phase 3 (SAK-166) notes — Datastore API on the shared store
 
@@ -296,14 +355,14 @@ and the Datastore spelling (`Mutation.property_transforms`).
 The PR checklist in `.cursor/rules/firebase-gcp-compliance.mdc`, answered as each
 phase landed.
 
-| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 | SAK-196 | SAK-190 |
-|---|---|---|---|---|---|---|---|
-| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected | Yes — the vendored `write.proto` comments, public `FieldValue` docs, open-source client as a client |
-| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added | Yes — none added; first-party SPDX corrected to Apache-2.0; audit linked | Yes — none added |
-| For a REST/JSON surface: public sources named | n/a / prior phases | Yes | n/a (protos) | n/a | n/a | n/a — no new surface | n/a (protos) |
-| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated/OOB → `501` | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a | Yes — `maximum`/`minimum`, nested transform paths, and Datastore property transforms stay refused |
-| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged | Yes — retained in README licence section | Yes — unchanged |
-| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added |
+| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 | SAK-196 | SAK-190 | Phase L.1 (SAK-193) |
+|---|---|---|---|---|---|---|---|---|
+| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected | Yes — the vendored `write.proto` comments, public `FieldValue` docs, open-source client as a client | Yes — public REST + email-action-link docs, and the open-source client SDK's published link parser; no page markup or asset reproduced |
+| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added | Yes — none added; first-party SPDX corrected to Apache-2.0; audit linked | Yes — none added | Yes — none added, of any kind |
+| For a REST/JSON surface: public sources named | n/a / prior phases | Yes | n/a (protos) | n/a | n/a | n/a — no new surface | n/a (protos) | Yes — the four sources are rowed in the Phase L.1 notes |
+| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated → `501` (OOB too, until SAK-193) | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a | Yes — `maximum`/`minimum`, nested transform paths, and Datastore property transforms stay refused | Yes — `PHONE_VERIFICATION` → `501`; mail delivery stated as a non-goal rather than faked; the one-hour code lifetime and the landing route labelled as Fireup's own choices |
+| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged | Yes — retained in README licence section | Yes — unchanged | Yes — and the landing route's own response carries a "not a Google page" notice |
+| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added | Yes — no signing key; the link's `apiKey` placeholder is a sentence, not a key-shaped string |
 
 ## How to add a row
 

@@ -25,11 +25,19 @@ import { initializeApp as initializeAdminApp, deleteApp as deleteAdminApp } from
 import { getAuth as getAdminAuth } from 'firebase-admin/auth'
 import { initializeApp as initializeClientApp, deleteApp as deleteClientApp } from 'firebase/app'
 import {
+  applyActionCode,
+  confirmPasswordReset,
   connectAuthEmulator,
   getAuth as getClientAuth,
+  isSignInWithEmailLink,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  sendSignInLinkToEmail,
   signInAnonymously,
   signInWithCustomToken,
   signInWithEmailAndPassword,
+  signInWithEmailLink,
+  verifyPasswordResetCode,
 } from 'firebase/auth'
 
 const PROJECT_ID = 'fireup-smoke'
@@ -445,6 +453,170 @@ const main = async () => {
     await expectAuthCode('auth/user-not-found', () => adminAuth.deleteUser('never-existed'))
   })
 
+  // ----- out-of-band email flows -------------------------------------------
+  //
+  // Nothing is mailed, so the link is read back from the documented local
+  // control endpoint. Everything else here is the SDKs' own request shapes:
+  // firebase-admin picks the URL and body for generate*Link, and the client SDK
+  // picks them for sendPasswordResetEmail / confirmPasswordReset /
+  // applyActionCode / signInWithEmailLink.
+
+  /// Read a pending link from GET /emulator/v1/projects/{p}/oobCodes.
+  ///
+  /// This endpoint is the stand-in for a mailbox, so reading it by hand is the
+  /// *documented* way a test follows these flows — not a Fireup-internal
+  /// shortcut.
+  const pendingOobCodes = async () => {
+    const response = await fetch(`http://${host}/emulator/v1/projects/${PROJECT_ID}/oobCodes`)
+    assert.equal(response.status, 200, `oobCodes listing failed: ${response.status}`)
+    const { oobCodes } = await response.json()
+    return oobCodes
+  }
+
+  const pendingOobCodeFor = async (email, requestType) => {
+    const codes = await pendingOobCodes()
+    const match = codes.filter((entry) => entry.email === email && entry.requestType === requestType).pop()
+    assert.ok(match, `no pending ${requestType} for ${email}: ${JSON.stringify(codes)}`)
+    return match
+  }
+
+  await check('admin generatePasswordResetLink() returns a link that actually resets the password', async () => {
+    const user = await adminAuth.createUser({ email: 'reset@example.com', password: 'original-one' })
+    try {
+      // The Admin SDK asks for the link in the response rather than by email.
+      const link = await adminAuth.generatePasswordResetLink('reset@example.com')
+      assert.ok(link.startsWith(`http://${host}/`), `the link must point at this server: ${link}`)
+      const oobCode = new URL(link).searchParams.get('oobCode')
+      assert.ok(oobCode, `the link must carry an oobCode: ${link}`)
+
+      // And the client SDK finishes the flow with the code out of that link.
+      await confirmPasswordReset(clientAuth, oobCode, 'a-reset-password')
+
+      const credential = await signInWithEmailAndPassword(clientAuth, 'reset@example.com', 'a-reset-password')
+      assert.equal(credential.user.uid, user.uid)
+      await expectAuthCode('auth/wrong-password', () =>
+        signInWithEmailAndPassword(clientAuth, 'reset@example.com', 'original-one'),
+      )
+    } finally {
+      await adminAuth.deleteUser(user.uid)
+    }
+  })
+
+  await check('client sendPasswordResetEmail() + verifyPasswordResetCode() + confirmPasswordReset() round-trips', async () => {
+    const user = await adminAuth.createUser({ email: 'forgot@example.com', password: 'original-one' })
+    try {
+      await sendPasswordResetEmail(clientAuth, 'forgot@example.com')
+      const { oobCode } = await pendingOobCodeFor('forgot@example.com', 'PASSWORD_RESET')
+
+      // Checking the code must not spend it, or the form it gates could never
+      // be submitted.
+      const checkedEmail = await verifyPasswordResetCode(clientAuth, oobCode)
+      assert.equal(checkedEmail, 'forgot@example.com')
+
+      await confirmPasswordReset(clientAuth, oobCode, 'another-password')
+      const credential = await signInWithEmailAndPassword(clientAuth, 'forgot@example.com', 'another-password')
+      assert.equal(credential.user.uid, user.uid)
+
+      // A spent code must be refused, with a mapped error.
+      await expectAuthCode('auth/invalid-action-code', () =>
+        confirmPasswordReset(clientAuth, oobCode, 'a-third-password'),
+      )
+    } finally {
+      await adminAuth.deleteUser(user.uid)
+    }
+  })
+
+  await check('client sendEmailVerification() + applyActionCode() marks the address verified', async () => {
+    const user = await adminAuth.createUser({
+      email: 'verify@example.com',
+      password: 'correct-horse',
+      emailVerified: false,
+    })
+    try {
+      const credential = await signInWithEmailAndPassword(clientAuth, 'verify@example.com', 'correct-horse')
+      assert.equal(credential.user.emailVerified, false)
+
+      // The client SDK sends this with the session's idToken, not an email.
+      await sendEmailVerification(credential.user)
+      const { oobCode } = await pendingOobCodeFor('verify@example.com', 'VERIFY_EMAIL')
+
+      // applyActionCode runs on whatever page the link opened, with no session.
+      await applyActionCode(clientAuth, oobCode)
+
+      assert.equal(
+        (await adminAuth.getUser(user.uid)).emailVerified,
+        true,
+        'the Admin SDK must see the address as verified',
+      )
+      // And the client sees it after a reload, which re-reads the account.
+      await credential.user.reload()
+      assert.equal(credential.user.emailVerified, true)
+
+      await expectAuthCode('auth/invalid-action-code', () => applyActionCode(clientAuth, oobCode))
+    } finally {
+      await adminAuth.deleteUser(user.uid)
+    }
+  })
+
+  await check('admin generateEmailVerificationLink() returns an applicable link', async () => {
+    const user = await adminAuth.createUser({ email: 'adminverify@example.com', emailVerified: false })
+    try {
+      const link = await adminAuth.generateEmailVerificationLink('adminverify@example.com')
+      const url = new URL(link)
+      assert.equal(url.searchParams.get('mode'), 'verifyEmail', `unexpected mode in ${link}`)
+
+      await applyActionCode(clientAuth, url.searchParams.get('oobCode'))
+      assert.equal((await adminAuth.getUser(user.uid)).emailVerified, true)
+    } finally {
+      await adminAuth.deleteUser(user.uid)
+    }
+  })
+
+  await check('client signInWithEmailLink() signs in with no password at all', async () => {
+    const email = 'passwordless@example.com'
+    const actionCodeSettings = { url: 'http://localhost:3000/finish', handleCodeInApp: true }
+
+    let uid
+    try {
+      await sendSignInLinkToEmail(clientAuth, email, actionCodeSettings)
+      const { oobLink } = await pendingOobCodeFor(email, 'EMAIL_SIGNIN')
+
+      // isSignInWithEmailLink is the SDK's own parse of the link we built, so
+      // it checks the link shape rather than anything we assert ourselves.
+      assert.ok(
+        isSignInWithEmailLink(clientAuth, oobLink),
+        `the client SDK must recognise this as a sign-in link: ${oobLink}`,
+      )
+
+      const credential = await signInWithEmailLink(clientAuth, email, oobLink)
+      uid = credential.user.uid
+      assert.equal(credential.user.email, email)
+      assert.equal(credential.user.emailVerified, true, 'following the link proves the mailbox')
+
+      // The session has to be a real one the Admin SDK will accept.
+      const decoded = await adminAuth.verifyIdToken(await credential.user.getIdToken())
+      assert.equal(decoded.uid, uid)
+
+      // A spent link must not sign anyone in again.
+      await expectAuthCode('auth/invalid-action-code', () =>
+        signInWithEmailLink(clientAuth, email, oobLink),
+      )
+    } finally {
+      if (uid) {
+        await adminAuth.deleteUser(uid)
+      }
+    }
+  })
+
+  await check('a reset link for an unknown address is refused with the mapped error', async () => {
+    await expectAuthCode('auth/user-not-found', () =>
+      sendPasswordResetEmail(clientAuth, 'nobody-at-all@example.com'),
+    )
+    await expectAuthCode('auth/invalid-action-code', () =>
+      confirmPasswordReset(clientAuth, 'never-minted-code', 'some-password'),
+    )
+  })
+
   // ----- what is deliberately not served -----------------------------------
   //
   // These record gaps rather than guarantees. They assert that an unsupported
@@ -472,10 +644,6 @@ const main = async () => {
       await adminAuth.deleteUser(a.uid)
       await adminAuth.deleteUser(b.uid)
     }
-  })
-
-  await check('admin generateEmailVerificationLink() is refused cleanly (OOB flows are not served)', async () => {
-    await assert.rejects(() => adminAuth.generateEmailVerificationLink('alice@example.com'))
   })
 
   await check('admin createSessionCookie() is refused cleanly (session cookies are not served)', async () => {

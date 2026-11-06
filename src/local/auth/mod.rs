@@ -18,16 +18,22 @@
 //! | `POST /v1/accounts:signInWithPassword` | password sign-in |
 //! | `POST /v1/accounts:signInWithCustomToken` | sign in with an Admin SDK custom token |
 //! | `POST /v1/accounts:lookup` | read the signed-in account |
-//! | `POST /v1/accounts:update` | change profile, email, or password |
+//! | `POST /v1/accounts:update` | change profile, email, or password; apply an email action code |
 //! | `POST /v1/accounts:delete` | delete the signed-in account |
+//! | `POST /v1/accounts:sendOobCode` | request a reset / verification / sign-in link |
+//! | `POST /v1/accounts:resetPassword` | check a reset code, and confirm it |
+//! | `POST /v1/accounts:signInWithEmailLink` | passwordless sign-in with a link |
 //! | `POST /v1/token` | exchange a refresh token for a new ID token |
 //! | `POST /v1/projects/{p}/accounts` | admin: create an account |
 //! | `POST /v1/projects/{p}/accounts:lookup` | admin: read accounts by uid or email |
 //! | `POST /v1/projects/{p}/accounts:update` | admin: change any account |
 //! | `POST /v1/projects/{p}/accounts:delete` | admin: delete an account |
+//! | `POST /v1/projects/{p}/accounts:sendOobCode` | admin: generate a link (`returnOobLink`) |
 //! | `GET  /v1/projects/{p}/accounts:batchGet` | admin: list accounts, paged |
 //! | `GET  /emulator/v1/projects/{p}/config` | local config an SDK may probe |
-//! | `DELETE /emulator/v1/projects/{p}/accounts` | clear every account |
+//! | `GET  /emulator/v1/projects/{p}/oobCodes` | read pending email links — no mail is sent |
+//! | `DELETE /emulator/v1/projects/{p}/accounts` | clear every account and pending link |
+//! | `GET  /emulator/action` | where a generated link points (Fireup's own, not a Google page) |
 //!
 //! SDKs address these through the API host as a path prefix
 //! (`/identitytoolkit.googleapis.com/v1/accounts:signUp`,
@@ -36,10 +42,16 @@
 //!
 //! ## Non-goals
 //!
-//! Phone auth, multi-factor enrolment, federated/OAuth providers, out-of-band
-//! email flows (verification and password-reset links), and production key
-//! material. These answer with an explicit "not served" error rather than
-//! failing in some ambiguous way — see [`api`].
+//! Phone auth, multi-factor enrolment, federated/OAuth providers, and
+//! production key material. These answer with an explicit "not served" error
+//! rather than failing in some ambiguous way — see [`api`].
+//!
+//! ## No email is sent
+//!
+//! The out-of-band flows above mint real single-use codes but there is no mail
+//! transport, so the link is logged and listed at
+//! `GET /emulator/v1/projects/{p}/oobCodes` instead of being delivered. See
+//! [`oob`].
 //!
 //! ## Local development only
 //!
@@ -60,12 +72,14 @@
 //! `.cursor/rules/firebase-gcp-compliance.mdc`.
 
 pub mod api;
+pub mod oob;
 pub mod postgres_store;
 pub mod store;
 pub mod token;
 pub mod user;
 
 pub use api::AuthApi;
+pub use oob::{OobCode, OobRequestType};
 pub use postgres_store::PostgresUserStore;
 pub use store::{MemoryUserStore, SharedUserStore, UserStore};
 pub use user::{AuthUser, SignInProvider};
