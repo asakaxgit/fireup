@@ -46,7 +46,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.lock') }}
+          # Cargo.lock is gitignored in this repository, so there is nothing to
+          # key on; Cargo.toml changing is the signal that deps moved.
+          key: ${{ runner.os }}-coverage-${{ hashFiles('Cargo.toml') }}
 
       # Deliberately `cargo install` rather than a third-party installer
       # action: it is one less actor with a token in this repository's CI, and
