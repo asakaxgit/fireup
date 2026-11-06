@@ -21,6 +21,12 @@
 //! Each test uses its own generated project id, so its accounts are disjoint
 //! from every other test's and concurrent runs against one database do not
 //! collide. Rows are deleted afterwards.
+//!
+//! For the same reason, every row count here is `WHERE project_id = $1`. A
+//! whole-table count such as `Store::count` asserts "this database holds
+//! nothing else", which is false the moment another suite — or another
+//! concurrent run — has used the same database, and it is not what any of these
+//! tests actually mean.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -392,9 +398,19 @@ async fn pending_links_live_in_their_own_table_away_from_accounts_and_documents(
         .expect("count accounts")
         .get(0);
     assert_eq!(accounts, 1);
+    let documents: i64 = client
+        .query_one(
+            &format!(
+                "SELECT count(*) FROM {} WHERE project_id = $1",
+                fireup::local::postgres_store::DOCUMENTS_TABLE
+            ),
+            &[&project_id],
+        )
+        .await
+        .expect("count documents")
+        .get(0);
     assert_eq!(
-        server.store.count().await.expect("count documents"),
-        0,
+        documents, 0,
         "identity data must not land in the documents table"
     );
 
@@ -544,7 +560,6 @@ async fn accounts_are_stored_in_their_own_table_away_from_documents() {
         documents, 0,
         "identity data must not be reachable through the Firestore API"
     );
-    assert_eq!(server.store.count().await.expect("count"), 0);
 
     server.shutdown().await.expect("clean shutdown");
     cleanup(&url, &project_id).await;
