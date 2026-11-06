@@ -96,9 +96,61 @@ Two entries worth knowing about:
 `ISC` is mentioned in the SAK-196 prose above but carried by no crate in the
 current lock file, so it is not in the list either.
 
+One identifier has since drifted out of that "nothing speculative" claim:
+`cargo deny` now reports `warning[license-not-encountered]` for
+`BSD-2-Clause`, which no crate in the lock file carries any more — the tonic
+0.11 → 0.13 migration dropped whatever did. It is a warning rather than an
+error, and removing an identifier from `allow` is a policy change rather than a
+cleanup (a crate carrying it would start failing), so SAK-225 left it in place
+and recorded it here instead of deciding it in passing.
+
 `[graph]` sets no `targets` filter. Restricting the graph to Linux would hide
 the Windows/macOS/wasi crates that are in `Cargo.lock` and that anyone building
 Fireup on those platforms pulls.
+
+### Unmaintained advisories: the whole graph, not just direct dependencies
+
+`[advisories] unmaintained = "all"`.
+
+SAK-218 wrote `"workspace"` instead, with a reason that sounded right:
+"all" would make the job red for an abandoned crate buried four levels down
+that we have no way to replace. SAK-225 measured that setting against the tree
+and found it hiding one real advisory on the day it was written:
+
+| | |
+|---|---|
+| Advisory | `RUSTSEC-2024-0449` — `unsafe-libyaml` is unmaintained |
+| Crate | `unsafe-libyaml` 0.2.11 — libyaml's C, machine-translated by c2rust |
+| Why unmaintained | repository archived read-only 2024-03-25; 0.2.11 is the last release; no patched version exists |
+| Path | `fireup -> (dev) serde_yaml 0.9.34+deprecated -> unsafe-libyaml 0.2.11` |
+| Reported under `"workspace"` | no — the crate is transitive, so it fell outside the scope |
+| Reported under `"all"` | yes — `advisories FAILED`, exit 1 |
+
+The premise that failed was "we have no way to replace it". We could not
+replace `unsafe-libyaml`, but we never chose it: we chose `serde_yaml`, for one
+test that reads this repository's own workflow files. Replacing *that* with
+`saphyr` (maintained, YAML 1.2, safe Rust) removed the crate from the tree
+altogether, which is why this section is a scope decision and not an entry in
+the `ignore` list below. A transitive unmaintained advisory is a question about
+one of our own direct dependencies, and that is something we can act on.
+
+`RUSTSEC-2023-0075`, the other `unsafe-libyaml` advisory (unsound unaligned
+writes on 16/32-bit targets), was patched in 0.2.10 and never applied to the
+0.2.11 the tree carried.
+
+The two settings could not simply be swapped in one commit, and the reason is
+worth recording because it will recur: `deny.toml` lives in a stack of PRs that
+has not reached `main`, while `serde_yaml` was added to `main` after that stack
+branched. No single tree contained both. Raising the scope *and* accepting the
+advisory with an `ignore` entry — the shape SAK-218 used for h2 — was therefore
+not available: in the only tree that has `deny.toml` the advisory does not
+exist, and `-D advisory-not-detected` fails an entry that matches nothing.
+Removing `serde_yaml` on `main` and raising the scope in the stack is green in
+both trees separately and after they meet.
+
+`tests/dependency_pin_tests.rs` asserts the scope is still `"all"`. cargo-deny
+cannot check this itself — the setting is its own input — and narrowing it makes
+CI *greener*, so no run would ever report the regression.
 
 ### Accepted vulnerabilities: none
 
@@ -140,14 +192,32 @@ was run against the committed configuration and then reverted:
 | Add a `RUSTSEC-2020-0001` entry that matches nothing | `error[advisory-not-detected]` — `advisories FAILED`, exit 1 (a *warning*, exit 0, without `-D advisory-not-detected`) |
 | Remove `"MIT"` from `[licenses] allow` | 47 `error[rejected]` diagnostics — `licenses FAILED` |
 
+SAK-225 added four more, because the `unmaintained` scope is a claim about
+crates that are not in this tree yet and a passing run says nothing about it.
+Each adds a dev dependency to `Cargo.toml` and re-resolves before running:
+
+| Mutation | Result |
+|---|---|
+| The committed config, unmodified | `advisories ok`, exit 0 |
+| Add `serde_yaml = "0.9"` — the dependency `main` carries today, which this stack will merge into | `error[unmaintained]: unsafe-libyaml is unmaintained` / `RUSTSEC-2024-0449` — `advisories FAILED`, exit 1 |
+| The same tree with `unmaintained = "workspace"` restored | `advisories ok`, exit 0 — **the blind spot itself, reproduced** |
+| Add `saphyr = "0.3"` — the replacement parser, i.e. `main` after SAK-225 | `advisories ok`, exit 0 |
+| Add an `ignore` entry for `RUSTSEC-2024-0449` to this tree | `error[advisory-not-detected]`: *no crate matched advisory criteria* — exit 1 |
+
+The third row is the one to keep: the same tree, the same advisory, the same
+command, green or red depending on one word of configuration. That is what a
+gate's scope is worth measuring.
+
 These are not automated. A Rust test shelling out to `cargo-deny` would either
 fail or vacuously skip on a machine without the binary installed, and the thing
 under test is a declarative config read by a third-party tool rather than
 first-party logic. Re-run the table by hand when `deny.toml` changes materially.
 
-What *is* automated is the narrower question of whether the lock file still has
-the properties these exceptions were about. `tests/dependency_pin_tests.rs`
-reads `Cargo.lock` directly — no network, no advisory database, no third-party
-binary — and fails if `h2` drops below 0.4.16, if `prost` resolves to more than
-one version, or if `RUSTSEC-2026-0258` reappears in `deny.toml`. It is a cheap
-local echo of the `cargo deny` job, not a replacement for it.
+What *is* automated is the narrower question of whether the lock file and the
+config still have the properties these decisions were about.
+`tests/dependency_pin_tests.rs` reads `Cargo.lock` and `deny.toml` directly — no
+network, no advisory database, no third-party binary — and fails if `h2` drops
+below 0.4.16, if `prost` resolves to more than one version, if
+`RUSTSEC-2026-0258` reappears in `deny.toml`, or if `unmaintained` is narrowed
+back from `"all"`. It is a cheap local echo of the `cargo deny` job, not a
+replacement for it.

@@ -29,10 +29,33 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # A yanked crate in the lock file is an error, not a warning: it means the
 # version we pinned was withdrawn from crates.io after we pinned it.
 yanked = "deny"
-# Unmaintained-crate advisories are scoped to crates we depend on directly.
-# "all" would make this job red for an abandoned crate buried four levels down
-# that we have no way to replace.
-unmaintained = "workspace"
+# Unmaintained-crate advisories cover the whole graph, transitive dependencies
+# included.
+#
+# This said "workspace" first, with the reasoning that "all" would make the job
+# red for an abandoned crate buried four levels down that we have no way to
+# replace. That reasoning was wrong in a way that was measured rather than
+# argued (SAK-225). "workspace" hid exactly one real advisory the day it was
+# written: RUSTSEC-2024-0449, `unsafe-libyaml` 0.2.11 — libyaml's C translated
+# by c2rust, repository archived read-only in March 2024, no patched version —
+# reached as `fireup -> (dev) serde_yaml 0.9.34+deprecated -> unsafe-libyaml`.
+# Because it was transitive, it fell outside the scope and `cargo deny` said
+# `advisories ok`. The gate reported nothing while the repository depended on an
+# archived machine-translated C YAML parser to lint its own workflow files.
+#
+# The "no way to replace it" premise is what did not hold. We could not replace
+# `unsafe-libyaml`, but we never depended on it on purpose — we depended on
+# `serde_yaml`, and replacing *that* (SAK-225 swapped it for `saphyr`) removed
+# the crate entirely. A transitive unmaintained advisory is a question about our
+# own direct dependency, which is a thing we can act on, which is a thing worth
+# being told about.
+#
+# The cost of "all" is that a future transitive unmaintained advisory makes this
+# job red before anyone has decided what to do about it. That is the intended
+# behaviour and the `ignore` list below is the documented way to accept one
+# deliberately — with `-D advisory-not-detected` making sure the acceptance
+# cannot outlive the crate.
+unmaintained = "all"
 
 # No accepted advisories. Every advisory the database reports fails the build.
 #
@@ -41,6 +64,15 @@ unmaintained = "workspace"
 # `fireup -> tonic 0.11 -> axum 0.6 -> hyper 0.14 -> h2 0.3.27`. The fix needed
 # h2 >= 0.4.16, so hyper 1.x, so a tonic/prost major bump; SAK-220 did that
 # migration (tonic 0.13 / prost 0.13, h2 0.4.20) and removed the entry with it.
+#
+# RUSTSEC-2024-0449 (`unsafe-libyaml` unmaintained) is deliberately *not* here
+# either, and that was the choice SAK-225 had to make. Accepting it with an
+# `ignore` entry was the obvious move — it is the shape SAK-218 used for h2 —
+# but it is not available: `deny.toml` lives in this stack and `serde_yaml`
+# lives on `main`, so in the only tree that has this file the advisory does not
+# exist, and `-D advisory-not-detected` fails on an entry that matches nothing.
+# Dropping `serde_yaml` instead is the root fix, needs no entry here, and is
+# green in both trees.
 #
 # Adding an entry back is a deliberate act, not a way to get CI green. Anything
 # listed here needs, in a comment above it: the dependency path, why it cannot be

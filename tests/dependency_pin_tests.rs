@@ -1,9 +1,8 @@
-//! Two dependency facts that `Cargo.toml` can only ask for, and that
-//! `Cargo.lock` is the only place to actually check.
+//! Supply-chain facts that `Cargo.toml` can only ask for, and that
+//! `Cargo.lock` and `deny.toml` are the only places to actually check.
 //!
-//! Both come out of SAK-220, the tonic 0.11 → 0.13 / prost 0.12 → 0.13
-//! migration, and both are the kind of thing a routine `cargo update` or a
-//! well-meant version bump can undo without anything going red.
+//! Each one is the kind of thing a routine `cargo update`, a well-meant version
+//! bump, or a one-word config edit can undo without anything going red.
 //!
 //! 1. **One prost.** `src/local/` (the gRPC data plane, from `tonic-build`) and
 //!    the managed-export parser (from `prost-build`) exchange generated types.
@@ -18,6 +17,24 @@
 //!    CI's `cargo deny` job enforces this properly, but it needs the network and
 //!    a pinned third-party binary. This test needs neither, so a local
 //!    `cargo test` catches a reintroduction before the push.
+//!
+//!    (1) and (2) come out of SAK-220, the tonic 0.11 → 0.13 / prost 0.12 →
+//!    0.13 migration.
+//!
+//! 3. **`[advisories] unmaintained` stays at `"all"`.** This one is not about a
+//!    version, it is about the *scope* of the gate, and it is here because the
+//!    narrower setting already cost us a real miss. SAK-218 wrote
+//!    `unmaintained = "workspace"`, which only reports unmaintained advisories
+//!    for direct dependencies; RUSTSEC-2024-0449 (`unsafe-libyaml`, archived
+//!    read-only, reached through a dev dependency on `serde_yaml`) was
+//!    transitive, so it fell outside the scope and `cargo deny` printed
+//!    `advisories ok` for months. SAK-225 raised the scope and removed the
+//!    crate.
+//!
+//!    A narrowed scope is the worst kind of regression for a gate: it makes CI
+//!    *greener*, so nothing complains. Nobody would notice the word changing
+//!    back. Note that `cargo deny` itself cannot catch this — the setting is
+//!    its own input — which is why it needs a check outside the tool.
 //!
 //! Reading `Cargo.lock` as text rather than running `cargo metadata` is
 //! deliberate: it keeps the test free of a toml dependency and of a subprocess,
@@ -168,6 +185,45 @@ fn check_advisory_not_reaccepted(deny: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `Err` unless `[advisories] unmaintained` is set to `"all"`.
+///
+/// Narrowing this back to `"workspace"` is a one-word edit that makes the
+/// `cargo deny` job report *less* and therefore look healthier, so it is the
+/// regression least likely to be noticed by anyone watching CI.
+///
+/// Comments are stripped before matching, for the same reason as
+/// `check_advisory_not_reaccepted`: the prose above the setting quotes the old
+/// value as history, and that has to stay writable.
+fn check_unmaintained_scope_is_all(deny: &str) -> Result<(), String> {
+    let mut found = None;
+    for line in deny.lines() {
+        let code = line.split('#').next().unwrap_or("");
+        let Some((key, value)) = code.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "unmaintained" {
+            found = Some(value.trim().trim_matches('"').to_string());
+        }
+    }
+
+    match found.as_deref() {
+        Some("all") => Ok(()),
+        Some(scope) => Err(format!(
+            "deny.toml sets `unmaintained = \"{scope}\"`, not \"all\". Only \
+             \"all\" covers transitive dependencies, and a transitive crate is \
+             how RUSTSEC-2024-0449 (unsafe-libyaml, archived) sat in the tree \
+             unreported under \"workspace\" — see SAK-225. Narrowing the scope \
+             makes the cargo deny job greener rather than redder, so nothing \
+             else will tell you this changed."
+        )),
+        None => Err("deny.toml has no `[advisories] unmaintained` setting. The \
+                     cargo-deny default reports unmaintained advisories for the \
+                     workspace only, which is the blind spot SAK-225 closed; \
+                     set it to \"all\" explicitly."
+            .into()),
+    }
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -202,6 +258,13 @@ fn the_committed_lock_has_h2_at_or_above_the_patched_version() {
 #[test]
 fn deny_toml_no_longer_accepts_the_h2_advisory() {
     if let Err(reason) = check_advisory_not_reaccepted(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_reports_unmaintained_advisories_for_the_whole_graph() {
+    if let Err(reason) = check_unmaintained_scope_is_all(&repo_file("deny.toml")) {
         panic!("{reason}");
     }
 }
@@ -354,5 +417,57 @@ ignore = []
         // Including when the comment trails a line of real config.
         let trailing = r#"ignore = []  # was RUSTSEC-2026-0258, fixed by SAK-220"#;
         assert!(check_advisory_not_reaccepted(trailing).is_ok());
+    }
+
+    #[test]
+    fn the_scope_the_repository_ships_passes() {
+        assert!(check_unmaintained_scope_is_all("unmaintained = \"all\"\n").is_ok());
+    }
+
+    /// The regression itself: the value SAK-218 shipped and SAK-225 had to
+    /// raise.
+    #[test]
+    fn narrowing_the_unmaintained_scope_to_the_workspace_fails() {
+        let error = check_unmaintained_scope_is_all("unmaintained = \"workspace\"\n")
+            .expect_err("\"workspace\" must fail");
+        assert!(
+            error.contains("RUSTSEC-2024-0449") && error.contains("workspace"),
+            "{error}"
+        );
+    }
+
+    /// `"none"` is the other narrowing cargo-deny accepts, and the one that
+    /// turns the check off outright.
+    #[test]
+    fn disabling_the_unmaintained_check_fails() {
+        assert!(check_unmaintained_scope_is_all("unmaintained = \"none\"\n").is_err());
+    }
+
+    /// Deleting the line is not the same as setting it, and it is the quietest
+    /// version of the regression: cargo-deny falls back to a workspace-scoped
+    /// default, so the file reads as if nothing was decided.
+    #[test]
+    fn omitting_the_setting_entirely_fails() {
+        let deny = "[advisories]\nyanked = \"deny\"\nignore = []\n";
+        assert!(check_unmaintained_scope_is_all(deny).is_err());
+    }
+
+    /// The prose above the setting quotes the old value on purpose, as history.
+    /// That must not be mistaken for the setting, in either direction.
+    #[test]
+    fn the_comment_about_the_old_scope_is_not_read_as_the_scope() {
+        let deny = "\
+# This said `unmaintained = \"workspace\"` first, which hid RUSTSEC-2024-0449.
+unmaintained = \"all\"
+";
+        assert!(check_unmaintained_scope_is_all(deny).is_ok());
+
+        // And a commented-out `\"all\"` above a live `\"workspace\"` must not
+        // rescue it.
+        let deny = "\
+# unmaintained = \"all\"
+unmaintained = \"workspace\"
+";
+        assert!(check_unmaintained_scope_is_all(deny).is_err());
     }
 }
