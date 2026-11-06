@@ -24,8 +24,10 @@
 //!   not served; those RPCs answer `UNIMPLEMENTED` with a message saying so,
 //!   and `docs/local/README.md` has the full fidelity matrix.
 //! * **Datastore** — Lookup/RunQuery/Commit/BeginTransaction/AllocateIds on the
-//!   same store Firestore uses (kinds map to collections). GQL, aggregations,
-//!   namespaces, and property transforms answer `UNIMPLEMENTED`.
+//!   same store Firestore uses (kinds map to collections). `Commit` serves
+//!   `property_transforms`, resolved against the fields the named properties map
+//!   to. GQL, aggregations, namespaces, and `property_mask` on a mutation answer
+//!   `UNIMPLEMENTED`.
 //! * **Auth** — email/password and anonymous sign-in, emulator-style ID tokens,
 //!   token refresh, and admin account CRUD. See [`auth`] for what is and is not
 //!   served.

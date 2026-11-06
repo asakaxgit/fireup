@@ -14,9 +14,7 @@ use fireup::protos::google::datastore::v1::key::path_element::IdType;
 use fireup::protos::google::datastore::v1::key::PathElement;
 use fireup::protos::google::datastore::v1::mutation::Operation;
 use fireup::protos::google::datastore::v1::property_filter::Operator as PropertyOp;
-use fireup::protos::google::datastore::v1::property_transform::{
-    ServerValue, TransformType,
-};
+use fireup::protos::google::datastore::v1::property_transform::{ServerValue, TransformType};
 use fireup::protos::google::datastore::v1::run_query_request::QueryType;
 use fireup::protos::google::datastore::v1::value::ValueType;
 use fireup::protos::google::datastore::v1::{
@@ -382,7 +380,11 @@ async fn property_transforms_apply_after_the_entity_and_report_their_results() {
         .into_inner();
 
     let results = &response.mutation_results[0].transform_results;
-    assert_eq!(results.len(), 3, "one result per transform, in request order");
+    assert_eq!(
+        results.len(),
+        3,
+        "one result per transform, in request order"
+    );
     assert!(
         matches!(results[0].value_type, Some(ValueType::TimestampValue(_))),
         "serverTimestamp reports the commit time: {:?}",
@@ -626,7 +628,11 @@ async fn array_remove_matches_a_key_property_through_the_entity_encoding() {
     let Some(ValueType::ArrayValue(array)) = &stored.properties["related"].value_type else {
         panic!("expected an array, got {:?}", stored.properties["related"]);
     };
-    assert_eq!(array.values.len(), 1, "an already-present key is not appended");
+    assert_eq!(
+        array.values.len(),
+        1,
+        "an already-present key is not appended"
+    );
     let Some(ValueType::KeyValue(round_tripped)) = &array.values[0].value_type else {
         panic!(
             "expected a key, not a reference string: {:?}",
@@ -707,10 +713,7 @@ async fn unservable_property_transforms_are_refused_and_apply_nothing() {
     ];
 
     for (label, mutation, expected) in cases {
-        let status = client
-            .commit(commit_one(mutation))
-            .await
-            .expect_err(label);
+        let status = client.commit(commit_one(mutation)).await.expect_err(label);
         assert_eq!(status.code(), expected, "{label}: {}", status.message());
     }
 
@@ -769,19 +772,20 @@ async fn a_datastore_increment_and_a_firestore_increment_agree_on_the_same_prope
     let mut datastore = DatastoreClient::connect(format!("http://{}", server.addr))
         .await
         .expect("datastore client");
-    let mut firestore = fs::firestore_client::FirestoreClient::connect(format!(
-        "http://{}",
-        server.addr
-    ))
-    .await
-    .expect("firestore client");
+    let mut firestore =
+        fs::firestore_client::FirestoreClient::connect(format!("http://{}", server.addr))
+            .await
+            .expect("firestore client");
 
     let key = named_key("Shared", "counter");
     datastore
         .commit(commit_one(upsert_with_transforms(
             key.clone(),
             HashMap::new(),
-            vec![property_transform("hits", TransformType::Increment(integer_value(5)))],
+            vec![property_transform(
+                "hits",
+                TransformType::Increment(integer_value(5)),
+            )],
         )))
         .await
         .expect("datastore increment");
@@ -802,9 +806,7 @@ async fn a_datastore_increment_and_a_firestore_increment_agree_on_the_same_prope
                     transform_type: Some(
                         fs::document_transform::field_transform::TransformType::Increment(
                             fs::Value {
-                                value_type: Some(
-                                    fs::value::ValueType::IntegerValue(1),
-                                ),
+                                value_type: Some(fs::value::ValueType::IntegerValue(1)),
                             },
                         ),
                     ),

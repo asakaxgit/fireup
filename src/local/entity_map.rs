@@ -602,7 +602,10 @@ mod tests {
         .expect("both compile");
 
         assert_eq!(
-            compiled.iter().map(|t| t.field.as_str()).collect::<Vec<_>>(),
+            compiled
+                .iter()
+                .map(|t| t.field.as_str())
+                .collect::<Vec<_>>(),
             vec!["touched", "hits"],
             "entity_to_document maps a property onto the field of the same name"
         );
@@ -711,8 +714,11 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
 
         // SERVER_VALUE_UNSPECIFIED; the two enums agree on the numbering.
-        let error = compiled(&[property_transform("n", DsTransformType::SetToServerValue(0))])
-            .expect_err("the unspecified server value");
+        let error = compiled(&[property_transform(
+            "n",
+            DsTransformType::SetToServerValue(0),
+        )])
+        .expect_err("the unspecified server value");
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
 
         let error = compiled(&[DsPropertyTransform {
@@ -739,7 +745,11 @@ mod tests {
         )
         .expect("results convert");
 
-        assert_eq!(results[0], ds_integer(43), "increment reports its new value");
+        assert_eq!(
+            results[0],
+            ds_integer(43),
+            "increment reports its new value"
+        );
         assert_eq!(
             results[1].value_type,
             Some(DsValueType::NullValue(0)),

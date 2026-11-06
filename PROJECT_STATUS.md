@@ -499,9 +499,8 @@ above for field transforms.
   treat a non-array field as empty and compare `3` to `3.0` (and `NaN` to `NaN`)
   as equal, and `serverTimestamp` is millisecond-precision and identical for
   every field in one commit.
-- Still refused, explicitly: `maximum`/`minimum` (no SDK emits them), a
-  transform on a nested field path, and the Datastore spelling
-  (`Mutation.property_transforms`).
+- Still refused, explicitly: `maximum`/`minimum` (no SDK emits them) and a
+  transform on a nested field path.
 - Verified by 14 unit tests in `src/local/transforms.rs`, two new store
   conformance cases that both the in-memory and PostgreSQL backends must pass,
   7 new gRPC tests in `tests/local_firestore_tests.rs` (33 total), and 6 new
@@ -562,6 +561,36 @@ validate — made `isSignInWithEmailLink` quietly answer `false` and
 `signInWithEmailLink` fail. Every Rust test passed, because they were written
 from the same reading of the link format as the code. The link now echoes the
 caller's own `?key=`, or a plainly-labelled placeholder.
+
+**SAK-198 (November 6 2026)** — the Datastore spelling of the same transforms.
+`Mutation.property_transforms` is served on `Commit`, and
+`MutationResult.transform_results` reports what each one resolved to. This
+closes the one deliberate gap SAK-190 left.
+
+- The question SAK-190 did not answer was the encoding, and that is where the
+  work went. A transform names a *property*, and the value it reads is whatever
+  `entity_map::entity_to_document` left in the corresponding field, so the
+  operands cross the same `Value` conversion the entity's own properties do. The
+  `integer_value`/`double_value` tags carry through, so an integer `increment` of
+  an integer property stays exact; array elements convert too, so
+  `remove_all_from_array` of a `key_value` matches the reference string the key
+  is stored as. Comparing an unconverted operand would silently never match.
+- Property *paths* (`foo.bar`) and names containing a Datastore escape are
+  refused rather than guessed at, as is `maximum`/`minimum` — the latter through
+  the same `transforms::compile_kind` the Firestore surface uses, so there is one
+  definition of what is served rather than two that can drift. A transform on a
+  `delete` is `INVALID_ARGUMENT`, per the proto.
+- **A transform runs after the operation**, and `property_mask` on a mutation is
+  still unserved, so an unmasked `update`/`upsert` replaces the entity before the
+  transform reads it: a Datastore `increment` accumulates only when the submitted
+  entity carries the current value. Surprising enough to be pinned by a test and
+  called out in the fidelity matrix. Masked mutations are the follow-up.
+- Verified by 6 new unit tests in `src/local/entity_map.rs` (9 there, 463 in the
+  library), 5 new gRPC tests in `tests/local_datastore_tests.rs` (11 total) —
+  including one that increments the same property alternately through the
+  Datastore and the Firestore surface and gets 6 — and two new steps in
+  `scripts/smoke-local-datastore.sh`, passing **against both the in-memory and
+  the PostgreSQL store** with Google's official client library.
 
 ---
 

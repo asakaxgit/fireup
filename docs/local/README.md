@@ -310,7 +310,7 @@ wrong:
 |---|---|---|
 | `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
 | `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`), `AND`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. |
-| `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional. |
+| `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` (below). |
 | `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. |
 | `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
 | `ReserveIds` | served | Acknowledged; local allocations already avoid colliding with completed keys. |
@@ -318,7 +318,54 @@ wrong:
 
 Kinds share the Postgres/`MemoryStore` rows with Firestore: `Task/sample` is
 `…/documents/Task/sample`. Non-default namespaces, GQL, projection queries,
-cursors, property transforms, and nested property masks are refused.
+cursors, and nested property masks are refused.
+
+#### Datastore property transforms
+
+`Mutation.property_transforms` is the Datastore spelling of the field transforms
+above, and it is served with the same four cases and the same refusals:
+
+| `PropertyTransform` | Status |
+|---|---|
+| `set_to_server_value: REQUEST_TIME` | served |
+| `increment` | served |
+| `append_missing_elements` | served |
+| `remove_all_from_array` | served |
+| `maximum` / `minimum` | `UNIMPLEMENTED`, as on the Firestore side |
+| A property *path* (`foo.bar`) or an escaped property name | `UNIMPLEMENTED` |
+
+`MutationResult.transform_results` reports what each transform resolved to, in
+request order: the timestamp, the new number, or `null` for the array transforms.
+A transform on a `delete` mutation is `INVALID_ARGUMENT` — the proto allows them
+only on `insert`, `update`, and `upsert`.
+
+A transform names a *property*, and a Datastore property is a document field
+under the mapping in [`entity_map.rs`](../../src/local/entity_map.rs), so the
+operands cross the same `Value` conversion the entity's own properties do. That
+is what makes the result right rather than merely plausible:
+
+- `integer_value` and `double_value` keep their tag, so an integer `increment`
+  of an integer property stays exact and the mixed-type rule above applies
+  unchanged.
+- Array elements convert too, so `remove_all_from_array` of a `key_value`
+  matches the reference string the key is stored as, and a `blob_value` matches
+  the stored bytes. Comparing the unconverted operand would never match.
+- `meaning` and `exclude_from_indexes` on an operand are dropped, as they are
+  for every other property Fireup stores — nothing here models indexes.
+
+Property paths are refused rather than guessed at: `foo.bar` names a property
+inside an entity value, which is a nested document field, and the Firestore side
+refuses nested field paths for the same reason. Datastore escapes `.` and `\` in
+a property name, so a name containing either is refused too — incrementing the
+wrong property is worse than saying no.
+
+**A transform runs after the operation,** per the proto, and Fireup does not
+serve `property_mask` yet, so an `update` or `upsert` always replaces the whole
+entity before the transform reads it. An `increment` therefore accumulates only
+when the submitted entity carries the property's current value — the
+read-modify-write idiom inside a transaction. A mutation that omits the property
+resets it to the operand. This is the Datastore equivalent of `set()` clearing a
+field before the transform runs, noted above.
 
 ### Other known limits
 
@@ -329,10 +376,9 @@ cursors, property transforms, and nested property masks are refused.
   the trade-off). In particular a cursor does not make the scan smaller, only
   the result set. Fine for local-development volumes; not a production query
   planner.
-- **No Datastore property transforms.** The Firestore [field
-  transforms](#field-transforms) are served, but their Datastore spelling
-  (`Mutation.property_transforms`) is still `UNIMPLEMENTED` — the entity
-  encoding has to be mapped onto them first.
+- **No `property_mask` on a Datastore mutation.** Masked entity updates are
+  still `UNIMPLEMENTED`, which is why a Datastore `increment` needs the written
+  entity to carry the current value (see above).
 - **No field deletion through a mask.** A masked field that the request does not
   carry is left alone instead of being deleted.
 - **No point-in-time reads.** The store keeps only the current version of a
@@ -726,6 +772,14 @@ surface were found exactly this way and are now fixed and regression-tested:
 custom-token sign-in overwrote the account's stored custom claims, and it
 reported the account's provider instead of `custom`. A passing count in our own
 test suite would not have found either.
+
+One exception, flagged so it is not mistaken for laziness:
+`@google-cloud/datastore` has no handwritten surface for
+`property_transforms` — `save()` cannot express an increment — so the transform
+step of the Datastore smoke drives `DatastoreClient`, the generated `v1` client
+the same package exports, and reads the result back through the handwritten
+`datastore.get()`. Still the official library's own encoding and error mapping on
+both halves.
 
 Never point `FIREUP_TEST_POSTGRES_URL` at a database or role you do not own; the
 shared guard in `tests/postgres_test_env.rs` refuses the host Paperclip role and
