@@ -7,8 +7,11 @@
 # `-D advisory-not-detected` is not decoration. By default an `ignore` entry
 # below that no longer matches anything in the tree is only a warning, so an
 # accepted vulnerability can outlive its fix without anyone noticing. Promoted
-# to an error, the list cannot rot: the moment the `h2` entry stops being
-# needed, CI fails until it is deleted.
+# to an error, the list cannot rot: the moment an entry stops being needed, the
+# check fails until it is deleted. The same enforcement is set below as
+# `unused-ignored-advisory = "deny"`, so a bare `cargo deny check` with no flags
+# at all behaves the same way — the flag on the command line is now redundant
+# rather than load-bearing, and is kept because it is what the CI job runs.
 #
 # Why cargo-deny and not cargo-audit: `cargo deny check advisories` reads the
 # same RustSec advisory database that `cargo audit` does, so running both would
@@ -29,6 +32,23 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # A yanked crate in the lock file is an error, not a warning: it means the
 # version we pinned was withdrawn from crates.io after we pinned it.
 yanked = "deny"
+# The config-side twin of `-D advisory-not-detected`: an `ignore` entry that
+# matches no advisory in the tree is an error, not a warning.
+#
+# It is here and not only on the command line because the command line is not
+# checked by anything. The flag lives in exactly one place, the final step of
+# the `deny` job in `.github/workflows/ci.yml`, and no test in this repository
+# reads that file — `dependency_pin_tests` reads `deny.toml`, and
+# `fidelity_matrix_tests` reads `coverage.yml`. Measured on this tree
+# (SAK-229): with the flag deleted from `ci.yml` and a stale entry in `ignore`,
+# the step printed `warning[advisory-not-detected]` and exited **0**, while the
+# guard tests stayed green. With this line, the same deletion exits 1. The
+# enforcement now lives in the same file as the policy it enforces, and cannot
+# be dropped by editing a workflow.
+#
+# On the day it was added this changed nothing: `ignore` is empty below, so
+# there is no entry to go stale. It is here for the next entry.
+unused-ignored-advisory = "deny"
 # An advisory database older than a week is an error rather than a silent
 # fallback. Without this line, cargo-deny has no age limit at all: given
 # `--offline` or `--frozen` it uses whatever is in `$CARGO_HOME/advisory-dbs`,
@@ -102,7 +122,7 @@ unmaintained = "all"
 # specifically, a reconsider date, and a ticket that owns the real fix. Note that
 # cargo-deny has no expiry feature, and an ignored advisory prints nothing at
 # all, so a reconsider date is a promise rather than a gate — what *is* machine
-# enforced is that `-D advisory-not-detected` in the CI job fails the build as
+# enforced is that `unused-ignored-advisory = "deny"` above fails the check as
 # soon as an entry here stops matching a real advisory, which is why this list
 # could not be left stale once the migration landed.
 ignore = []
