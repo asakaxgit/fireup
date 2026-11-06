@@ -20,7 +20,9 @@ fn main() {
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile(
+        // `compile_protos`, not `compile`: tonic-build renamed it in 0.13 to
+        // match `prost_build::Config` above.
+        .compile_protos(
             &[
                 "proto/google/firestore/v1/firestore.proto",
                 "proto/google/datastore/v1/datastore.proto",
