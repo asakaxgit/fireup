@@ -648,7 +648,10 @@ spelling of Firestore's `update_mask` + `update_transforms`.
   reading of the same sentence.
 - **That fixed a live Firestore bug.** `FieldValue.delete()` reaches the wire as
   an `update_mask` path the write carries no value for, so it was silently
-  leaving the field in place. It is now a check in the Firestore SDK smoke.
+  leaving the field in place. SAK-194 had pinned it as a deliberate
+  `documented-divergence` (`limits.masked-field-deletion`); it is now the served
+  row `query.masked-field-deletion`, asserted by the conformance probe and the
+  Firestore SDK smoke.
 - Refusals follow the proto line by line: a nested path (`foo.bar`) or an
   escaped name is `UNIMPLEMENTED` as on the Firestore side; an empty path and a
   reserved name other than `__key__` are `INVALID_ARGUMENT`; `__key__` itself is
@@ -659,6 +662,11 @@ spelling of Firestore's `update_mask` + `update_transforms`.
   assert it — a new Firestore gRPC test and unit test (47 and 464), and new
   steps in both SDK smokes: Datastore 10/10 **against both stores**, Firestore
   47/47, with Google's official client libraries.
+- Nine new rows in SAK-194's conformance suite (`89/89 matrix features
+  verified`, in-memory **and** PostgreSQL), seven of them a new
+  `#### Datastore property_mask on a mutation` table in the fidelity matrix. The
+  `fidelity_matrix_tests` drift gate caught the new README rows before they had
+  probes, which is exactly what it is for.
 
 ---
 

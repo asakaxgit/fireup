@@ -441,8 +441,11 @@ above is a sentence in the published proto.
 a nested mask has to merge *into* a stored map, and overwriting the whole parent
 property would be worse than refusing. An empty path and a reserved name other
 than `__key__` are `INVALID_ARGUMENT`. `docs/local/README.md` carries the full
-table, and this change closes the previously recorded "no field deletion through
-a mask" limit rather than leaving it half-true.
+table, every row of it is probed by the SAK-194 conformance suite against the
+official SDKs, and this change closes the previously recorded "no field deletion
+through a mask" limit rather than leaving it half-true — the row SAK-194 had
+pinned as a `documented-divergence` is now a served row with a probe that
+asserts the deletion.
 
 ## Existing Fireup notes (pre-local-cloud)
 
