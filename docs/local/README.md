@@ -299,25 +299,42 @@ work.
 | `POST /v1/accounts:signInWithPassword` | password sign-in |
 | `POST /v1/accounts:signInWithCustomToken` | sign in with an Admin SDK custom token; creates the uid if new |
 | `POST /v1/accounts:lookup` | read the signed-in account (`idToken`) |
-| `POST /v1/accounts:update` | change own profile, email, or password |
+| `POST /v1/accounts:update` | change own profile, email, or password; **or** apply an email action code |
 | `POST /v1/accounts:delete` | delete own account |
+| `POST /v1/accounts:sendOobCode` | request a password-reset, verification, or sign-in link |
+| `POST /v1/accounts:resetPassword` | check a reset code, and confirm it with a new password |
+| `POST /v1/accounts:signInWithEmailLink` | passwordless sign-in; creates the account if it is new |
 | `POST /v1/token` | exchange a refresh token for a new ID token (`securetoken` host) |
 | `POST /v1/projects/{p}/accounts` | admin: create an account, optionally with a chosen uid and claims |
 | `POST /v1/projects/{p}/accounts:lookup` | admin: read accounts by uid or email |
 | `POST /v1/projects/{p}/accounts:update` | admin: change any account, including `disableUser` and `customAttributes` |
 | `POST /v1/projects/{p}/accounts:delete` | admin: delete an account |
+| `POST /v1/projects/{p}/accounts:sendOobCode` | admin: generate a link, with `returnOobLink` |
 | `GET /v1/projects/{p}/accounts:batchGet` | admin: list accounts, paged by `maxResults`/`nextPageToken` |
 | `GET /emulator/v1/projects/{p}/config` | the local config an SDK may probe |
-| `DELETE /emulator/v1/projects/{p}/accounts` | clear every account |
+| `GET /emulator/v1/projects/{p}/oobCodes` | read pending email links — the stand-in for a mailbox |
+| `DELETE /emulator/v1/projects/{p}/oobCodes` | drop pending links, leaving accounts alone |
+| `DELETE /emulator/v1/projects/{p}/accounts` | clear every account **and** every pending link |
+| `GET /emulator/action` | where a generated link points (Fireup's own route, not a Google page) |
 
 Verified against the official SDKs, not just against our own idea of the
 contract: `scripts/smoke-local-auth.sh` drives this surface with
 `firebase-admin` and the `firebase` client SDK over
 `FIREBASE_AUTH_EMULATOR_HOST`. In Admin SDK terms, that covers `createUser`,
 `getUser`, `getUserByEmail`, `updateUser`, `setCustomUserClaims`, `listUsers`
-(paged), `deleteUser`, `createCustomToken`, and `verifyIdToken`; and on the
+(paged), `deleteUser`, `createCustomToken`, `verifyIdToken`,
+`generatePasswordResetLink`, and `generateEmailVerificationLink`; and on the
 client, `signInWithEmailAndPassword`, `signInWithCustomToken`,
-`signInAnonymously`, and token refresh. See [Tests](#tests).
+`signInAnonymously`, token refresh, `sendPasswordResetEmail`,
+`verifyPasswordResetCode`, `confirmPasswordReset`, `sendEmailVerification`,
+`applyActionCode`, `sendSignInLinkToEmail`, `isSignInWithEmailLink`, and
+`signInWithEmailLink`. See [Tests](#tests).
+
+That smoke test is worth its upkeep: it caught a bug Fireup's own tests could
+not. The client SDK's email-link parser requires an `apiKey` parameter in the
+link and returns nothing without one, so a link built without it made
+`isSignInWithEmailLink` quietly answer `false` — while every Rust test, written
+from the same reading of the published link format, passed.
 
 ```bash
 # Sign up, then sign in.
@@ -339,18 +356,91 @@ curl -s 'localhost:4589/v1/projects/fireup-local/accounts:batchGet?maxResults=50
 curl -s -X DELETE localhost:4589/emulator/v1/projects/fireup-local/accounts
 ```
 
+### Email flows: no mail is sent, and the link is readable
+
+Password reset, email verification, and email-link sign-in all work the same
+way in Identity Toolkit: a client asks for an action, the service mints a
+single-use **oobCode** and mails the user a link carrying it, and the click
+comes back as a second call that redeems the code.
+
+`fireup local` mints real codes and builds real links, but **sends no email**,
+and will not: an SMTP client in a local development tool is a credential to
+configure, a port to open, and a way to accidentally mail a real person from a
+test suite. The link goes nowhere outbound. Instead it is
+
+- **logged at `info`** by the request that minted it, so it is sitting in the
+  terminal the server runs in, and
+- **readable at `GET /emulator/v1/projects/{p}/oobCodes`**, which is the
+  documented local-only control endpoint for exactly this.
+
+That endpoint is the mailbox. Reading it is the intended way a test or a
+developer follows one of these flows, not a workaround:
+
+```bash
+# 1. The app asks for a reset. The response says only which address it went to.
+curl -s localhost:4589/v1/accounts:sendOobCode \
+  -H 'content-type: application/json' \
+  -d '{"requestType":"PASSWORD_RESET","email":"ada@example.com"}'
+# -> {"kind":"identitytoolkit#GetOobConfirmationCodeResponse","email":"ada@example.com"}
+
+# 2. Read the link the user would have been mailed.
+curl -s localhost:4589/emulator/v1/projects/fireup-local/oobCodes
+# -> {"oobCodes":[{"email":"ada@example.com","requestType":"PASSWORD_RESET",
+#                 "oobCode":"...","oobLink":"http://127.0.0.1:4589/emulator/action?mode=resetPassword&oobCode=...&apiKey=...&lang=en"}]}
+
+# 3. Finish it with the code.
+curl -s localhost:4589/v1/accounts:resetPassword \
+  -H 'content-type: application/json' \
+  -d '{"oobCode":"<the code>","newPassword":"a-new-password"}'
+```
+
+Which call redeems which code:
+
+| `requestType` | Asked for by | Redeemed by | SDK calls |
+|---|---|---|---|
+| `PASSWORD_RESET` | `email` | `accounts:resetPassword` | `sendPasswordResetEmail` → `verifyPasswordResetCode` / `confirmPasswordReset` |
+| `VERIFY_EMAIL` | `idToken` (admin: `email`) | `accounts:update` with `oobCode` | `sendEmailVerification` → `applyActionCode` |
+| `EMAIL_SIGNIN` | `email` | `accounts:signInWithEmailLink` | `sendSignInLinkToEmail` → `signInWithEmailLink` |
+| `VERIFY_AND_CHANGE_EMAIL` | `idToken` + `newEmail` (admin: `email` + `newEmail`) | `accounts:update` with `oobCode` | `verifyBeforeUpdateEmail` → `applyActionCode` |
+
+The rules these follow:
+
+- **A code is single-use.** Redeeming it deletes it; a second attempt is
+  `INVALID_OOB_CODE`. A redemption that *failed* (a weak password, a taken
+  address) leaves the code usable, so a rejected form can be resubmitted.
+- **A code expires after an hour**, the published default lifetime of a reset
+  link. Past that it is `EXPIRED_OOB_CODE` — a different answer from
+  `INVALID_OOB_CODE` on purpose, because "ask for a new link" and "that code is
+  wrong" are different instructions. Expired codes drop out of the listing.
+- **Codes are durable** with `--postgres-url`, in their own
+  `fireup_local_auth_oob_codes` table. A link survives a server restart, which
+  is what happens when a developer recompiles mid-flow.
+- **Completing a reset or an email change revokes outstanding sessions** —
+  `validSince` moves, and old refresh tokens stop working. Merely *verifying* an
+  address does not, or every app would sign its user out the moment they
+  verified.
+- **A sign-in link checks the address it was issued for.** `signInWithEmailLink`
+  requires the `email` too, so a forwarded link does not sign in whoever
+  received it.
+- **Only the admin endpoint hands back the link.** `returnOobLink` on
+  `POST /v1/projects/{p}/accounts:sendOobCode` is how the Admin SDK's
+  `generate*Link` methods work. A client asking for it is ignored: a reset link
+  for any address is exactly what an attacker would want.
+- **`GET /emulator/action` is Fireup's own route**, not a Google page and not
+  part of the Identity Toolkit API. It exists so a generated link resolves to
+  something instead of a 404. Following a verification link applies it — which
+  is what clicking one does — while a reset or sign-in link reports the pending
+  action and the call that finishes it, and stays redeemable.
+
 ### Non-goals
 
 These answer `501` with a message naming the gap, not a vague `404`:
 
-- **Phone auth** — `sendVerificationCode`, `signInWithPhoneNumber`.
+- **Phone auth** — `sendVerificationCode`, `signInWithPhoneNumber`, and
+  `sendOobCode` with `requestType: PHONE_VERIFICATION`.
 - **Multi-factor enrolment and tenants** — the whole Identity Platform `v2`
   surface.
 - **Federated / OAuth providers** — `signInWithIdp`, `createAuthUri`.
-- **Out-of-band email flows** — `sendOobCode`, `resetPassword`. There is no
-  mail transport here, and a link that goes nowhere is worse than a clear error.
-  In Admin SDK terms this is `generateEmailVerificationLink`,
-  `generatePasswordResetLink`, and friends.
 - **Batch account writes** — `accounts:batchDelete` and `accounts:batchCreate`,
   so the Admin SDK's `deleteUsers()` and `importUsers()` are refused. Delete and
   create one at a time instead. Not a hard problem, just not done; the refusal
@@ -358,11 +448,14 @@ These answer `501` with a message naming the gap, not a vague `404`:
 - **Session cookies** — `createSessionCookie` / `verifySessionCookie`. These are
   a separate token format from ID tokens, and nothing here needs them yet.
 - **Production key material.** Nothing generates or ships a signing key.
+- **Sending email.** See above — the codes are real, the delivery is not.
 
-`scripts/smoke-local-auth.sh` asserts that the out-of-band, batch-write, and
-session-cookie gaps *fail cleanly* — a mapped SDK error rather than a 500, a
-hang, or a half-applied write — so a gap stays a gap rather than becoming a
-surprise. If one of them is implemented later, that check fails and says so.
+`scripts/smoke-local-auth.sh` asserts that the batch-write and session-cookie
+gaps *fail cleanly* — a mapped SDK error rather than a 500, a hang, or a
+half-applied write — so a gap stays a gap rather than becoming a surprise. If
+one of them is implemented later, that check fails and says so. The
+out-of-band gap used to be in that list; it is now a set of real assertions
+above it, which is what that check is for.
 
 ### Tokens
 

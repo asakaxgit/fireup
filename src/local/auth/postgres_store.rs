@@ -29,6 +29,7 @@ use tokio_postgres::types::ToSql;
 use tokio_postgres::NoTls;
 use tracing::{debug, info};
 
+use super::oob::{OobCode, OobRequestType};
 use super::store::{InsertOutcome, SharedUserStore, UpdateOutcome, UserStore};
 use super::user::{AuthUser, PasswordHash, SignInProvider};
 use crate::data_importer::parse_connection_url;
@@ -36,6 +37,14 @@ use crate::local::store::{StoreError, StoreResult};
 
 /// Table holding the local auth surface's accounts.
 pub const USERS_TABLE: &str = "fireup_local_auth_users";
+
+/// Table holding pending out-of-band email codes.
+///
+/// Its own table rather than columns on the account: a code's lifetime is a few
+/// minutes and unrelated to the account's, an `EMAIL_SIGNIN` code can exist for
+/// an address with no account at all, and a developer wanting to clear pending
+/// links should not have to touch the identity table to do it.
+pub const OOB_CODES_TABLE: &str = "fireup_local_auth_oob_codes";
 
 /// Advisory-lock key serialising schema creation for this table.
 ///
@@ -83,6 +92,31 @@ fn schema_statements() -> Vec<String> {
             "CREATE UNIQUE INDEX IF NOT EXISTS {USERS_TABLE}_email_idx
                  ON {USERS_TABLE} (project_id, email) WHERE email IS NOT NULL"
         ),
+        // No foreign key to the accounts table on purpose. `local_id` is null
+        // for a sign-in link to an address that has no account yet, and when an
+        // account *is* deleted under a pending code the API layer should answer
+        // `USER_NOT_FOUND` — a diagnosable error — rather than have the row
+        // disappear and report the link as invalid.
+        format!(
+            "CREATE TABLE IF NOT EXISTS {OOB_CODES_TABLE} (
+                 project_id        text   NOT NULL,
+                 oob_code          text   NOT NULL,
+                 request_type      text   NOT NULL,
+                 email             text   NOT NULL,
+                 local_id          text,
+                 new_email         text,
+                 continue_url      text,
+                 api_key           text   NOT NULL,
+                 created_at_millis bigint NOT NULL,
+                 expires_at_millis bigint NOT NULL,
+                 PRIMARY KEY (project_id, oob_code)
+             )"
+        ),
+        // The listing endpoint reads every code for a project in mint order.
+        format!(
+            "CREATE INDEX IF NOT EXISTS {OOB_CODES_TABLE}_project_created_idx
+                 ON {OOB_CODES_TABLE} (project_id, created_at_millis)"
+        ),
     ]
 }
 
@@ -90,6 +124,10 @@ fn schema_statements() -> Vec<String> {
 const COLUMNS: &str = "project_id, local_id, email, email_verified, display_name, photo_url,
                        password_salt, password_hash, disabled, custom_claims, provider,
                        created_at_millis, last_login_at_millis, valid_since_millis";
+
+/// Every OOB-code column, in the order [`row_to_oob_code`] reads them.
+const OOB_COLUMNS: &str = "project_id, oob_code, request_type, email, local_id, new_email,
+                           continue_url, api_key, created_at_millis, expires_at_millis";
 
 /// A PostgreSQL-backed account store.
 pub struct PostgresUserStore {
@@ -228,6 +266,38 @@ fn corrupt(local_id: &str, error: tokio_postgres::Error) -> StoreError {
         name: local_id.to_string(),
         reason: format!("account column is not readable: {error}"),
     }
+}
+
+/// Rebuild an [`OobCode`] from a row.
+fn row_to_oob_code(row: &tokio_postgres::Row) -> StoreResult<OobCode> {
+    let oob_code: String = row.try_get("oob_code").map_err(|error| StoreError::Corrupt {
+        name: "?".to_string(),
+        reason: format!("oob code column is not readable: {error}"),
+    })?;
+    let corrupt_here = |error: tokio_postgres::Error| StoreError::Corrupt {
+        name: oob_code.clone(),
+        reason: format!("oob code column is not readable: {error}"),
+    };
+
+    let request_type: String = row.try_get("request_type").map_err(corrupt_here)?;
+
+    Ok(OobCode {
+        // A request type this build does not serve is a corrupt row rather than
+        // a silently dropped code: the row was written by some version of this
+        // table, so reading it as nothing would make a pending link vanish.
+        request_type: OobRequestType::parse(&request_type).ok_or_else(|| StoreError::Corrupt {
+            name: oob_code.clone(),
+            reason: format!("{request_type:?} is not an OOB request type this build serves"),
+        })?,
+        email: row.try_get("email").map_err(corrupt_here)?,
+        local_id: row.try_get("local_id").map_err(corrupt_here)?,
+        new_email: row.try_get("new_email").map_err(corrupt_here)?,
+        continue_url: row.try_get("continue_url").map_err(corrupt_here)?,
+        api_key: row.try_get("api_key").map_err(corrupt_here)?,
+        created_at_millis: row.try_get("created_at_millis").map_err(corrupt_here)?,
+        expires_at_millis: row.try_get("expires_at_millis").map_err(corrupt_here)?,
+        oob_code,
+    })
 }
 
 /// Whether a failure is the email unique index rejecting a write.
@@ -459,6 +529,106 @@ impl UserStore for PostgresUserStore {
         let count: i64 = row.get(0);
         Ok(count as usize)
     }
+
+    async fn insert_oob_code(&self, project_id: &str, code: OobCode) -> StoreResult<()> {
+        let client = self.client().await?;
+        let request_type = code.request_type.as_str();
+
+        let params: [&(dyn ToSql + Sync); 10] = [
+            &project_id,
+            &code.oob_code,
+            &request_type,
+            &code.email,
+            &code.local_id,
+            &code.new_email,
+            &code.continue_url,
+            &code.api_key,
+            &code.created_at_millis,
+            &code.expires_at_millis,
+        ];
+
+        client
+            .execute(
+                &format!(
+                    "INSERT INTO {OOB_CODES_TABLE} ({OOB_COLUMNS})
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
+                ),
+                &params,
+            )
+            .await
+            .context("failed to store an out-of-band code")
+            .map_err(StoreError::Backend)?;
+        Ok(())
+    }
+
+    async fn get_oob_code(
+        &self,
+        project_id: &str,
+        oob_code: &str,
+    ) -> StoreResult<Option<OobCode>> {
+        let client = self.client().await?;
+        let row = client
+            .query_opt(
+                &format!(
+                    "SELECT {OOB_COLUMNS} FROM {OOB_CODES_TABLE}
+                      WHERE project_id = $1 AND oob_code = $2"
+                ),
+                &[&project_id, &oob_code],
+            )
+            .await
+            .context("failed to read an out-of-band code")
+            .map_err(StoreError::Backend)?;
+
+        row.as_ref().map(row_to_oob_code).transpose()
+    }
+
+    async fn consume_oob_code(&self, project_id: &str, oob_code: &str) -> StoreResult<bool> {
+        let client = self.client().await?;
+        // The delete *is* the single-use check: two concurrent redemptions of
+        // one link both run this statement, and only one reports a row.
+        let deleted = client
+            .execute(
+                &format!(
+                    "DELETE FROM {OOB_CODES_TABLE} WHERE project_id = $1 AND oob_code = $2"
+                ),
+                &[&project_id, &oob_code],
+            )
+            .await
+            .context("failed to redeem an out-of-band code")
+            .map_err(StoreError::Backend)?;
+        Ok(deleted > 0)
+    }
+
+    async fn list_oob_codes(&self, project_id: &str) -> StoreResult<Vec<OobCode>> {
+        let client = self.client().await?;
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT {OOB_COLUMNS} FROM {OOB_CODES_TABLE}
+                      WHERE project_id = $1
+                      ORDER BY created_at_millis, oob_code"
+                ),
+                &[&project_id],
+            )
+            .await
+            .context("failed to list out-of-band codes")
+            .map_err(StoreError::Backend)?;
+
+        rows.iter().map(row_to_oob_code).collect()
+    }
+
+    async fn delete_oob_codes(&self, project_id: &str) -> StoreResult<usize> {
+        let client = self.client().await?;
+        let deleted = client
+            .execute(
+                &format!("DELETE FROM {OOB_CODES_TABLE} WHERE project_id = $1"),
+                &[&project_id],
+            )
+            .await
+            .context("failed to clear out-of-band codes")
+            .map_err(StoreError::Backend)?;
+        Ok(deleted as usize)
+    }
 }
 
 #[cfg(test)]
@@ -495,6 +665,24 @@ mod tests {
     fn the_accounts_table_is_separate_from_the_documents_table() {
         // Identity data must not be reachable through the Firestore API.
         assert_ne!(USERS_TABLE, crate::local::postgres_store::DOCUMENTS_TABLE);
+        assert_ne!(OOB_CODES_TABLE, crate::local::postgres_store::DOCUMENTS_TABLE);
+        assert_ne!(OOB_CODES_TABLE, USERS_TABLE);
+    }
+
+    #[test]
+    fn the_oob_code_table_does_not_reference_the_accounts_table() {
+        // A sign-in link can exist for an address with no account, so a foreign
+        // key here would refuse to store a code the surface is required to mint.
+        let table = schema_statements()
+            .into_iter()
+            .find(|statement| statement.contains(&format!("CREATE TABLE IF NOT EXISTS {OOB_CODES_TABLE}")))
+            .expect("the oob code table must exist");
+
+        assert!(!table.contains("REFERENCES"), "{table}");
+        assert!(
+            table.contains("local_id          text,"),
+            "local_id must be nullable: {table}"
+        );
     }
 
     #[test]
@@ -512,5 +700,8 @@ mod tests {
         // runtime.
         let columns = COLUMNS.split(',').count();
         assert_eq!(columns, 14, "COLUMNS lists {columns} columns");
+
+        let oob_columns = OOB_COLUMNS.split(',').count();
+        assert_eq!(oob_columns, 10, "OOB_COLUMNS lists {oob_columns} columns");
     }
 }

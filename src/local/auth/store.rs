@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use super::oob::OobCode;
 use super::user::AuthUser;
 use crate::local::store::{StoreError, StoreResult};
 
@@ -80,6 +81,39 @@ pub trait UserStore: Send + Sync + 'static {
     async fn delete_all(&self, project_id: &str) -> StoreResult<usize>;
 
     async fn count(&self, project_id: &str) -> StoreResult<usize>;
+
+    // ----- out-of-band email codes ------------------------------------------
+    //
+    // Pending email actions (password reset, email verification, sign-in
+    // links) live beside the accounts rather than in a process-local map, for
+    // the same reason the accounts do: with `--postgres-url` a developer can
+    // restart the server mid-flow, and a reset link that stops working because
+    // the server was recompiled is a confusing way to learn that.
+
+    /// Store a freshly minted code. The caller generated the code string, so a
+    /// collision is a generator fault rather than a client outcome and is
+    /// reported as an error.
+    async fn insert_oob_code(&self, project_id: &str, code: OobCode) -> StoreResult<()>;
+
+    /// Read a code by its opaque value. Expiry is the API layer's call, so an
+    /// expired code is still returned here — the difference between "no such
+    /// code" and "that link has expired" is one a developer needs told.
+    async fn get_oob_code(&self, project_id: &str, oob_code: &str)
+        -> StoreResult<Option<OobCode>>;
+
+    /// Redeem a code: remove it and report whether it was there. Single-use is
+    /// enforced by this being a delete, so two clicks on one link cannot both
+    /// apply.
+    async fn consume_oob_code(&self, project_id: &str, oob_code: &str) -> StoreResult<bool>;
+
+    /// Every pending code in the project, newest last.
+    ///
+    /// This is what `GET /emulator/v1/projects/{p}/oobCodes` reports — the
+    /// local-only stand-in for a mailbox.
+    async fn list_oob_codes(&self, project_id: &str) -> StoreResult<Vec<OobCode>>;
+
+    /// Drop every pending code in the project. Returns how many went.
+    async fn delete_oob_codes(&self, project_id: &str) -> StoreResult<usize>;
 }
 
 /// Result of replacing an account.
@@ -99,6 +133,10 @@ pub enum UpdateOutcome {
 #[derive(Clone, Default)]
 pub struct MemoryUserStore {
     users: Arc<RwLock<BTreeMap<(String, String), AuthUser>>>,
+    /// Pending email actions, keyed by `(project_id, oob_code)`. A separate map
+    /// rather than a field on the account, because an `EMAIL_SIGNIN` code can
+    /// exist for an address that has no account yet.
+    oob_codes: Arc<RwLock<BTreeMap<(String, String), OobCode>>>,
 }
 
 impl MemoryUserStore {
@@ -225,6 +263,68 @@ impl UserStore for MemoryUserStore {
             .filter(|(project, _)| project == project_id)
             .count())
     }
+
+    async fn insert_oob_code(&self, project_id: &str, code: OobCode) -> StoreResult<()> {
+        let mut codes = self.oob_codes.write().expect("oob code lock poisoned");
+        let key = (project_id.to_string(), code.oob_code.clone());
+        if codes.contains_key(&key) {
+            return Err(StoreError::Backend(anyhow::anyhow!(
+                "a generated oobCode collided with an existing one"
+            )));
+        }
+        codes.insert(key, code);
+        Ok(())
+    }
+
+    async fn get_oob_code(
+        &self,
+        project_id: &str,
+        oob_code: &str,
+    ) -> StoreResult<Option<OobCode>> {
+        Ok(self
+            .oob_codes
+            .read()
+            .expect("oob code lock poisoned")
+            .get(&(project_id.to_string(), oob_code.to_string()))
+            .cloned())
+    }
+
+    async fn consume_oob_code(&self, project_id: &str, oob_code: &str) -> StoreResult<bool> {
+        Ok(self
+            .oob_codes
+            .write()
+            .expect("oob code lock poisoned")
+            .remove(&(project_id.to_string(), oob_code.to_string()))
+            .is_some())
+    }
+
+    async fn list_oob_codes(&self, project_id: &str) -> StoreResult<Vec<OobCode>> {
+        let mut codes: Vec<OobCode> = self
+            .oob_codes
+            .read()
+            .expect("oob code lock poisoned")
+            .iter()
+            .filter(|((project, _), _)| project == project_id)
+            .map(|(_, code)| code.clone())
+            .collect();
+        // Mint order, so a test that asks for "the latest link" can take the
+        // last entry regardless of backend. The map is keyed by the code, whose
+        // order is random. The code string breaks ties, matching the SQL
+        // backend's `ORDER BY created_at_millis, oob_code` — two codes minted
+        // in the same millisecond must not order differently per backend.
+        codes.sort_by(|left, right| {
+            (left.created_at_millis, &left.oob_code)
+                .cmp(&(right.created_at_millis, &right.oob_code))
+        });
+        Ok(codes)
+    }
+
+    async fn delete_oob_codes(&self, project_id: &str) -> StoreResult<usize> {
+        let mut codes = self.oob_codes.write().expect("oob code lock poisoned");
+        let before = codes.len();
+        codes.retain(|(project, _), _| project != project_id);
+        Ok(before - codes.len())
+    }
 }
 
 /// A [`UserStore`] that fails every call, so the HTTP surface can be tested
@@ -262,6 +362,21 @@ impl UserStore for FailingUserStore {
     async fn count(&self, _: &str) -> StoreResult<usize> {
         Err(broken())
     }
+    async fn insert_oob_code(&self, _: &str, _: OobCode) -> StoreResult<()> {
+        Err(broken())
+    }
+    async fn get_oob_code(&self, _: &str, _: &str) -> StoreResult<Option<OobCode>> {
+        Err(broken())
+    }
+    async fn consume_oob_code(&self, _: &str, _: &str) -> StoreResult<bool> {
+        Err(broken())
+    }
+    async fn list_oob_codes(&self, _: &str) -> StoreResult<Vec<OobCode>> {
+        Err(broken())
+    }
+    async fn delete_oob_codes(&self, _: &str) -> StoreResult<usize> {
+        Err(broken())
+    }
 }
 
 fn broken() -> StoreError {
@@ -277,6 +392,7 @@ fn broken() -> StoreError {
 /// later.
 pub mod conformance {
     use super::*;
+    use crate::local::auth::oob::OobRequestType;
     use crate::local::auth::user::{PasswordHash, SignInProvider};
 
     fn user(local_id: &str, email: Option<&str>) -> AuthUser {
@@ -312,6 +428,14 @@ pub mod conformance {
         listing_pages_in_uid_order(store, project_id).await;
         another_project_is_invisible(store, project_id).await;
         delete_all_empties_only_this_project(store, project_id).await;
+
+        store.delete_oob_codes(project_id).await.expect("clear codes");
+        an_oob_code_round_trips_every_field(store, project_id).await;
+        an_oob_code_is_single_use(store, project_id).await;
+        an_expired_oob_code_is_still_readable(store, project_id).await;
+        a_signin_code_needs_no_account(store, project_id).await;
+        oob_codes_list_in_mint_order(store, project_id).await;
+        oob_codes_do_not_leak_across_projects(store, project_id).await;
     }
 
     async fn insert_then_read_back_by_uid_and_email(store: &dyn UserStore, project: &str) {
@@ -615,6 +739,188 @@ pub mod conformance {
         );
 
         store.delete_all(&other).await.expect("clean up");
+    }
+
+    // ----- out-of-band codes ------------------------------------------------
+
+    fn code(oob_code: &str, request_type: OobRequestType, email: &str) -> OobCode {
+        let mut code = OobCode::new(request_type, email, 1_700_000_000_000);
+        // Fix the code string so the assertions can name it; the generated
+        // value is random by design.
+        code.oob_code = oob_code.to_string();
+        code
+    }
+
+    async fn an_oob_code_round_trips_every_field(store: &dyn UserStore, project: &str) {
+        let original = code("code-full", OobRequestType::VerifyAndChangeEmail, "old@example.com")
+            .for_account("uid-code")
+            .with_new_email("New@Example.com")
+            .with_continue_url(Some("http://localhost:3000/finish?x=1".into()))
+            // The key rides along so the stored link is byte-for-byte the one
+            // the client was given, including after a restart.
+            .with_api_key(Some("app-own-key".into()));
+
+        store
+            .insert_oob_code(project, original.clone())
+            .await
+            .expect("insert code");
+
+        let stored = store
+            .get_oob_code(project, "code-full")
+            .await
+            .expect("get code")
+            .expect("code stored");
+        assert_eq!(
+            stored, original,
+            "every field must survive a round trip, or a link stops working after a restart"
+        );
+
+        // And the sparse shape: no account, no new email, no continue URL.
+        let sparse = code("code-sparse", OobRequestType::EmailSignin, "sparse@example.com");
+        store
+            .insert_oob_code(project, sparse.clone())
+            .await
+            .expect("insert sparse");
+        assert_eq!(
+            store
+                .get_oob_code(project, "code-sparse")
+                .await
+                .expect("get")
+                .expect("stored"),
+            sparse
+        );
+
+        assert!(
+            store
+                .get_oob_code(project, "code-never-minted")
+                .await
+                .expect("get")
+                .is_none(),
+            "an unknown code is absent, not an error"
+        );
+    }
+
+    async fn an_oob_code_is_single_use(store: &dyn UserStore, project: &str) {
+        store
+            .insert_oob_code(
+                project,
+                code("code-once", OobRequestType::PasswordReset, "once@example.com"),
+            )
+            .await
+            .expect("insert");
+
+        assert!(store
+            .consume_oob_code(project, "code-once")
+            .await
+            .expect("first redeem"));
+        assert!(
+            !store
+                .consume_oob_code(project, "code-once")
+                .await
+                .expect("second redeem"),
+            "a redeemed link must not work twice"
+        );
+        assert!(store
+            .get_oob_code(project, "code-once")
+            .await
+            .expect("get")
+            .is_none());
+    }
+
+    async fn an_expired_oob_code_is_still_readable(store: &dyn UserStore, project: &str) {
+        // Expiry is the API layer's decision: it has to be able to tell a
+        // developer "that link expired" rather than "no such link".
+        let mut expired = code("code-stale", OobRequestType::PasswordReset, "stale@example.com");
+        expired.expires_at_millis = expired.created_at_millis;
+        store
+            .insert_oob_code(project, expired.clone())
+            .await
+            .expect("insert");
+
+        let stored = store
+            .get_oob_code(project, "code-stale")
+            .await
+            .expect("get")
+            .expect("an expired code is still stored");
+        assert!(!stored.is_live_at(expired.created_at_millis + 1));
+    }
+
+    async fn a_signin_code_needs_no_account(store: &dyn UserStore, project: &str) {
+        // An EMAIL_SIGNIN link to an unknown address creates the account when
+        // it is followed, so the code cannot require one to exist first.
+        store.delete_all(project).await.expect("clear accounts");
+        store
+            .insert_oob_code(
+                project,
+                code("code-no-user", OobRequestType::EmailSignin, "nobody@example.com"),
+            )
+            .await
+            .expect("a code must not need an account row");
+
+        let stored = store
+            .get_oob_code(project, "code-no-user")
+            .await
+            .expect("get")
+            .expect("stored");
+        assert_eq!(stored.local_id, None);
+    }
+
+    async fn oob_codes_list_in_mint_order(store: &dyn UserStore, project: &str) {
+        store.delete_oob_codes(project).await.expect("clear codes");
+
+        for (index, name) in ["code-1", "code-2", "code-3"].into_iter().enumerate() {
+            let mut entry = code(name, OobRequestType::VerifyEmail, "list@example.com");
+            entry.created_at_millis = 1_700_000_000_000 + index as i64;
+            store.insert_oob_code(project, entry).await.expect("insert");
+        }
+
+        let listed: Vec<String> = store
+            .list_oob_codes(project)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|entry| entry.oob_code)
+            .collect();
+        assert_eq!(
+            listed,
+            vec!["code-1", "code-2", "code-3"],
+            "a harness reads the newest link off the end of this list"
+        );
+    }
+
+    async fn oob_codes_do_not_leak_across_projects(store: &dyn UserStore, project: &str) {
+        let other = format!("{project}-other");
+        store.delete_oob_codes(&other).await.expect("clear other");
+        store
+            .insert_oob_code(
+                &other,
+                code("code-other", OobRequestType::PasswordReset, "other@example.com"),
+            )
+            .await
+            .expect("insert into the other project");
+
+        assert!(
+            store
+                .get_oob_code(project, "code-other")
+                .await
+                .expect("get")
+                .is_none(),
+            "a code must not be redeemable from another project"
+        );
+        assert!(!store
+            .consume_oob_code(project, "code-other")
+            .await
+            .expect("consume"));
+
+        let removed = store.delete_oob_codes(project).await.expect("clear");
+        assert!(removed > 0, "this project had codes to clear");
+        assert_eq!(
+            store.list_oob_codes(&other).await.expect("list other").len(),
+            1,
+            "clearing one project's codes must not touch another's"
+        );
+
+        store.delete_oob_codes(&other).await.expect("clean up");
     }
 }
 

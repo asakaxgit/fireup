@@ -377,8 +377,8 @@ parallel with Phase 2 and without waiting for a Phase 2 exit:
 
 **Non-goals, answering `501` with a message naming the gap:** phone auth,
 multi-factor enrolment and the rest of the Identity Platform `v2` surface,
-federated/OAuth providers, out-of-band email flows (verification and
-password-reset links), production key material.
+federated/OAuth providers, production key material. (Out-of-band email flows
+were on this list until SAK-193, below.)
 
 **Local development only:** unsigned tokens, no API-key or admin-credential
 check, and passwords hashed without a work factor. Anything that can reach the
@@ -402,7 +402,8 @@ the surface with `firebase-admin` 13 and the `firebase` client SDK 11 over
 `signInAnonymously`, `verifyIdToken` accepting the unsigned emulator token, and
 a forced refresh extending the session. The deliberate gaps (batch account
 writes, out-of-band email flows, session cookies) are asserted to fail cleanly
-rather than left untested.
+rather than left untested. (The out-of-band gap was promoted into real
+assertions by SAK-193, which is what that check exists to force.)
 
 That test found two real divergences that the Rust suite could not, because the
 Rust suite was written against the same reading of the contract as the code:
@@ -459,6 +460,61 @@ Phase 4 documented is closed: `src/local/seed.rs` reads the same
   `scripts/demo-export-to-sql.sh`, where `@google-cloud/firestore` now reads a
   `Timestamp`, a `Buffer`, a `GeoPoint`, and a followable `DocumentReference`.
 - Non-default namespaces remain skipped; that is unchanged and deliberate.
+
+**Phase L.1 (SAK-193, November 6 2026)** — the out-of-band email flows a sample
+Firebase web app reaches after sign-up or sign-in. The Phase L non-goal is
+retired: `sendOobCode` / `resetPassword` no longer answer `501`.
+
+- Served: `accounts:sendOobCode` for all four request types
+  (`PASSWORD_RESET`, `VERIFY_EMAIL`, `EMAIL_SIGNIN`, `VERIFY_AND_CHANGE_EMAIL`),
+  `accounts:resetPassword` (both the code-check and the confirm call),
+  `accounts:update` with an `oobCode` instead of an `idToken` (the SDK's
+  `applyActionCode`), `accounts:signInWithEmailLink`, the admin
+  `projects/{p}/accounts:sendOobCode` with `returnOobLink` (the Admin SDK's
+  `generate*Link`), `GET`/`DELETE /emulator/v1/projects/{p}/oobCodes`, and
+  `GET /emulator/action` so a generated link resolves rather than 404ing.
+- **No mail transport, and that is the design**, not a shortcut: an SMTP client
+  in a local dev tool is a credential to configure and a way to mail a real
+  person from a test suite. The link is logged at `info` and listed at the
+  `oobCodes` endpoint — the documented local convention — so a test can follow
+  the whole flow without a mailbox.
+- Codes are single-use (redeeming deletes; a *failed* redemption leaves the link
+  usable), expire after an hour with `EXPIRED_OOB_CODE` distinct from
+  `INVALID_OOB_CODE`, and live in their own `fireup_local_auth_oob_codes` table
+  so a link survives a recompile. Six new assertions in the shared store
+  conformance suite keep the memory and Postgres backends from drifting.
+- Completing a reset or an email change revokes outstanding sessions via
+  `validSince`; merely verifying an address does not. A stale `VERIFY_EMAIL`
+  link is refused if the account's address changed after it was sent, and
+  `signInWithEmailLink` requires the address the link was issued for, so a
+  forwarded link cannot sign in whoever received it.
+- `GET /emulator/action` is **Fireup's own** JSON route, not a copy of Google's
+  hosted page, and says so in its response.
+
+**Verified on 2026-11-06:** `cargo test --lib` 422 (119 in the auth module),
+`--test local_auth_tests` 18 over real HTTP/1.1 (including reset and email-link
+sign-in driven end-to-end from the listed link, and the link naming the port
+the server actually bound), `--test local_auth_postgres_tests` 10 against a
+throwaway PostgreSQL 18 cluster (a reset link survives a restart and its row is
+gone once redeemed; a sign-in code stores with a null `local_id`). Full
+`cargo test --lib --bins --tests` green, 0 failures; `cargo clippy` clean on the
+auth module. The 57 doctest failures are pre-existing, all in generated proto
+code.
+
+**Verified with the official SDKs:** `scripts/smoke-local-auth.sh` **36/36**,
+covering `generatePasswordResetLink`, `generateEmailVerificationLink`,
+`sendPasswordResetEmail` → `verifyPasswordResetCode` → `confirmPasswordReset`,
+`sendEmailVerification` → `applyActionCode`, and `sendSignInLinkToEmail` →
+`isSignInWithEmailLink` → `signInWithEmailLink`.
+
+That smoke test earned its keep again, exactly as in SAK-171. The client SDK's
+`ActionCodeURL` parser asserts on `apiKey`, `oobCode` and a known `mode`
+*together* and yields nothing without all three, so a link built without an
+`apiKey` — a parameter that reads as optional, and which this surface does not
+validate — made `isSignInWithEmailLink` quietly answer `false` and
+`signInWithEmailLink` fail. Every Rust test passed, because they were written
+from the same reading of the link format as the code. The link now echoes the
+caller's own `?key=`, or a plainly-labelled placeholder.
 
 ---
 

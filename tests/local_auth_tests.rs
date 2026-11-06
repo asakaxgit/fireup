@@ -460,6 +460,210 @@ async fn the_emulator_route_clears_accounts_without_touching_documents() {
 }
 
 #[tokio::test]
+async fn a_password_reset_runs_over_the_wire_from_the_link_a_developer_can_read() {
+    // The whole flow, through nothing but HTTP: ask for a reset, read the link
+    // the way a developer or a test harness has to (there is no mailbox),
+    // follow it, finish it, and sign in with the new password.
+    let server = start().await;
+    let addr = server.addr;
+
+    sign_up(addr, "ada@example.com", "secret12").await;
+
+    let response = post(
+        addr,
+        &format!("{IDENTITY}/accounts:sendOobCode"),
+        json!({ "requestType": "PASSWORD_RESET", "email": "ada@example.com" }),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(response.body["email"], "ada@example.com");
+
+    let listing = send(
+        addr,
+        "GET",
+        &format!("/emulator/v1/projects/{PROJECT}/oobCodes"),
+        "",
+    )
+    .await;
+    assert_eq!(listing.status, 200, "{}", listing.body);
+    let entry = &listing.body["oobCodes"][0];
+    assert_eq!(entry["requestType"], "PASSWORD_RESET");
+    assert_eq!(entry["email"], "ada@example.com");
+
+    // The link must name the port the server actually bound, not the one the
+    // config asked for — these tests bind port 0.
+    let link = entry["oobLink"].as_str().expect("a link").to_string();
+    assert!(
+        link.starts_with(&format!("http://{addr}/emulator/action?")),
+        "a link to the wrong port is a link nobody can follow: {link}"
+    );
+
+    // Follow it the way a browser would: same path, same query string.
+    let target = link
+        .strip_prefix(&format!("http://{addr}"))
+        .expect("a link to this server");
+    let landing = send(addr, "GET", target, "").await;
+    assert_eq!(landing.status, 200, "{}", landing.body);
+    assert_eq!(landing.body["mode"], "resetPassword");
+    assert_eq!(landing.body["applied"], false);
+    assert_eq!(landing.body["email"], "ada@example.com");
+
+    let code = entry["oobCode"].as_str().expect("a code");
+    let response = post(
+        addr,
+        &format!("{IDENTITY}/accounts:resetPassword"),
+        json!({ "oobCode": code, "newPassword": "brand-new-one" }),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+
+    let response = post(
+        addr,
+        &format!("{IDENTITY}/accounts:signInWithPassword"),
+        json!({ "email": "ada@example.com", "password": "brand-new-one" }),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(
+        claims_of(response.body["idToken"].as_str().expect("id token"))["email_verified"],
+        true,
+        "completing a reset proves control of the mailbox"
+    );
+
+    // The link is spent, and the listing is empty again.
+    let listing = send(
+        addr,
+        "GET",
+        &format!("/emulator/v1/projects/{PROJECT}/oobCodes"),
+        "",
+    )
+    .await;
+    assert!(
+        listing.body["oobCodes"]
+            .as_array()
+            .expect("an array")
+            .is_empty(),
+        "{}",
+        listing.body
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn an_email_link_sign_in_mints_a_working_session_over_the_wire() {
+    let server = start().await;
+    let addr = server.addr;
+
+    let response = post(
+        addr,
+        &format!("{IDENTITY}/accounts:sendOobCode"),
+        json!({
+            "requestType": "EMAIL_SIGNIN",
+            "email": "link@example.com",
+            "continueUrl": "http://localhost:3000/finish?next=/home",
+        }),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+
+    let listing = send(
+        addr,
+        "GET",
+        &format!("/emulator/v1/projects/{PROJECT}/oobCodes"),
+        "",
+    )
+    .await;
+    let entry = &listing.body["oobCodes"][0];
+    let code = entry["oobCode"].as_str().expect("a code");
+
+    // The landing route hands the app back its own continueUrl intact, which is
+    // how a real app knows where to resume.
+    let target = entry["oobLink"]
+        .as_str()
+        .expect("a link")
+        .strip_prefix(&format!("http://{addr}"))
+        .expect("a link to this server")
+        .to_string();
+    let landing = send(addr, "GET", &target, "").await;
+    assert_eq!(landing.status, 200, "{}", landing.body);
+    assert_eq!(
+        landing.body["continueUrl"], "http://localhost:3000/finish?next=/home",
+        "{}",
+        landing.body
+    );
+
+    let response = post(
+        addr,
+        &format!("{IDENTITY}/accounts:signInWithEmailLink"),
+        json!({ "email": "link@example.com", "oobCode": code }),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(response.body["isNewUser"], true);
+
+    // The session it minted has to be a real one: usable for a lookup and
+    // exchangeable for a fresh token.
+    let id_token = response.body["idToken"].as_str().expect("id token").to_string();
+    let claims = claims_of(&id_token);
+    assert_eq!(claims["email"], "link@example.com");
+    assert_eq!(claims["email_verified"], true);
+
+    let lookup = post(
+        addr,
+        &format!("{IDENTITY}/accounts:lookup"),
+        json!({ "idToken": id_token }),
+    )
+    .await;
+    assert_eq!(lookup.status, 200, "{}", lookup.body);
+    assert_eq!(lookup.body["users"][0]["email"], "link@example.com");
+
+    let refreshed = send_with_headers(
+        addr,
+        "POST",
+        &format!("{SECURE_TOKEN}/token"),
+        &format!(
+            "grant_type=refresh_token&refresh_token={}",
+            response.body["refreshToken"].as_str().expect("refresh token")
+        ),
+        "Content-Type: application/x-www-form-urlencoded\r\n",
+    )
+    .await;
+    assert_eq!(refreshed.status, 200, "{}", refreshed.body);
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn pending_links_are_invisible_to_the_firestore_api() {
+    // Same rule as accounts: a pending reset link is identity data, and must
+    // not be reachable as application data or counted as a document.
+    let server = start().await;
+    let addr = server.addr;
+
+    sign_up(addr, "ada@example.com", "secret12").await;
+    let response = post(
+        addr,
+        &format!("{IDENTITY}/accounts:sendOobCode"),
+        json!({ "requestType": "PASSWORD_RESET", "email": "ada@example.com" }),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+
+    assert_eq!(
+        server.store.count().await.expect("count documents"),
+        0,
+        "a pending link must not create a document"
+    );
+
+    let health = send(addr, "GET", "/health", "").await;
+    assert_eq!(health.status, 200);
+    assert_eq!(health.body["storage"]["documents"], 0, "{}", health.body);
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
 async fn accounts_are_invisible_to_the_firestore_api() {
     // Identity data must not be reachable as application data. The two stores
     // are separate types, and this is the test that says so from the outside.
@@ -588,6 +792,33 @@ async fn error_responses_carry_the_codes_sdks_match_on() {
             "EMAIL_NOT_FOUND",
         ),
         ("accounts:lookup", json!({ "idToken": "nonsense" }), "INVALID_ID_TOKEN"),
+        // The email flows have their own codes, and the SDKs map each to a
+        // distinct `auth/...` error a sample app shows the user.
+        (
+            "accounts:sendOobCode",
+            json!({ "requestType": "PASSWORD_RESET", "email": "nobody@example.com" }),
+            "EMAIL_NOT_FOUND",
+        ),
+        (
+            "accounts:sendOobCode",
+            json!({ "email": "taken@example.com" }),
+            "MISSING_REQ_TYPE",
+        ),
+        (
+            "accounts:resetPassword",
+            json!({ "oobCode": "never-minted", "newPassword": "brand-new-one" }),
+            "INVALID_OOB_CODE",
+        ),
+        (
+            "accounts:resetPassword",
+            json!({ "newPassword": "brand-new-one" }),
+            "MISSING_OOB_CODE",
+        ),
+        (
+            "accounts:signInWithEmailLink",
+            json!({ "email": "taken@example.com", "oobCode": "never-minted" }),
+            "INVALID_OOB_CODE",
+        ),
     ] {
         let response = post(addr, &format!("{IDENTITY}/{path}"), body.clone()).await;
         assert_eq!(response.status, 400, "{path} {body}: {}", response.body);
