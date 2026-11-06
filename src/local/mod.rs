@@ -18,10 +18,11 @@
 //!
 //! * **Firestore** — document CRUD, `StructuredQuery` reads, collection
 //!   listings, and transactional writes against an in-memory **or PostgreSQL**
-//!   store, plus seeding from a managed export. Realtime listeners, field
-//!   transforms, and aggregation queries are not served; those RPCs answer
-//!   `UNIMPLEMENTED` with a message saying so, and `docs/local/README.md` has
-//!   the full fidelity matrix.
+//!   store, plus seeding from a managed export. Writes carry the
+//!   [`serverTimestamp`/`increment`/`arrayUnion`/`arrayRemove` field
+//!   transforms](transforms). Realtime listeners and aggregation queries are
+//!   not served; those RPCs answer `UNIMPLEMENTED` with a message saying so,
+//!   and `docs/local/README.md` has the full fidelity matrix.
 //! * **Datastore** — Lookup/RunQuery/Commit/BeginTransaction/AllocateIds on the
 //!   same store Firestore uses (kinds map to collections). GQL, aggregations,
 //!   namespaces, and property transforms answer `UNIMPLEMENTED`.
@@ -41,6 +42,7 @@ pub mod query;
 pub mod seed;
 pub mod store;
 pub mod transactions;
+pub mod transforms;
 pub mod value_json;
 
 use std::sync::Arc;

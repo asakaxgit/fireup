@@ -26,7 +26,9 @@ use tracing::{debug, info};
 
 use crate::data_importer::parse_connection_url;
 use crate::local::names::parse_document_name;
-use crate::local::store::{self, PendingWrite, Store, StoreError, StoreResult, WriteOutcome};
+use crate::local::store::{
+    self, PendingWrite, Store, StoreError, StoreResult, WriteEffect, WriteOutcome,
+};
 use crate::local::value_json;
 use crate::protos::google::firestore::v1::Document;
 
@@ -280,7 +282,7 @@ impl Store for PostgresStore {
         &self,
         writes: Vec<PendingWrite>,
         now: Timestamp,
-    ) -> StoreResult<Vec<WriteOutcome>> {
+    ) -> StoreResult<Vec<WriteEffect>> {
         // Validate every name before touching the database, so a batch with one
         // unstorable name fails without having opened a transaction.
         let keys: Vec<DocumentKey> = writes
@@ -325,11 +327,15 @@ impl Store for PostgresStore {
             if matches!(write.mutation, store::Mutation::Verify { .. }) {
                 // A verification only had to pass its precondition; the row is
                 // deliberately left untouched so it does not look written.
-                outcomes.push(WriteOutcome::Verified);
+                outcomes.push(WriteEffect::plain(WriteOutcome::Verified));
                 continue;
             }
 
-            let (next, outcome) = store::mutate(write.mutation, stored, &now);
+            // Field transforms are computed in here, from the row this
+            // transaction just read under its advisory lock, so a concurrent
+            // `increment` queues behind it rather than reading the same
+            // starting value.
+            let (next, effect) = store::mutate(write, stored, &now);
             match next {
                 Some(document) => upsert_document(&transaction, &name, key, &document).await?,
                 None => {
@@ -343,7 +349,7 @@ impl Store for PostgresStore {
                         .map_err(StoreError::Backend)?;
                 }
             }
-            outcomes.push(outcome);
+            outcomes.push(effect);
         }
 
         // Returning early anywhere above drops the transaction, which rolls it

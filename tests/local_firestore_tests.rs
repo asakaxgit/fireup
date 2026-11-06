@@ -9,17 +9,21 @@
 use std::collections::HashMap;
 
 use fireup::local;
+use fireup::protos::google::firestore::v1::document_transform::field_transform::{
+    ServerValue, TransformType,
+};
+use fireup::protos::google::firestore::v1::document_transform::FieldTransform;
 use fireup::protos::google::firestore::v1::{
-    firestore_client::FirestoreClient, precondition::ConditionType,
-    run_query_request::QueryType, structured_query::field_filter::Operator as FieldOperator,
+    firestore_client::FirestoreClient, precondition::ConditionType, run_query_request::QueryType,
+    structured_query::field_filter::Operator as FieldOperator,
     structured_query::filter::FilterType, structured_query::CollectionSelector,
     structured_query::Direction, structured_query::FieldFilter, structured_query::FieldReference,
     structured_query::Filter, structured_query::Order, structured_query::Projection,
-    value::ValueType, write::Operation, BatchGetDocumentsRequest, BatchWriteRequest,
+    value::ValueType, write::Operation, ArrayValue, BatchGetDocumentsRequest, BatchWriteRequest,
     BeginTransactionRequest, CommitRequest, CreateDocumentRequest, Cursor, DeleteDocumentRequest,
-    Document, DocumentMask, GetDocumentRequest, ListCollectionIdsRequest, ListDocumentsRequest,
-    ListDocumentsResponse, MapValue, PartitionQueryRequest, Precondition, RollbackRequest,
-    RunAggregationQueryRequest, RunQueryRequest, StructuredQuery, Value, Write,
+    Document, DocumentMask, DocumentTransform, GetDocumentRequest, ListCollectionIdsRequest,
+    ListDocumentsRequest, ListDocumentsResponse, MapValue, PartitionQueryRequest, Precondition,
+    RollbackRequest, RunAggregationQueryRequest, RunQueryRequest, StructuredQuery, Value, Write,
 };
 use fireup::protos::google::r#type::LatLng;
 use tonic::transport::Channel;
@@ -1908,6 +1912,521 @@ async fn a_seeded_export_reads_back_as_real_firestore_value_types() {
         })
         .await
         .expect("the referenced document exists");
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+// ---------------------------------------------------------------------------
+// Field transforms (SAK-190)
+//
+// The values in these writes are computed by the server, so the assertions are
+// about two things an SDK depends on: what ends up stored, and what the
+// `WriteResult.transform_results` reports back without a second read.
+// ---------------------------------------------------------------------------
+
+/// `FieldValue.serverTimestamp()`.
+fn server_timestamp(field: &str) -> FieldTransform {
+    FieldTransform {
+        field_path: field.to_string(),
+        transform_type: Some(TransformType::SetToServerValue(
+            ServerValue::RequestTime as i32,
+        )),
+    }
+}
+
+/// `FieldValue.increment(by)`.
+fn increment(field: &str, by: i64) -> FieldTransform {
+    FieldTransform {
+        field_path: field.to_string(),
+        transform_type: Some(TransformType::Increment(integer_value(by))),
+    }
+}
+
+/// `FieldValue.arrayUnion(…)`.
+fn array_union(field: &str, values: Vec<Value>) -> FieldTransform {
+    FieldTransform {
+        field_path: field.to_string(),
+        transform_type: Some(TransformType::AppendMissingElements(ArrayValue { values })),
+    }
+}
+
+/// `FieldValue.arrayRemove(…)`.
+fn array_remove(field: &str, values: Vec<Value>) -> FieldTransform {
+    FieldTransform {
+        field_path: field.to_string(),
+        transform_type: Some(TransformType::RemoveAllFromArray(ArrayValue { values })),
+    }
+}
+
+fn array_value(values: Vec<Value>) -> Value {
+    Value {
+        value_type: Some(ValueType::ArrayValue(ArrayValue { values })),
+    }
+}
+
+fn null_value() -> Value {
+    Value {
+        value_type: Some(ValueType::NullValue(0)),
+    }
+}
+
+/// An `update()`-shaped write: a masked merge plus `update_transforms`, which is
+/// what the official SDKs put on the wire for `FieldValue` sentinels.
+fn update_with_transforms(
+    name: &str,
+    document_fields: HashMap<String, Value>,
+    transforms: Vec<FieldTransform>,
+) -> Write {
+    let mask: Vec<String> = document_fields.keys().cloned().collect();
+    Write {
+        operation: Some(Operation::Update(Document {
+            name: name.to_string(),
+            fields: document_fields,
+            ..Default::default()
+        })),
+        update_mask: Some(DocumentMask { field_paths: mask }),
+        update_transforms: transforms,
+        ..Default::default()
+    }
+}
+
+async fn stored(client: &mut FirestoreClient<Channel>, name: &str) -> Document {
+    client
+        .get_document(GetDocumentRequest {
+            name: name.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("GetDocument succeeds")
+        .into_inner()
+}
+
+#[tokio::test]
+async fn a_commit_serves_all_four_field_transforms() {
+    let (server, mut client) = start().await;
+    let name = format!("{ROOT}/counters/page");
+
+    let response = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: vec![update_with_transforms(
+                &name,
+                fields([("label", string_value("home"))]),
+                vec![
+                    server_timestamp("seen"),
+                    increment("hits", 5),
+                    array_union("tags", vec![string_value("a"), string_value("b")]),
+                ],
+            )],
+            ..Default::default()
+        })
+        .await
+        .expect("Commit with transforms succeeds")
+        .into_inner();
+
+    let document = stored(&mut client, &name).await;
+    assert_eq!(document.fields["label"], string_value("home"));
+    assert_eq!(
+        document.fields["hits"],
+        integer_value(5),
+        "increment on a missing field sets it to the operand"
+    );
+    assert_eq!(
+        document.fields["tags"],
+        array_value(vec![string_value("a"), string_value("b")])
+    );
+    let seen = match &document.fields["seen"].value_type {
+        Some(ValueType::TimestampValue(timestamp)) => timestamp.clone(),
+        other => panic!("serverTimestamp should store a timestamp, got {other:?}"),
+    };
+
+    // The results come back in transform order, so a client can read the
+    // resolved values off the commit instead of fetching the document again.
+    let results = &response.write_results[0].transform_results;
+    assert_eq!(results.len(), 3);
+    assert_eq!(
+        results[0].value_type,
+        Some(ValueType::TimestampValue(seen.clone())),
+        "the serverTimestamp result is the value that was written"
+    );
+    assert_eq!(results[1], integer_value(5));
+    assert_eq!(
+        results[2],
+        null_value(),
+        "the array transforms report a null result, per the contract"
+    );
+
+    // Millisecond precision, and never after the commit itself.
+    assert_eq!(
+        seen.nanos % 1_000_000,
+        0,
+        "REQUEST_TIME is millisecond precision"
+    );
+    let commit_time = response.commit_time.expect("commit_time");
+    assert!(
+        (seen.seconds, seen.nanos) <= (commit_time.seconds, commit_time.nanos),
+        "the server timestamp {seen:?} must not be after the commit {commit_time:?}"
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn increments_accumulate_and_array_removes_undo_a_union() {
+    let (server, mut client) = start().await;
+    let name = format!("{ROOT}/counters/page");
+
+    for _ in 0..3 {
+        client
+            .commit(CommitRequest {
+                database: DATABASE.to_string(),
+                writes: vec![update_with_transforms(
+                    &name,
+                    HashMap::new(),
+                    vec![
+                        increment("hits", 2),
+                        array_union("tags", vec![string_value("seen")]),
+                    ],
+                )],
+                ..Default::default()
+            })
+            .await
+            .expect("repeated transform commits succeed");
+    }
+
+    let document = stored(&mut client, &name).await;
+    assert_eq!(
+        document.fields["hits"],
+        integer_value(6),
+        "each increment reads the value the previous one wrote"
+    );
+    assert_eq!(
+        document.fields["tags"],
+        array_value(vec![string_value("seen")]),
+        "arrayUnion is idempotent for an element already present"
+    );
+
+    client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: vec![update_with_transforms(
+                &name,
+                HashMap::new(),
+                vec![array_remove("tags", vec![string_value("seen")])],
+            )],
+            ..Default::default()
+        })
+        .await
+        .expect("arrayRemove commits");
+
+    assert_eq!(
+        stored(&mut client, &name).await.fields["tags"],
+        array_value(Vec::new()),
+        "removing the last element leaves an empty array, not a missing field"
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn every_server_timestamp_in_one_commit_resolves_to_the_same_value() {
+    let (server, mut client) = start().await;
+
+    let response = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: vec![
+                update_with_transforms(
+                    &format!("{ROOT}/stamped/first"),
+                    HashMap::new(),
+                    vec![server_timestamp("at")],
+                ),
+                update_with_transforms(
+                    &format!("{ROOT}/stamped/second"),
+                    HashMap::new(),
+                    vec![server_timestamp("at"), server_timestamp("also")],
+                ),
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect("Commit succeeds")
+        .into_inner();
+
+    let stamps: Vec<&Value> = response
+        .write_results
+        .iter()
+        .flat_map(|result| result.transform_results.iter())
+        .collect();
+    assert_eq!(stamps.len(), 3);
+    assert!(
+        stamps.windows(2).all(|pair| pair[0] == pair[1]),
+        "every field transformed in one commit gets the same timestamp: {stamps:?}"
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_transform_only_write_creates_the_document_and_keeps_other_fields() {
+    let (server, mut client) = start().await;
+    let name = format!("{ROOT}/counters/standalone");
+
+    // No field data at all: the whole write is the transform.
+    let transform_only = |transforms: Vec<FieldTransform>| Write {
+        operation: Some(Operation::Transform(DocumentTransform {
+            document: name.clone(),
+            field_transforms: transforms,
+        })),
+        ..Default::default()
+    };
+
+    client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: vec![transform_only(vec![increment("hits", 1)])],
+            ..Default::default()
+        })
+        .await
+        .expect("a transform write creates the document");
+
+    let created = stored(&mut client, &name).await;
+    assert_eq!(created.fields["hits"], integer_value(1));
+    assert_eq!(created.fields.len(), 1);
+
+    client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: vec![update_with_transforms(
+                &name,
+                fields([("label", string_value("kept"))]),
+                Vec::new(),
+            )],
+            ..Default::default()
+        })
+        .await
+        .expect("a plain masked merge succeeds");
+
+    client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: vec![transform_only(vec![increment("hits", 1)])],
+            ..Default::default()
+        })
+        .await
+        .expect("a second transform write succeeds");
+
+    let document = stored(&mut client, &name).await;
+    assert_eq!(document.fields["hits"], integer_value(2));
+    assert_eq!(
+        document.fields["label"],
+        string_value("kept"),
+        "a transform write must not touch the fields it does not name"
+    );
+
+    // An empty transform write is a malformed request, not a no-op.
+    let status = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: vec![transform_only(Vec::new())],
+            ..Default::default()
+        })
+        .await
+        .expect_err("field_transforms must not be empty");
+    assert_eq!(status.code(), Code::InvalidArgument);
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn batch_write_reports_transform_results_per_write() {
+    let (server, mut client) = start().await;
+
+    let response = client
+        .batch_write(BatchWriteRequest {
+            database: DATABASE.to_string(),
+            writes: vec![
+                update_with_transforms(
+                    &format!("{ROOT}/counters/a"),
+                    HashMap::new(),
+                    vec![increment("hits", 3)],
+                ),
+                // Fails its precondition, so it gets a status and no results.
+                Write {
+                    current_document: Some(Precondition {
+                        condition_type: Some(ConditionType::Exists(true)),
+                    }),
+                    ..update_with_transforms(
+                        &format!("{ROOT}/counters/ghost"),
+                        HashMap::new(),
+                        vec![increment("hits", 3)],
+                    )
+                },
+                update_with_transforms(
+                    &format!("{ROOT}/counters/b"),
+                    HashMap::new(),
+                    vec![increment("hits", 4), server_timestamp("at")],
+                ),
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect("BatchWrite succeeds per write")
+        .into_inner();
+
+    assert_eq!(response.status[0].code, Code::Ok as i32);
+    assert_eq!(response.status[1].code, Code::NotFound as i32);
+    assert_eq!(response.status[2].code, Code::Ok as i32);
+
+    assert_eq!(
+        response.write_results[0].transform_results,
+        vec![integer_value(3)]
+    );
+    assert!(
+        response.write_results[1].transform_results.is_empty(),
+        "a write that failed has no transform results"
+    );
+    assert_eq!(response.write_results[2].transform_results.len(), 2);
+    assert_eq!(
+        response.write_results[2].transform_results[0],
+        integer_value(4)
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn an_unserved_transform_is_refused_and_takes_its_whole_commit_with_it() {
+    let (server, mut client) = start().await;
+
+    let refusals = [
+        (
+            "maximum",
+            FieldTransform {
+                field_path: "hits".to_string(),
+                transform_type: Some(TransformType::Maximum(integer_value(1))),
+            },
+            Code::Unimplemented,
+        ),
+        (
+            "a nested field path",
+            server_timestamp("nested.at"),
+            Code::Unimplemented,
+        ),
+        (
+            "a non-numeric increment",
+            FieldTransform {
+                field_path: "hits".to_string(),
+                transform_type: Some(TransformType::Increment(string_value("1"))),
+            },
+            Code::InvalidArgument,
+        ),
+    ];
+
+    for (what, transform, expected) in refusals {
+        let status = client
+            .commit(CommitRequest {
+                database: DATABASE.to_string(),
+                writes: vec![
+                    // A perfectly good write, which must not survive the batch.
+                    Write {
+                        operation: Some(Operation::Update(person("alice", "Tokyo", 31))),
+                        ..Default::default()
+                    },
+                    update_with_transforms(
+                        &format!("{ROOT}/counters/page"),
+                        HashMap::new(),
+                        vec![transform],
+                    ),
+                ],
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(status.code(), expected, "{what}: {}", status.message());
+        assert_eq!(
+            server.store.count().await.expect("count"),
+            0,
+            "{what}: a refused transform must not leave the rest of the batch applied"
+        );
+    }
+
+    // `update_transforms` is only legal on an `update` write.
+    let status = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: vec![Write {
+                operation: Some(Operation::Delete(format!("{ROOT}/counters/page"))),
+                update_transforms: vec![increment("hits", 1)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("transforms on a delete are malformed");
+    assert_eq!(status.code(), Code::InvalidArgument);
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn a_transform_inside_a_transaction_commits_with_its_read_set() {
+    let (server, mut client) = start().await;
+    let name = format!("{ROOT}/counters/page");
+
+    let transaction = client
+        .begin_transaction(BeginTransactionRequest {
+            database: DATABASE.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("BeginTransaction succeeds")
+        .into_inner()
+        .transaction;
+
+    // Read the (absent) document inside the transaction, so the commit carries
+    // a read-set verification ahead of the write.
+    let _ = client
+        .get_document(GetDocumentRequest {
+            name: name.clone(),
+            consistency_selector: Some(
+                fireup::protos::google::firestore::v1::get_document_request::ConsistencySelector::Transaction(
+                    transaction.clone(),
+                ),
+            ),
+            ..Default::default()
+        })
+        .await;
+
+    let response = client
+        .commit(CommitRequest {
+            database: DATABASE.to_string(),
+            writes: vec![update_with_transforms(
+                &name,
+                HashMap::new(),
+                vec![increment("hits", 9)],
+            )],
+            transaction,
+            ..Default::default()
+        })
+        .await
+        .expect("the transactional commit succeeds")
+        .into_inner();
+
+    assert_eq!(
+        response.write_results.len(),
+        1,
+        "the read set's verifications are not reported as write results"
+    );
+    assert_eq!(
+        response.write_results[0].transform_results,
+        vec![integer_value(9)]
+    );
+    assert_eq!(
+        stored(&mut client, &name).await.fields["hits"],
+        integer_value(9)
+    );
 
     server.shutdown().await.expect("clean shutdown");
 }

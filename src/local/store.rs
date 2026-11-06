@@ -26,6 +26,7 @@ use std::sync::{Arc, RwLock};
 use prost_types::Timestamp;
 use tonic::Status;
 
+use crate::local::transforms::{self, FieldTransform};
 use crate::protos::google::firestore::v1::{Document, Value};
 
 /// What went wrong in the storage layer.
@@ -167,22 +168,41 @@ impl Mutation {
 pub struct PendingWrite {
     pub mutation: Mutation,
     pub precondition: Option<Precondition>,
+    /// Server-computed field transforms, applied **after** `mutation` to the
+    /// document it left behind, in order.
+    ///
+    /// They live next to the mutation rather than inside it because that is the
+    /// shape of the contract — a `Write` carries an operation *and* its
+    /// `update_transforms` — and because a transform has to read the stored
+    /// value, which only the store can do inside the write's own transaction.
+    pub transforms: Vec<FieldTransform>,
 }
 
 impl PendingWrite {
-    /// A write with no precondition.
+    /// A write with no precondition and no transforms.
     pub fn new(mutation: Mutation) -> Self {
-        Self {
-            mutation,
-            precondition: None,
-        }
+        Self::guarded(mutation, None)
     }
 
-    /// A write guarded by `precondition`.
+    /// A write guarded by `precondition`, with no transforms.
     pub fn guarded(mutation: Mutation, precondition: Option<Precondition>) -> Self {
         Self {
             mutation,
             precondition,
+            transforms: Vec::new(),
+        }
+    }
+
+    /// A write guarded by `precondition` that applies `transforms` afterwards.
+    pub fn transformed(
+        mutation: Mutation,
+        precondition: Option<Precondition>,
+        transforms: Vec<FieldTransform>,
+    ) -> Self {
+        Self {
+            mutation,
+            precondition,
+            transforms,
         }
     }
 }
@@ -216,17 +236,28 @@ pub(crate) fn check_precondition(
     }
 }
 
-/// Apply `mutation` to `stored`, returning the document to write and the
-/// outcome, or `None` for a delete.
+/// Apply one pending write to `stored`, returning the document to write and
+/// what the write did, or `None` for a delete.
 ///
-/// This is the one definition of what `put` and `merge` mean — `create_time`
-/// preservation, which fields survive a merge — so a backend that reimplements
-/// the storage can still not reimplement the semantics.
+/// This is the one definition of what `put`, `merge`, and a field transform
+/// mean — `create_time` preservation, which fields survive a merge, and the
+/// fact that transforms read the document the mutation *just* produced — so a
+/// backend that reimplements the storage can still not reimplement the
+/// semantics.
+///
+/// The precondition is checked by the caller (inside its own store
+/// transaction), not here; see [`check_write`].
 pub(crate) fn mutate(
-    mutation: Mutation,
+    write: PendingWrite,
     stored: Option<Document>,
     now: &Timestamp,
-) -> (Option<Document>, WriteOutcome) {
+) -> (Option<Document>, WriteEffect) {
+    let PendingWrite {
+        mutation,
+        transforms,
+        ..
+    } = write;
+
     let existed = stored.is_some();
     let outcome = if existed {
         WriteOutcome::Updated
@@ -234,10 +265,10 @@ pub(crate) fn mutate(
         WriteOutcome::Created
     };
     if let Mutation::Delete { .. } = mutation {
-        return (None, WriteOutcome::Deleted { existed });
+        return (None, WriteEffect::plain(WriteOutcome::Deleted { existed }));
     }
     if let Mutation::Verify { .. } = mutation {
-        return (stored, WriteOutcome::Verified);
+        return (stored, WriteEffect::plain(WriteOutcome::Verified));
     }
     // `create_time` only advances when a document is deleted and recreated, so
     // an overwrite keeps the time the document first appeared.
@@ -246,11 +277,10 @@ pub(crate) fn mutate(
         .and_then(|document| document.create_time.clone())
         .unwrap_or_else(|| now.clone());
 
-    match mutation {
+    let mut document = match mutation {
         Mutation::Put(mut document) => {
             document.create_time = Some(create_time);
-            document.update_time = Some(now.clone());
-            (Some(document), outcome)
+            document
         }
         Mutation::Merge { name, fields } => {
             let mut document = stored.unwrap_or_else(|| Document {
@@ -262,12 +292,25 @@ pub(crate) fn mutate(
             for (field, value) in fields {
                 document.fields.insert(field, value);
             }
-            document.update_time = Some(now.clone());
-            (Some(document), outcome)
+            document
         }
-        // Both handled above, before `stored` was consumed.
-        Mutation::Delete { .. } | Mutation::Verify { .. } => (None, outcome),
-    }
+        // Both returned above, before `stored` was consumed.
+        Mutation::Delete { .. } | Mutation::Verify { .. } => unreachable!(),
+    };
+
+    // After the mutation, per the contract: a write carrying both an update and
+    // transforms is "equivalent to performing `update` and `transform` to the
+    // same document atomically and in order".
+    let transform_results = transforms::apply(&transforms, &mut document, now);
+    document.update_time = Some(now.clone());
+
+    (
+        Some(document),
+        WriteEffect {
+            outcome,
+            transform_results,
+        },
+    )
 }
 
 /// Check the precondition guarding one pending write.
@@ -302,6 +345,30 @@ pub enum WriteOutcome {
     Verified,
 }
 
+/// What one applied write did: its outcome, plus one value per field transform.
+///
+/// The transform results travel with the outcome because they are only knowable
+/// inside the write — `increment` reports the *new* number, which depends on
+/// the stored one. Reading them back after the commit would report whatever a
+/// later writer left behind instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WriteEffect {
+    pub outcome: WriteOutcome,
+    /// `WriteResult.transform_results`: one value per transform on the write,
+    /// in order. Empty for a write with no transforms.
+    pub transform_results: Vec<Value>,
+}
+
+impl WriteEffect {
+    /// The effect of a write with no transforms.
+    pub fn plain(outcome: WriteOutcome) -> Self {
+        Self {
+            outcome,
+            transform_results: Vec::new(),
+        }
+    }
+}
+
 /// A shared handle to whichever store the process was configured with.
 pub type SharedStore = Arc<dyn Store>;
 
@@ -328,11 +395,17 @@ pub trait Store: Send + Sync + 'static {
     /// Writes are applied in order and a later write sees the effect of an
     /// earlier one in the same batch, which is what makes a transaction that
     /// reads its own writes behave sensibly.
+    ///
+    /// Field transforms on a write are computed here, against the document the
+    /// write's own mutation just produced and inside the same transaction, so
+    /// two concurrent `increment(1)` calls cannot both read the same starting
+    /// value. `now` is the single timestamp every `serverTimestamp()` in the
+    /// batch resolves to.
     async fn commit(
         &self,
         writes: Vec<PendingWrite>,
         now: Timestamp,
-    ) -> StoreResult<Vec<WriteOutcome>>;
+    ) -> StoreResult<Vec<WriteEffect>>;
 
     /// Every document directly inside `parent`/`collection_id`, ordered by
     /// document id in UTF-8 byte order (the order Firestore sorts `__name__`
@@ -430,12 +503,19 @@ pub fn now_timestamp() -> Timestamp {
 }
 
 /// Unwrap the single outcome of a one-write batch.
-fn single(outcomes: Vec<WriteOutcome>) -> StoreResult<WriteOutcome> {
-    outcomes.into_iter().next().ok_or_else(|| {
-        StoreError::Backend(anyhow::anyhow!(
-            "a one-write batch returned no write outcome"
-        ))
-    })
+///
+/// The provided `put`/`merge`/`delete` helpers never carry transforms, so the
+/// effect's transform results are empty and only the outcome is of interest.
+fn single(effects: Vec<WriteEffect>) -> StoreResult<WriteOutcome> {
+    effects
+        .into_iter()
+        .next()
+        .map(|effect| effect.outcome)
+        .ok_or_else(|| {
+            StoreError::Backend(anyhow::anyhow!(
+                "a one-write batch returned no write outcome"
+            ))
+        })
 }
 
 /// In-memory store: a single `BTreeMap` keyed by full document resource name.
@@ -484,10 +564,11 @@ impl Store for MemoryStore {
         &self,
         writes: Vec<PendingWrite>,
         now: Timestamp,
-    ) -> StoreResult<Vec<WriteOutcome>> {
+    ) -> StoreResult<Vec<WriteEffect>> {
         // One lock for the whole batch is what makes it atomic against other
-        // writers. Nothing in this loop awaits, so the guard never crosses a
-        // suspension point.
+        // writers — including against another batch's transforms reading the
+        // same document. Nothing in this loop awaits, so the guard never
+        // crosses a suspension point.
         let mut documents = self
             .documents
             .write()
@@ -509,13 +590,13 @@ impl Store for MemoryStore {
             check_write(&write, stored.as_ref())?;
             if matches!(write.mutation, Mutation::Verify { .. }) {
                 // Nothing to stage: a verification changes no document.
-                outcomes.push(WriteOutcome::Verified);
+                outcomes.push(WriteEffect::plain(WriteOutcome::Verified));
                 continue;
             }
 
-            let (next, outcome) = mutate(write.mutation, stored, &now);
+            let (next, effect) = mutate(write, stored, &now);
             staged.insert(name, next);
-            outcomes.push(outcome);
+            outcomes.push(effect);
         }
 
         for (name, state) in staged {
@@ -616,6 +697,18 @@ pub mod conformance {
         }
     }
 
+    pub fn integer_value(number: i64) -> Value {
+        Value {
+            value_type: Some(ValueType::IntegerValue(number)),
+        }
+    }
+
+    /// Just the outcomes of a batch, for the assertions that do not care what
+    /// any transform on it resolved to.
+    fn outcomes(effects: Vec<WriteEffect>) -> Vec<WriteOutcome> {
+        effects.into_iter().map(|effect| effect.outcome).collect()
+    }
+
     pub fn doc(name: &str, field: &str, text: &str) -> Document {
         Document {
             name: name.to_string(),
@@ -644,6 +737,8 @@ pub mod conformance {
         a_failed_precondition_abandons_the_whole_batch(store, &name("atomic")).await;
         a_batch_reads_its_own_earlier_writes(store, &name("ordered")).await;
         a_verification_changes_nothing_but_can_fail_the_batch(store, &name("verify")).await;
+        transforms_are_computed_inside_the_write(store, &name("transform")).await;
+        transforms_apply_after_the_mutation_they_ride_on(store, &name("transform-order")).await;
         collection_reads_return_only_direct_children(store, &name("scan")).await;
         collection_ids_include_collections_under_an_unwritten_parent(store, &name("ids")).await;
     }
@@ -831,7 +926,7 @@ pub mod conformance {
     /// Writes apply in order, and a later write sees the earlier one — what
     /// makes `create` followed by `update` in one transaction behave sensibly.
     async fn a_batch_reads_its_own_earlier_writes(store: &dyn Store, name: &str) {
-        let outcomes = store
+        let effects = store
             .commit(
                 vec![
                     PendingWrite::guarded(
@@ -852,7 +947,10 @@ pub mod conformance {
             .await
             .expect("ordered batch");
 
-        assert_eq!(outcomes, vec![WriteOutcome::Created, WriteOutcome::Updated]);
+        assert_eq!(
+            outcomes(effects),
+            vec![WriteOutcome::Created, WriteOutcome::Updated]
+        );
         let found = store.get(name).await.expect("get").expect("written");
         assert!(found.fields.contains_key("first"));
         assert!(found.fields.contains_key("second"));
@@ -880,11 +978,14 @@ pub mod conformance {
             ]
         };
 
-        let outcomes = store
+        let effects = store
             .commit(batch(ts(10), &written), ts(20))
             .await
             .expect("the verification holds");
-        assert_eq!(outcomes, vec![WriteOutcome::Verified, WriteOutcome::Created]);
+        assert_eq!(
+            outcomes(effects),
+            vec![WriteOutcome::Verified, WriteOutcome::Created]
+        );
 
         let unchanged = store.get(&read).await.expect("get").expect("still there");
         assert_eq!(
@@ -908,6 +1009,104 @@ pub mod conformance {
         assert!(
             store.get(&doomed).await.expect("get").is_none(),
             "the batch's writes must not survive a failed verification"
+        );
+    }
+
+    /// A field transform reads the stored value and reports the value it wrote.
+    ///
+    /// The point of the assertion is *where* the read happens: the second
+    /// commit's `increment` has to see the first commit's result, so a backend
+    /// that computed transforms before opening its transaction would fail here
+    /// as soon as anything else wrote in between.
+    async fn transforms_are_computed_inside_the_write(store: &dyn Store, name: &str) {
+        let transform = |kind| {
+            vec![PendingWrite::transformed(
+                Mutation::Merge {
+                    name: name.to_string(),
+                    fields: Vec::new(),
+                },
+                None,
+                vec![FieldTransform {
+                    field: "hits".to_string(),
+                    kind,
+                }],
+            )]
+        };
+
+        let effects = store
+            .commit(
+                transform(transforms::TransformKind::Increment(
+                    transforms::Number::Integer(1),
+                )),
+                ts(10),
+            )
+            .await
+            .expect("increment a missing field");
+        assert_eq!(
+            effects,
+            vec![WriteEffect {
+                outcome: WriteOutcome::Created,
+                // A missing field is set to the operand, and the result reports
+                // the number that was written.
+                transform_results: vec![integer_value(1)],
+            }]
+        );
+
+        let effects = store
+            .commit(
+                transform(transforms::TransformKind::Increment(
+                    transforms::Number::Integer(41),
+                )),
+                ts(20),
+            )
+            .await
+            .expect("increment the stored value");
+        assert_eq!(
+            effects,
+            vec![WriteEffect {
+                outcome: WriteOutcome::Updated,
+                transform_results: vec![integer_value(42)],
+            }]
+        );
+
+        let found = store.get(name).await.expect("get").expect("written");
+        assert_eq!(found.fields["hits"], integer_value(42));
+        assert_eq!(found.create_time, Some(ts(10)), "create_time must not move");
+        assert_eq!(found.update_time, Some(ts(20)));
+    }
+
+    /// A write carrying both a mutation and transforms applies them in that
+    /// order, which is what makes `set()` with a `serverTimestamp()` field
+    /// behave: the replace lands first, then the transform fills its field in.
+    async fn transforms_apply_after_the_mutation_they_ride_on(store: &dyn Store, name: &str) {
+        store
+            .put(doc(name, "hits", "stale"), ts(10))
+            .await
+            .expect("put");
+
+        store
+            .commit(
+                vec![PendingWrite::transformed(
+                    // A full replace, so the stale string is gone before the
+                    // transform looks at the field.
+                    Mutation::Put(doc(name, "kept", "v")),
+                    None,
+                    vec![FieldTransform {
+                        field: "hits".to_string(),
+                        kind: transforms::TransformKind::Increment(transforms::Number::Integer(7)),
+                    }],
+                )],
+                ts(20),
+            )
+            .await
+            .expect("put plus transform");
+
+        let found = store.get(name).await.expect("get").expect("written");
+        assert_eq!(found.fields["kept"], string_value("v"));
+        assert_eq!(
+            found.fields["hits"],
+            integer_value(7),
+            "the transform sees the document the put produced, not the one it replaced"
         );
     }
 
