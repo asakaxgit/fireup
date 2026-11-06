@@ -225,10 +225,10 @@ Warnings: 110 warnings (mostly unused code for future features)
 
 ### Test Status
 ```
-Library unit tests:       384 passed, 0 failed    (cargo test --lib)
+Library unit tests:       457 passed, 0 failed    (cargo test --lib)
 Real-export validation:     7 passed, 0 ignored    (cargo test --test real_export_validation)
 Export-fidelity suite:     21 passed, 0 ignored    (cargo test --test export_fidelity_tests)
-Whole suite:              776 passed, 0 failed, 0 ignored
+Whole suite:              874 passed, 0 failed, 0 ignored
                                       (cargo test --lib --tests, FIREUP_TEST_POSTGRES_URL set)
 Test Time: ~6 seconds
 ```
