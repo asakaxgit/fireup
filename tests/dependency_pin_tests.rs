@@ -1291,6 +1291,101 @@ fn check_build_executables_are_pinned(deny: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `Err` if `[licenses] include-build` has been set to anything but `true`.
+///
+/// This is the inverse of `check_dev_licenses_are_checked` above, and the
+/// direction is the whole point. `include-dev` defaults to `false`, so the key
+/// being absent is the hole and the guard demands the line. `include-build`
+/// defaults to `true`, so the key being absent is *correct* and the guard has
+/// nothing to demand — it only has to fail when someone writes the line down
+/// with a `false` on it. Getting that backwards one way forces a harmless
+/// redundant line into the file; getting it backwards the other way guards
+/// nothing at all.
+///
+/// Measured on the stack tip (SAK-238) with the checked set counted using
+/// `allow = []`, which rejects every crate the gate actually looks at, rather
+/// than with `cargo deny list`:
+///
+///   no key (what ships)        217 crates
+///   `include-build = true`     217 crates
+///   `include-build = false`    196 crates
+///
+/// The 21 that disappear are `protoc-bin-vendored` and its eight
+/// platform crates, `prost-build`, `tonic-build`, and the build-only tail they
+/// pull (`autocfg`, `cc`, `find-msvc-tools`, `fixedbitset`, `multimap`,
+/// `petgraph`, `prettyplease`, `regex`, `rustversion`, `shlex`). They are the
+/// same eight protoc binaries `[bans.build]` pins by checksum one table down:
+/// one line here and the crate that ships the `protoc` our `build.rs` executes
+/// stops having its licence looked at.
+///
+/// The count is not the evidence, though. Measured with `smartstring = "=1.0.1"`
+/// — MPL-2.0, a copyleft licence this allow list deliberately excludes —
+/// *inserted into* the `[build-dependencies]` table (appending it to the end of
+/// `Cargo.toml` lands it inside the last `[[test]]`, where cargo ignores it
+/// without a word), confirmed a pure build dependency with
+/// `cargo tree --locked -i smartstring` showing `[build-dependencies] └──
+/// fireup` and no other edge. Tree held fixed, only this key moving:
+///
+///   no key (what ships)             exit 4   `error[rejected]` MPL-2.0
+///   `include-build = false`         exit 0   `licenses ok`          <- hole
+///   `include-build = true`          exit 4   control: the key existing is not
+///                                            what makes it red
+///   + `MPL-2.0` in `allow`          exit 0   control: the red is the licence
+///                                            identifier, not the tree edit
+///   + `[graph] exclude-dev = true`  exit 4   control: a build dependency is
+///                                            not a dev dependency
+///
+/// The third arm is why the second one means anything, and the fifth is why
+/// this guard needs one assertion where `include-dev` needed two. `include-dev`
+/// has a kill switch a table away — `[graph] exclude-dev` empties the graph of
+/// dev dependencies with `include-dev = true` still sitting in the file — and
+/// `include-build` has no counterpart. `[graph]` takes seven keys (`targets`,
+/// `exclude`, `features`, `all-features`, `no-default-features`, `exclude-dev`,
+/// `exclude-unpublished`); there is no `exclude-build` among them, and
+/// `exclude-dev` was measured above to leave the build dependency in place.
+///
+/// Nothing in the `deny` job reports this. Replaying the job's own step body on
+/// the shipping tree, the shipping config, `include-build = false` and
+/// `include-build = true` are all exit 0 with 0 errors and the same 6 warnings
+/// — narrowing the gate makes it quieter, never louder, which is the direction
+/// no one watching CI ever sees.
+///
+/// Why the key is deliberately *not* written out as `include-build = true`:
+/// same reason `[graph] targets` is absent rather than listed (SAK-235). The
+/// default is already the stricter reading, so the line would restate it and
+/// add one more place a future edit can flip. The guard covers both shapes.
+fn check_build_licenses_are_checked(deny: &str) -> Result<(), String> {
+    match setting(deny, "include-build").as_deref() {
+        // Absent is cargo-deny's default, and its default is the strict one.
+        None | Some("true") => Ok(()),
+        Some("false") => Err(
+            "deny.toml sets `[licenses] include-build = false`, which drops build dependencies \
+             out of the licence check — the allow list then says nothing about the crates \
+             Fireup's `build.rs` compiles and runs. Counted with `allow = []`, the checked set \
+             goes from 217 crates to 196; the 21 that vanish are `protoc-bin-vendored` and its \
+             eight platform crates, `prost-build`, `tonic-build` and their build-only tail, so \
+             the crate shipping the `protoc` binary the build executes stops being licence \
+             checked while `[bans.build]` below is still pinning its checksum. Measured on this \
+             tree (SAK-238) with the MPL-2.0 `smartstring` 1.0.1 inserted into \
+             `[build-dependencies]`, a pure build dependency by `cargo tree -i`: with the key \
+             absent and with `include-build = true` the check exits 4 with `error[rejected]`, \
+             and the same tree at `false` exits 0 with `licenses ok`. The `deny` job reports \
+             nothing either way — shipping, `false` and `true` are all exit 0 on the unmutated \
+             tree. Delete the line: the default is true."
+                .into(),
+        ),
+        Some(value) => Err(format!(
+            "deny.toml has a live `[licenses] include-build = {value}`, a value this guard was \
+             not measured at, so it must not report build dependencies as licence checked. \
+             cargo-deny rejects a non-boolean here by itself — measured on this tree (SAK-238), \
+             `\"false\"`, `\"maybe\"` and `0` each exit 1 with `error[wanted]` — so today this \
+             branch is belt and braces. It is here so that a form this reader does not \
+             understand can never be the thing that makes the guard pass. Delete the key: \
+             cargo-deny's default is true, which is what this gate wants."
+        )),
+    }
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -1409,6 +1504,13 @@ fn deny_toml_reads_the_official_advisory_database() {
 #[test]
 fn deny_toml_scans_the_binaries_the_build_runs_and_pins_every_exemption() {
     if let Err(reason) = check_build_executables_are_pinned(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_licence_checks_build_dependencies() {
+    if let Err(reason) = check_build_licenses_are_checked(&repo_file("deny.toml")) {
         panic!("{reason}");
     }
 }
@@ -2811,5 +2913,85 @@ include-dependencies = true
         assert_eq!(bypass_entries("executables = \"deny\"\n"), None);
         assert_eq!(bypass_entries("bypass = []\n"), Some(Vec::new()));
         assert_eq!(bypass_entries("bypass = \"nope\"\n"), None);
+    }
+
+    /// The shipping shape is the key being *absent*, which is the half of this
+    /// guard that reads backwards next to every other check in this file.
+    /// cargo-deny's default for `include-build` is `true`, so there is no line
+    /// to require and nothing for a reader to find.
+    #[test]
+    fn the_build_licence_policy_the_repository_ships_passes() {
+        let deny =
+            "[licenses]\nallow = [\"MIT\"]\nconfidence-threshold = 0.93\ninclude-dev = true\n";
+        assert!(check_build_licenses_are_checked(deny).is_ok());
+    }
+
+    /// The regression itself. One line, and the 21 crates Fireup's build
+    /// compiles and executes — `protoc-bin-vendored` and its eight platform
+    /// binaries, `prost-build`, `tonic-build`, and their build-only tail — stop
+    /// having their licences checked. Measured on the stack tip with the
+    /// MPL-2.0 `smartstring` 1.0.1 inserted into `[build-dependencies]`: exit 0
+    /// and `licenses ok`, where the absent key exits 4.
+    #[test]
+    fn switching_the_build_licence_check_off_fails() {
+        let error = check_build_licenses_are_checked("include-build = false\n")
+            .expect_err("`false` must fail");
+        assert!(error.contains("217 crates to 196"), "{error}");
+        assert!(error.contains("error[rejected]"), "{error}");
+    }
+
+    /// The control for the arm above, measured rather than assumed: writing the
+    /// default out by hand exits 4 on the MPL-2.0 build dependency exactly like
+    /// the absent key, so it must not fail the guard. Without this test, the
+    /// one above would pass on the key merely being present — which is the
+    /// mistake that would make this guard demand a redundant line instead of
+    /// forbidding a harmful one.
+    #[test]
+    fn an_explicit_true_include_build_passes() {
+        assert!(check_build_licenses_are_checked("include-build = true\n").is_ok());
+    }
+
+    /// Fails closed on a value it was not measured at, rather than reading an
+    /// unfamiliar form as the permissive default and reporting the config as
+    /// correct. cargo-deny rejects every one of these by itself (`error[wanted]`,
+    /// exit 1), so this is belt and braces — but the guard must not be the thing
+    /// that waves them through.
+    ///
+    /// (A quoted `"false"` is not in this list: the reader strips quotes, so it
+    /// reads as the bare keyword and lands on the measured `false` arm. Failing
+    /// is the right answer either way.)
+    #[test]
+    fn an_unrecognised_include_build_value_fails() {
+        for value in ["1", "0", "off", "no", "false # really", ""] {
+            let deny = format!("include-build = {value}\n");
+            assert!(
+                check_build_licenses_are_checked(&deny).is_err(),
+                "`include-build = {value}` must not pass"
+            );
+        }
+    }
+
+    /// The inverted twin of `the_comments_about_the_dev_graph_are_not_read_as_the_settings`,
+    /// and the one this key actually needs: `deny.toml` writes `include-build =
+    /// false` out in prose, inside the measured table that explains why the key
+    /// is absent. For `include-dev` the danger was a commented-out *good* value
+    /// rescuing a live bad one. Here it is the opposite — a commented-out *bad*
+    /// value must not be mistaken for a live one, or this guard would fail on
+    /// the documentation of itself.
+    #[test]
+    fn the_comment_about_build_licences_is_not_read_as_the_setting() {
+        let deny = "\
+# Measured (SAK-238): no key is 217 crates, `include-build = false` is 196.
+#   include-build = false
+confidence-threshold = 0.93
+";
+        assert!(check_build_licenses_are_checked(deny).is_ok());
+
+        // And a commented-out default must not rescue a live weakened value.
+        let deny = "\
+# include-build = true
+include-build = false
+";
+        assert!(check_build_licenses_are_checked(deny).is_err());
     }
 }

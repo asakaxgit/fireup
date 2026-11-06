@@ -300,6 +300,56 @@ include-dev = true
 # once without naming any of them. Requiring `exclude` to stay empty would be a
 # new policy decision, not a guard on this one.
 
+# No `include-build` line on purpose, and `dependency_pin_tests` guards the
+# absence rather than the presence. This key is `include-dev`'s sibling one
+# letter apart and it points the other way: `include-dev` defaults to `false`,
+# so the line above has to be written down, while `include-build` defaults to
+# `true`, so the gate is already correct with nothing here. Writing
+# `include-build = true` out by hand would restate the default and add one more
+# line a future edit can flip. Same call SAK-235 made for `[graph] targets`.
+#
+# What it would cost to flip it, counted with `allow = []` rather than with
+# `cargo deny list` (SAK-238):
+#
+#   no key (what ships)        217 crates
+#   `include-build = true`     217 crates
+#   `include-build = false`    196 crates
+#
+# The 21 that disappear are `protoc-bin-vendored` and its eight platform
+# crates, `prost-build`, `tonic-build`, and the build-only tail they pull
+# (`autocfg`, `cc`, `find-msvc-tools`, `fixedbitset`, `multimap`, `petgraph`,
+# `prettyplease`, `regex`, `rustversion`, `shlex`). Those are the same eight
+# protoc binaries `[bans.build]` below pins by checksum: one line here and the
+# crate shipping the `protoc` that `build.rs` executes on every build stops
+# having its licence looked at, while the table that pins its bytes carries on
+# as if nothing had changed.
+#
+# Measured on a real leak rather than a count, with `smartstring = "=1.0.1"`
+# (MPL-2.0) inserted into `[build-dependencies]` — appending it to the end of
+# `Cargo.toml` lands it inside the last `[[test]]`, where cargo ignores it
+# silently — and confirmed a pure build dependency with
+# `cargo tree --locked -i smartstring`. Tree held fixed, only this key moving:
+#
+#   no key (ships)                  exit 4   `error[rejected]` MPL-2.0
+#   `include-build = false`         exit 0   `licenses ok`             <- hole
+#   `include-build = true`          exit 4   control: the key existing is not
+#                                            what makes it red
+#   + `MPL-2.0` in `allow`          exit 0   control: the red is the licence
+#                                            identifier, not the tree edit
+#   + `[graph] exclude-dev = true`  exit 4   control: a build dependency is not
+#                                            a dev dependency
+#
+# That last arm is why this needs one assertion where `include-dev` needs two.
+# `include-dev` has a kill switch a table away; `include-build` has none —
+# `[graph]` takes `targets`, `exclude`, `features`, `all-features`,
+# `no-default-features`, `exclude-dev` and `exclude-unpublished`, and there is
+# no `exclude-build` among them.
+#
+# The `deny` job itself is silent about all of it. Replaying its step body on
+# the unmutated tree, the shipping config, `false` and `true` are identical —
+# exit 0, no errors, the same six warnings. Narrowing this gate makes CI
+# greener, so only a test outside cargo-deny can report it.
+
 [bans]
 # "warn", not "deny". The tree legitimately carries duplicate major versions of
 # half a dozen crates (base64, bitflags, getrandom, hashbrown, indexmap, rand,
