@@ -301,7 +301,10 @@ VALUES = [
         "id": "limits",
         "big": I64_MAX,
         "small": I64_MIN,
-        "ratio": -0.0,
+        # Every entity's `ratio` is non-finite, so the analyzed column type is
+        # unambiguous; `signed_zero` carries the -0.0 sign-preservation case.
+        "ratio": float("nan"),
+        "signed_zero": -0.0,
         "when": PRE_EPOCH_SECONDS,
         # `mixed` holds an int64 here and a double in `coercions`: the same
         # property name with two numeric types across entities of one kind.
@@ -311,7 +314,8 @@ VALUES = [
         "id": "coercions",
         "big": 0,
         "small": -1,
-        "ratio": float("nan"),
+        "ratio": float("inf"),
+        "signed_zero": 0.0,
         "when": FAR_FUTURE_SECONDS,
         "mixed": 7.5,
     },
@@ -319,7 +323,8 @@ VALUES = [
         "id": "infinities",
         "big": 1,
         "small": -2,
-        "ratio": float("inf"),
+        "ratio": float("-inf"),
+        "signed_zero": -0.0,
         "when": 0,
         "mixed": 0,
     },
@@ -327,7 +332,8 @@ VALUES = [
         "id": "negative-infinity",
         "big": 2,
         "small": -3,
-        "ratio": float("-inf"),
+        "ratio": float("nan"),
+        "signed_zero": 1.5,
         "when": TS_SECONDS,
         "mixed": -0.5,
     },
@@ -366,6 +372,7 @@ def onestore_value(row: dict) -> bytes:
         onestore_property("big", pv_int(row["big"])),
         onestore_property("small", pv_int(row["small"])),
         onestore_property("ratio", pv_double(row["ratio"])),
+        onestore_property("signed_zero", pv_double(row["signed_zero"])),
         # GD_WHEN carries microseconds since the epoch, negative before 1970.
         onestore_property("when", pv_int(row["when"] * 1_000_000), MEANING_GD_WHEN),
         onestore_property("mixed", _onestore_number(row["mixed"])),
@@ -399,6 +406,7 @@ def v1_value(row: dict) -> bytes:
             "big": v1_int(row["big"]),
             "small": v1_int(row["small"]),
             "ratio": v1_double(row["ratio"]),
+            "signed_zero": v1_double(row["signed_zero"]),
             "when": v1_timestamp(row["when"]),
             "mixed": _v1_number(row["mixed"]),
             "nested": v1_entity_value(

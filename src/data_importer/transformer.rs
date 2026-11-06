@@ -3,7 +3,8 @@ use crate::schema_analyzer::ddl_generator::{quote_identifier, quote_identifier_l
 use crate::types::{
     datastore_type_tag, FirestoreDocument, ForeignKeyDefinition, NormalizedSchema, TableDefinition,
     ColumnDefinition,
-    PostgreSQLType, DATASTORE_TYPE_BLOB, DATASTORE_TYPE_GEO_POINT, DATASTORE_TYPE_KEY,
+    PostgreSQLType, DATASTORE_TYPE_BLOB, DATASTORE_TYPE_DOUBLE, DATASTORE_TYPE_GEO_POINT,
+    DATASTORE_TYPE_KEY,
     DATASTORE_TYPE_TIMESTAMP, KEY_ID_COLUMN, KEY_KIND_COLUMN, KEY_NAMESPACE_COLUMN,
     KEY_NAME_COLUMN, KEY_PATH_COLUMN, PARENT_KEY_PATH_COLUMN,
 };
@@ -507,6 +508,8 @@ impl DocumentTransformer {
                 Some(Value::String(format!("({},{})", longitude, latitude)))
             }
             (DATASTORE_TYPE_KEY, PostgreSQLType::Text) => field("key_path"),
+            // `NaN`, `Infinity` and `-Infinity` are valid `numeric` input text.
+            (DATASTORE_TYPE_DOUBLE, PostgreSQLType::Numeric(_, _)) => field("literal"),
             // Any tagged value is still faithfully representable as JSONB.
             (_, PostgreSQLType::Jsonb) => Some(value.clone()),
             _ => None,

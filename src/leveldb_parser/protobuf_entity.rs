@@ -10,8 +10,9 @@ use crate::protos::google::datastore::v1::key::path_element::IdType;
 use crate::protos::google::datastore::v1::value::ValueType;
 use crate::protos::google::datastore::v1::{Entity, EntityResult, Key, Value};
 use crate::types::{
-    tagged_blob, tagged_geo_point, tagged_key_reference, tagged_timestamp, DatastoreKey,
-    DatastoreKeyId, DatastoreKeyPathElement, DocumentMetadata, FirestoreDocument,
+    tagged_blob, tagged_geo_point, tagged_key_reference, tagged_non_finite_double,
+    tagged_timestamp, DatastoreKey, DatastoreKeyId, DatastoreKeyPathElement, DocumentMetadata,
+    FirestoreDocument,
 };
 use bytes::Bytes;
 use prost::Message;
@@ -132,14 +133,14 @@ fn datastore_value_to_json(value: &Value) -> Result<JsonValue, FireupError> {
         None | Some(ValueType::NullValue(_)) => Ok(JsonValue::Null),
         Some(ValueType::BooleanValue(v)) => Ok(JsonValue::Bool(*v)),
         Some(ValueType::IntegerValue(v)) => Ok(JsonValue::Number((*v).into())),
-        Some(ValueType::DoubleValue(v)) => Number::from_f64(*v)
+        // A NaN/±Infinity double used to fail the whole record, which dropped
+        // the entity from the import entirely. Both are legal Datastore values
+        // and PostgreSQL can store them, so tag them the way the legacy
+        // `EntityProto` decoder does and keep the entity.
+        Some(ValueType::DoubleValue(v)) => Ok(Number::from_f64(*v)
             .map(JsonValue::Number)
-            .ok_or_else(|| {
-                FireupError::leveldb_parse(
-                    format!("Invalid double value in protobuf Entity: {}", v),
-                    context(),
-                )
-            }),
+            .or_else(|| tagged_non_finite_double(*v))
+            .unwrap_or(JsonValue::Null)),
         Some(ValueType::TimestampValue(ts)) => {
             let datetime = chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
                 .ok_or_else(|| {

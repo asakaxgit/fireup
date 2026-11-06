@@ -4,7 +4,7 @@ use crate::types::{
     datastore_type_tag, CollectionAnalysis, DetectedRelationship, FieldTypeAnalysis,
     FirestoreDocument, NormalizationImpact, NormalizationOpportunity, NormalizationType,
     PostgreSQLType, RelationshipType, SchemaAnalysis, DATASTORE_TYPE_BLOB,
-    DATASTORE_TYPE_GEO_POINT, DATASTORE_TYPE_KEY, DATASTORE_TYPE_TIMESTAMP,
+    DATASTORE_TYPE_DOUBLE, DATASTORE_TYPE_GEO_POINT, DATASTORE_TYPE_KEY, DATASTORE_TYPE_TIMESTAMP,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -368,6 +368,9 @@ impl DocumentStructureAnalyzer {
             DATASTORE_TYPE_BLOB => PostgreSQLType::Bytea,
             DATASTORE_TYPE_GEO_POINT => PostgreSQLType::Point,
             DATASTORE_TYPE_KEY => PostgreSQLType::Text,
+            // NaN/±Infinity, which JSON cannot hold but `numeric` accepts, so
+            // they land in the same column type a finite double would.
+            DATASTORE_TYPE_DOUBLE => PostgreSQLType::Numeric(None, None),
             "string" => {
                 // Determine appropriate string type based on length analysis
                 PostgreSQLType::Text
