@@ -120,11 +120,27 @@ fn compile_one(transform: &ProtoFieldTransform) -> Result<FieldTransform, Status
         ));
     }
 
-    let kind = match transform
-        .transform_type
-        .as_ref()
-        .ok_or_else(|| Status::invalid_argument(format!("transform on {field:?} is empty")))?
-    {
+    let kind = compile_kind(
+        &field,
+        transform
+            .transform_type
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument(format!("transform on {field:?} is empty")))?,
+    )?;
+    Ok(FieldTransform { field, kind })
+}
+
+/// Compile the *operation* half of a transform, for a field name the caller has
+/// already resolved.
+///
+/// Split out of [`compile_one`] for the Datastore surface: a
+/// `google.datastore.v1.PropertyTransform` is the same oneof under a different
+/// name, but it names a **property** and escapes property paths its own way, so
+/// [`entity_map`](crate::local::entity_map) resolves the name and then calls
+/// this. That keeps one definition of which transforms are served and what
+/// their operands must be, rather than two that can drift.
+pub fn compile_kind(field: &str, transform_type: &TransformType) -> Result<TransformKind, Status> {
+    Ok(match transform_type {
         TransformType::SetToServerValue(server_value) => {
             match ServerValue::try_from(*server_value) {
                 Ok(ServerValue::RequestTime) => TransformKind::RequestTime,
@@ -164,9 +180,7 @@ fn compile_one(transform: &ProtoFieldTransform) -> Result<FieldTransform, Status
                 "no SDK surface emits it; increment, serverTimestamp, and the array transforms are served",
             ))
         }
-    };
-
-    Ok(FieldTransform { field, kind })
+    })
 }
 
 /// Apply `transforms` to `document` in order, returning the

@@ -10,7 +10,7 @@
 //! |----------------------|--------|
 //! | `Lookup`             | served |
 //! | `RunQuery`           | served (kind queries; GQL refused) |
-//! | `Commit`             | served |
+//! | `Commit`             | served (incl. `property_transforms`) |
 //! | `BeginTransaction`   | served |
 //! | `Rollback`           | served |
 //! | `AllocateIds`        | served |
@@ -29,9 +29,9 @@ use tonic::{Request, Response, Status};
 use tracing::debug;
 
 use crate::local::entity_map::{
-    ancestor_collection, apply_property_mask, check_project_database, complete_key,
-    document_to_entity, documents_root, entity_to_document, key_is_incomplete,
-    key_to_document_name, normalize_database_id,
+    ancestor_collection, apply_property_mask, check_project_database, compile_property_transforms,
+    complete_key, document_to_entity, documents_root, entity_to_document, key_is_incomplete,
+    key_to_document_name, normalize_database_id, transform_results_to_properties,
 };
 use crate::local::store::{
     Mutation as StoreMutation, PendingWrite, Precondition, SharedStore, WriteOutcome,
@@ -310,14 +310,13 @@ impl DatastoreApi {
         &self,
         mutation: &Mutation,
     ) -> Result<(PendingWrite, Option<Key>), Status> {
-        if mutation.property_transforms.iter().next().is_some()
-            || !mutation.property_transforms.is_empty()
-        {
-            return Err(unimplemented(
-                "Datastore property transforms",
-                "the Firestore field transforms are served; the Datastore spelling of them is not yet mapped onto the entity encoding",
-            ));
-        }
+        // Compiled before anything touches the store, so a batch carrying one
+        // transform we cannot serve fails whole instead of applying half.
+        let transforms = compile_property_transforms(
+            &mutation.property_transforms,
+            &self.project_id,
+            &self.database_id,
+        )?;
         if mutation.property_mask.is_some() {
             return Err(unimplemented(
                 "Datastore property_mask on mutations",
@@ -369,7 +368,11 @@ impl DatastoreApi {
                     (_, precondition) => precondition,
                 };
                 Ok((
-                    PendingWrite::guarded(StoreMutation::Put(document), precondition),
+                    PendingWrite::transformed(
+                        StoreMutation::Put(document),
+                        precondition,
+                        transforms,
+                    ),
                     allocated,
                 ))
             }
@@ -382,7 +385,11 @@ impl DatastoreApi {
                 let document = entity_to_document(entity, &self.project_id, &self.database_id)?;
                 let precondition = conflict_precondition.or(Some(Precondition::Exists(true)));
                 Ok((
-                    PendingWrite::guarded(StoreMutation::Put(document), precondition),
+                    PendingWrite::transformed(
+                        StoreMutation::Put(document),
+                        precondition,
+                        transforms,
+                    ),
                     None,
                 ))
             }
@@ -390,6 +397,13 @@ impl DatastoreApi {
                 if key_is_incomplete(key) {
                     return Err(Status::invalid_argument(
                         "delete mutations require a complete key",
+                    ));
+                }
+                if !transforms.is_empty() {
+                    // The proto: property_transforms "can be set only when the
+                    // operation is `insert`, `update`, or `upsert`".
+                    return Err(Status::invalid_argument(
+                        "property_transforms may not be set on a delete mutation",
                     ));
                 }
                 let name = key_to_document_name(key, &self.project_id, &self.database_id)?;
@@ -593,18 +607,28 @@ impl Datastore for DatastoreApi {
 
         let mut mutation_results = Vec::with_capacity(request.mutations.len());
         for (index, _mutation) in request.mutations.iter().enumerate() {
-            let outcome = mutation_outcomes.get(index).map(|effect| &effect.outcome);
+            let effect = mutation_outcomes.get(index);
             let key = allocated_keys[index].clone();
-            let (create_time, update_time) = match outcome {
+            let (create_time, update_time) = match effect.map(|effect| &effect.outcome) {
                 Some(WriteOutcome::Deleted { .. }) | None => (None, None),
                 Some(_) => (Some(now.clone()), Some(now.clone())),
+            };
+            // One value per transform on this mutation, in request order, as the
+            // store resolved them inside the write's own transaction.
+            let transform_results = match effect {
+                Some(effect) => transform_results_to_properties(
+                    &effect.transform_results,
+                    &self.project_id,
+                    &self.database_id,
+                )?,
+                None => Vec::new(),
             };
             mutation_results.push(MutationResult {
                 key,
                 version: now.seconds,
                 create_time,
                 update_time,
-                transform_results: Vec::new(),
+                transform_results,
                 conflict_detected: false,
             });
         }
