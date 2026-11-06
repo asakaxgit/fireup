@@ -335,7 +335,44 @@ it an `AND` sibling narrowed) and decide in Rust:
 | `<`/`>` on null, geo points, arrays, maps | No cheap SQL ordering, and no real query uses them. |
 | `OR` with one unpushable branch | That branch could match any row, so the whole `OR` could. |
 | `limit()`, `offset()`, cursors | All three are positional, resolved against the ordered result the pre-filter has already fed, so there is no way to know which rows they would keep. |
-| Datastore `RunQuery` | Has its own filter language and its own in-process evaluator; only the Firestore path is pushed down so far. |
+
+#### The Datastore surface pushes down too
+
+`RunQuery` has its own filter language, so there was nothing for it to forward
+until that language was translated into the same compiled predicate — a
+Datastore `Filter` is a different type from the `Predicate` a pre-filter
+carries. [`datastore_filter.rs`](../../src/local/datastore_filter.rs) is that
+translation, and it reuses the SQL above unchanged:
+
+| Datastore filter | Pushed |
+|---|---|
+| `=`, `<`, `<=`, `>`, `>=` on a plain property name | yes |
+| `AND` of those | yes |
+| `AND` with one untranslatable term | the translatable terms are, and the whole filter still decides in process |
+| `HAS_ANCESTOR` | it chooses *which* collection to read rather than narrowing one, so it is not a predicate |
+| `OR`, `IN`, `not-in`, `!=` | no — the in-process evaluator answers these as "no match", so a pre-filter for one would narrow a read whose answer is empty either way |
+| A property *path* (`a.b`), an escaped property name, `__key__` | no |
+
+Two things about the shape of that work are worth knowing:
+
+- **A Datastore `order` does not become a `required_fields` entry**, unlike the
+  Firestore side. Firestore excludes a document that has no value for a sort
+  field, which is what lets its pre-filter demand the field be present;
+  Datastore instead *orders* an entity missing the property first. Copying the
+  Firestore spelling would have dropped those entities from the answer.
+- **The value comparator is shared; the evaluator deliberately is not.** The
+  Datastore evaluator used to compare two values with a function whose
+  fall-through arm returned "equal" for every type pair it did not name, so
+  `priority = 3` matched an entity whose `priority` was a string, a blob, or a
+  list. That also made pushing down `=`, `<=` and `>=` unsound, because the
+  translated predicate would have dropped rows the evaluator was still keeping.
+  Property comparison now goes through the same partial order a `Predicate` is
+  evaluated with, which fixes it — real Datastore returns none of those
+  entities either. What is *not* shared is the evaluation: `RunQuery` still
+  answers with its own evaluator rather than with the translated predicate, so
+  the two stay independent implementations and the differential test has
+  something to catch. See `tests/local_datastore_pushdown_tests.rs` for the
+  three mutations that confirm it does.
 
 #### Where the speedup actually comes from
 
@@ -388,7 +425,7 @@ guessing would cost every write.
 | RPC | Status | Notes |
 |---|---|---|
 | `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
-| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`), `AND`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. |
+| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`), `AND`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
 | `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` (below). |
 | `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. |
 | `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
@@ -758,6 +795,7 @@ src/local/
   transactions.rs    transaction tokens, read sets, and the conflict check
   value_json.rs      Firestore Value ⇄ JSON, the format of data at rest
   entity_map.rs      Datastore Key/Entity ⇄ Firestore document mapping
+  datastore_filter.rs Datastore Filter → compiled Predicate, for pushdown
   http.rs            the HTTP/1.1 surface: GET /, GET /health, and auth routing
   seed.rs            export → store
   firestore.rs       the google.firestore.v1.Firestore service implementation

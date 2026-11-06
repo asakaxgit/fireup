@@ -37,10 +37,11 @@
 //! forwarding were lost. `results_are_identical_with_and_without_pushdown` then
 //! shows why that mutation is invisible to every other test in the tree.
 //!
-//! The same recorder also pins what the *Datastore* data plane does, which is
-//! to read the whole kind and filter in process — see
-//! `datastore_run_query_does_not_push_down_yet`. There are two data planes over
-//! one store, and only one of them pushes down.
+//! The same recorder also guards the *Datastore* data plane, which reads the
+//! same store and translates its own filter language into the same compiled
+//! `Predicate` — see `datastore_run_query_reads_the_kind_through_the_filtered_scan`
+//! and its ancestor-query and negative-control siblings. Two data planes over
+//! one store, both asserted at the same boundary.
 //!
 //! Needs no database and no network beyond loopback, so it runs in plain
 //! `cargo test --test local_pushdown_boundary_tests`.
@@ -569,103 +570,232 @@ async fn a_decorator_that_forgets_the_filtered_kind_scan_is_detected() {
 // The other data plane
 // ---------------------------------------------------------------------------
 
-/// The Datastore surface reads the same store and **does not** push down: this
-/// pins that gap so it is a checked fact rather than folklore.
+/// Start a Datastore-only server over the store stack `wrap` builds on top of
+/// the recorder, seeded with one `Task` entity under an `Owner` ancestor.
 ///
-/// `DatastoreApi::run_structured_query` calls the unfiltered `scan_kind` /
-/// `scan_collection` and then filters entities in process. That is correct, and
-/// it is also the whole collection on the wire for every Datastore query, even
-/// with `--postgres-url`. It is not an oversight in the forwarding sense the
-/// rest of this file is about — a Datastore `Filter` is a different type from
-/// the compiled Firestore `Predicate` a `Prefilter` carries, so there is
-/// nothing to forward until someone writes that translation.
-///
-/// Pinned rather than merely written down because this file's own thesis is
-/// that a read path's choice of scan has to be asserted somewhere. When the
-/// translation lands, this test fails and whoever did the work flips it to the
-/// filtered form — which is the intended way to find out.
-#[tokio::test]
-async fn datastore_run_query_does_not_push_down_yet() {
+/// Same arrangement as [`start_with`], and for the same reason: the recorder
+/// goes *below* whatever `spawn_with_store` and `wrap` assemble, so the log says
+/// what reached the store.
+async fn start_datastore_with(
+    wrap: impl FnOnce(Arc<dyn Store>) -> Arc<dyn Store>,
+) -> (
+    local::RunningServer,
+    DatastoreClient<Channel>,
+    Arc<Mutex<Vec<Read>>>,
+) {
     let recorder = RecordingStore::new(Arc::new(MemoryStore::new()));
     let log = recorder.log();
+    let store = wrap(Arc::new(recorder));
+
     let config = local::LocalConfig::in_memory("127.0.0.1:0".parse().expect("valid bind address"))
         .with_project_id("fireup-test")
         .with_only(local::Service::Datastore);
-    let server = local::spawn_with_store(config, Arc::new(recorder))
+    let server = local::spawn_with_store(config, store)
         .await
         .expect("server binds");
     let mut client = DatastoreClient::connect(format!("http://{}", server.addr))
         .await
         .expect("client connects to the bound port");
 
-    client
-        .commit(datastore::CommitRequest {
-            project_id: "fireup-test".to_string(),
-            mode: datastore::commit_request::Mode::NonTransactional as i32,
-            mutations: vec![datastore::Mutation {
-                operation: Some(datastore::mutation::Operation::Upsert(datastore::Entity {
-                    key: Some(datastore::Key {
-                        partition_id: None,
-                        path: vec![datastore::key::PathElement {
-                            kind: "Task".to_string(),
-                            id_type: Some(datastore::key::path_element::IdType::Name(
-                                "sample".to_string(),
-                            )),
-                        }],
-                    }),
-                    properties: [(
-                        "priority".to_string(),
-                        datastore::Value {
-                            value_type: Some(datastore::value::ValueType::IntegerValue(3)),
-                            ..Default::default()
-                        },
-                    )]
-                    .into_iter()
-                    .collect(),
-                })),
-                ..Default::default()
-            }],
-            ..Default::default()
-        })
-        .await
-        .expect("Commit upsert");
-    drain(&log);
-
-    let answered = client
-        .run_query(datastore::RunQueryRequest {
-            project_id: "fireup-test".to_string(),
-            query_type: Some(datastore::run_query_request::QueryType::Query(
-                datastore::Query {
-                    kind: vec![datastore::KindExpression {
-                        name: "Task".to_string(),
-                    }],
-                    filter: Some(datastore::Filter {
-                        filter_type: Some(datastore::filter::FilterType::PropertyFilter(
-                            datastore::PropertyFilter {
-                                property: Some(datastore::PropertyReference {
-                                    name: "priority".to_string(),
-                                }),
-                                op: datastore::property_filter::Operator::Equal as i32,
-                                value: Some(datastore::Value {
-                                    value_type: Some(datastore::value::ValueType::IntegerValue(3)),
-                                    ..Default::default()
-                                }),
-                            },
-                        )),
-                    }),
+    for path in [
+        vec![task_element("sample")],
+        vec![owner_element("ada"), task_element("owned")],
+    ] {
+        client
+            .commit(datastore::CommitRequest {
+                project_id: "fireup-test".to_string(),
+                mode: datastore::commit_request::Mode::NonTransactional as i32,
+                mutations: vec![datastore::Mutation {
+                    operation: Some(datastore::mutation::Operation::Upsert(datastore::Entity {
+                        key: Some(datastore::Key {
+                            partition_id: None,
+                            path,
+                        }),
+                        properties: [("priority".to_string(), ds_integer(3))]
+                            .into_iter()
+                            .collect(),
+                    })),
                     ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .expect("Commit upsert");
+    }
+    drain(&log);
+    (server, client, log)
+}
+
+fn task_element(name: &str) -> datastore::key::PathElement {
+    datastore::key::PathElement {
+        kind: "Task".to_string(),
+        id_type: Some(datastore::key::path_element::IdType::Name(name.to_string())),
+    }
+}
+
+fn owner_element(name: &str) -> datastore::key::PathElement {
+    datastore::key::PathElement {
+        kind: "Owner".to_string(),
+        id_type: Some(datastore::key::path_element::IdType::Name(name.to_string())),
+    }
+}
+
+fn ds_integer(number: i64) -> datastore::Value {
+    datastore::Value {
+        value_type: Some(datastore::value::ValueType::IntegerValue(number)),
+        ..Default::default()
+    }
+}
+
+/// A Datastore query over `Task` whose `priority = 3` predicate is one the
+/// translation handles, optionally scoped to the `Owner/ada` ancestor.
+fn datastore_pushable_query(ancestor: Option<datastore::Key>) -> datastore::Query {
+    let property = datastore::Filter {
+        filter_type: Some(datastore::filter::FilterType::PropertyFilter(
+            datastore::PropertyFilter {
+                property: Some(datastore::PropertyReference {
+                    name: "priority".to_string(),
+                }),
+                op: datastore::property_filter::Operator::Equal as i32,
+                value: Some(ds_integer(3)),
+            },
+        )),
+    };
+    let filter = match ancestor {
+        None => property,
+        Some(key) => datastore::Filter {
+            filter_type: Some(datastore::filter::FilterType::CompositeFilter(
+                datastore::CompositeFilter {
+                    op: datastore::composite_filter::Operator::And as i32,
+                    filters: vec![
+                        property,
+                        datastore::Filter {
+                            filter_type: Some(datastore::filter::FilterType::PropertyFilter(
+                                datastore::PropertyFilter {
+                                    property: Some(datastore::PropertyReference {
+                                        name: "__key__".to_string(),
+                                    }),
+                                    op: datastore::property_filter::Operator::HasAncestor as i32,
+                                    value: Some(datastore::Value {
+                                        value_type: Some(datastore::value::ValueType::KeyValue(
+                                            key,
+                                        )),
+                                        ..Default::default()
+                                    }),
+                                },
+                            )),
+                        },
+                    ],
                 },
             )),
+        },
+    };
+
+    datastore::Query {
+        kind: vec![datastore::KindExpression {
+            name: "Task".to_string(),
+        }],
+        filter: Some(filter),
+        ..Default::default()
+    }
+}
+
+/// Run a Datastore query and return how many entities came back.
+async fn run_datastore_query(
+    client: &mut DatastoreClient<Channel>,
+    query: datastore::Query,
+) -> usize {
+    client
+        .run_query(datastore::RunQueryRequest {
+            project_id: "fireup-test".to_string(),
+            query_type: Some(datastore::run_query_request::QueryType::Query(query)),
             ..Default::default()
         })
         .await
         .expect("RunQuery is accepted")
-        .into_inner();
+        .into_inner()
+        .batch
+        .expect("a batch")
+        .entity_results
+        .len()
+}
+
+/// The Datastore surface reads the same store, and now reaches it through the
+/// filtered kind scan carrying the translation of its own filter language.
+///
+/// This test used to assert the opposite — it pinned the unfiltered `scan_kind`
+/// so the gap was a checked fact rather than folklore, with a message saying to
+/// flip it to the filtered form when the translation landed. This is that flip.
+#[tokio::test]
+async fn datastore_run_query_reads_the_kind_through_the_filtered_scan() {
+    let (server, mut client, log) = start_datastore_with(|store| store).await;
+
     assert_eq!(
-        answered.batch.expect("a batch").entity_results.len(),
-        1,
-        "the query matches the one entity, so the read actually happened"
+        run_datastore_query(&mut client, datastore_pushable_query(None)).await,
+        2,
+        "the query matches both Tasks, so the read actually happened"
     );
+
+    assert_eq!(
+        drain(&log),
+        vec![Read::KindFiltered {
+            documents_root: ROOT.to_string(),
+            kind: "Task".to_string(),
+            narrowing: true,
+        }],
+        "a Datastore kind query must reach the store as exactly one filtered \
+         kind scan carrying the translated predicate; an unfiltered `scan_kind` \
+         here means the whole kind is on the wire for every Datastore query, \
+         even against `--postgres-url`"
+    );
+
+    server.shutdown().await.expect("server stops");
+}
+
+/// An ancestor query narrows the *collection* read the same way.
+///
+/// Worth its own assertion because it takes the other branch of the match on
+/// `(kind, ancestor)`: `HAS_ANCESTOR` chooses which collection to read and is
+/// stripped out of the predicate, so this is the one shape where the term that
+/// selected the read and the term that was pushed down are different terms.
+#[tokio::test]
+async fn datastore_ancestor_query_reads_a_collection_through_the_filtered_scan() {
+    let (server, mut client, log) = start_datastore_with(|store| store).await;
+    let ancestor = datastore::Key {
+        partition_id: None,
+        path: vec![owner_element("ada")],
+    };
+
+    assert_eq!(
+        run_datastore_query(&mut client, datastore_pushable_query(Some(ancestor))).await,
+        1,
+        "only the Task under Owner/ada is in scope"
+    );
+
+    assert_eq!(
+        drain(&log),
+        vec![Read::CollectionFiltered {
+            parent: format!("{ROOT}/Owner/ada"),
+            collection_id: "Task".to_string(),
+            narrowing: true,
+        }],
+        "the ancestor chose the collection and the property filter still \
+         narrowed it — a `narrowing: false` here would mean the predicate was \
+         thrown away along with the stripped `HAS_ANCESTOR` term"
+    );
+
+    server.shutdown().await.expect("server stops");
+}
+
+/// The same mutation check the Firestore assertions get, for the same reason:
+/// `scan_kind_filtered` is a defaulted method, so "it was called" is satisfied
+/// for free and only the negative control makes the assertion above real.
+#[tokio::test]
+async fn a_decorator_that_forgets_the_filtered_scan_is_detected_on_the_datastore_surface() {
+    let (server, mut client, log) =
+        start_datastore_with(|store| Arc::new(PushdownBlindStore::new(store))).await;
+
+    let matched = run_datastore_query(&mut client, datastore_pushable_query(None)).await;
 
     assert_eq!(
         drain(&log),
@@ -673,10 +803,14 @@ async fn datastore_run_query_does_not_push_down_yet() {
             documents_root: ROOT.to_string(),
             kind: "Task".to_string(),
         }],
-        "the Datastore surface reads the whole kind and filters in process. If \
-         this now fails with `KindFiltered`, the pushdown reached the Datastore \
-         data plane: update this test to the filtered form rather than reverting \
-         the change"
+        "with the forwarding removed the store sees an unfiltered scan, which \
+         is what makes the assertion above a real one rather than one the trait \
+         default satisfies"
+    );
+    assert_eq!(
+        matched, 2,
+        "and the answer is unchanged: the pre-filter is an optimisation, so \
+         losing it costs reads and nothing a result comparison can see"
     );
 
     server.shutdown().await.expect("server stops");
