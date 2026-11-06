@@ -37,7 +37,7 @@ mkdir -p "$OUT_DIR"
 
 # One instrumented test run, then every report format off the same profile data.
 echo "==> running the unit tests under instrumentation"
-cargo llvm-cov --lib --no-report
+cargo llvm-cov --locked --lib --no-report
 
 echo "==> writing reports to $OUT_DIR"
 cargo llvm-cov report --lcov --output-path "$OUT_DIR/lcov.info"
