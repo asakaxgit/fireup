@@ -25,6 +25,29 @@
 # advisories and licences on the Windows/macOS/wasi crates that are in
 # `Cargo.lock` and that anyone building Fireup on those platforms would pull.
 # Checking every target is the stricter reading and needs no maintenance.
+#
+# That was prose and nothing else until SAK-235, which measured it and found it
+# both correct and unenforced. `dependency_pin_tests` now asserts the key is
+# absent or empty, because adding it is a one-line edit that makes this job
+# *greener*. Counted with `allow = []` rather than `cargo deny list`:
+#
+#   no key (what ships)                          217 crates
+#   + targets = ["x86_64-unknown-linux-gnu"]     173 crates
+#   + targets = []                               217 crates
+#
+# The 44 that vanish are the `windows-*` family, `wasi`, `wasm-bindgen*`,
+# `js-sys`, `web-sys`, `r-efi`, `objc2-*`, `redox_syscall`, `hermit-abi`,
+# `bumpalo`, `shlex` and `cc`. It is not only a licence question. With the
+# vulnerable `shlex` 1.2.0 (RUSTSEC-2024-0006) reached as a `cfg(windows)`
+# dependency, the tree held fixed and only this key moved: no key exits 1 and
+# names the advisory, `[linux]` exits 0 with `advisories ok`, and `[windows]`
+# exits 1 again — so the red is lost to which target was picked, not to
+# narrowing the graph as such. The MPL-2.0 `smartstring` 1.0.1 behaves the same
+# way on the licence side (4 / 0 / 4).
+#
+# `[graph] exclude` narrows this too (`exclude = ["windows-sys"]` is 217 -> 206)
+# and is deliberately not guarded, for the reason SAK-234 gave: it names the
+# crates it excuses, so it reads as a decision in the diff.
 all-features = true
 
 [advisories]

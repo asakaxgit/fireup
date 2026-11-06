@@ -751,6 +751,88 @@ fn check_unused_allowed_source_is_deny(deny: &str) -> Result<(), String> {
     }
 }
 
+/// `Err` unless `[graph] targets` leaves every target in the graph.
+///
+/// `deny.toml` has no `targets` list and the comment above `[graph]` says that
+/// is deliberate. This is the assertion that makes the comment binding, because
+/// adding one line there narrows the graph and makes the `deny` job *greener* —
+/// the direction nothing watching CI ever reports.
+///
+/// Measured on the stack tip (SAK-235) by varying only this key, with the
+/// checked set counted using `allow = []`, which rejects every crate the gate
+/// actually looks at, rather than with `cargo deny list`:
+///
+///   shipping config (no key)                     217 crates
+///   + `targets = ["x86_64-unknown-linux-gnu"]`   173 crates
+///   + `targets = []`                             217 crates
+///
+/// The 44 that disappear are the `windows-*` family, `wasi`, `wasip2`,
+/// `wasm-bindgen*`, `js-sys`, `web-sys`, `r-efi`, `objc2-*`,
+/// `core-foundation-sys`, `redox_syscall`, `libredox`,
+/// `android_system_properties`, `hermit-abi`, `bumpalo`, `shlex` and `cc`.
+///
+/// Unlike `include-dev`, this key hides vulnerabilities and not only licences,
+/// which is why the error below leads with the advisory evidence. Both halves
+/// were measured on a tree held fixed while only `[graph]` moved:
+///
+///   `shlex = "=1.2.0"` (RUSTSEC-2024-0006) as a `cfg(windows)` dependency
+///     shipping config          exit 1   `RUSTSEC-2024-0006` / `advisories FAILED`
+///     + `targets = [linux]`    exit 0   `advisories ok`          <- hole
+///     + `targets = [windows]`  exit 1   control: the crate is still vulnerable
+///
+///   `smartstring = "=1.0.1"` (MPL-2.0) as a `cfg(windows)` dependency
+///     shipping config          exit 4   `error[rejected]` MPL-2.0
+///     + `targets = [linux]`    exit 0   `licenses ok`            <- hole
+///     + `targets = [windows]`  exit 4   control: narrowing is not what did it
+///     + `[linux]` + MPL allowed exit 0  control: green has other causes
+///
+/// The `[windows]` arms are the ones that matter: without them a disappearing
+/// red could just as well mean that restricting the graph at all breaks the
+/// check, rather than that *this* restriction hides *these* crates.
+///
+/// An empty list is accepted because it was measured to be the same as no list
+/// (217 crates either way), which is cargo-deny's documented "all targets".
+///
+/// `[graph] exclude` narrows the graph too — `exclude = ["windows-sys"]` takes
+/// the checked set from 217 to 206 — and is deliberately not forbidden here,
+/// for the reason SAK-234 left it alone: it names the crates it excuses, so it
+/// is visible in a diff as a decision, where `targets` excuses a whole platform
+/// by naming a platform we do support. Requiring `exclude` to stay empty is a
+/// new policy decision, not a guard on this one.
+fn check_graph_covers_every_target(deny: &str) -> Result<(), String> {
+    if setting(deny, "targets").is_none() {
+        return Ok(());
+    }
+
+    match setting_array(deny, "targets") {
+        Some(targets) if targets.is_empty() => Ok(()),
+        Some(targets) => Err(format!(
+            "deny.toml sets `[graph] targets = {targets:?}`, which drops every crate that only \
+             builds for a target outside that list — their advisories and their licences stop \
+             being checked and the `deny` job gets *greener* for it. This hides \
+             vulnerabilities, not just licences: measured on this tree (SAK-235) with the \
+             vulnerable `shlex` 1.2.0 (RUSTSEC-2024-0006) reached as a `cfg(windows)` \
+             dependency, no list exits 1 and names the advisory, \
+             `[\"x86_64-unknown-linux-gnu\"]` exits 0 with `advisories ok`, and \
+             `[\"x86_64-pc-windows-msvc\"]` exits 1 again on the identical tree — so the red \
+             is lost to which target was chosen, not to narrowing as such. Counted with \
+             `allow = []`, the checked set goes from 217 crates to 173. Delete the key: \
+             checking every target is the stricter reading and needs no maintenance. An empty \
+             list is accepted too, and was measured to be the same 217 crates."
+        )),
+        None => Err(
+            "deny.toml has a live `[graph] targets` line that is not an array, so this guard \
+             cannot tell which targets it leaves out and must not report the graph as \
+             unrestricted. cargo-deny rejects the scalar form by itself — measured on this \
+             tree (SAK-235), `targets = \"x86_64-unknown-linux-gnu\"` exits 1 with \
+             `error[wanted]: expected an array` — so today this branch is belt and braces. It \
+             is here so that a form this reader does not understand can never be the thing \
+             that makes the guard pass. Delete the key, or write it as an empty array."
+                .into(),
+        ),
+    }
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -841,6 +923,13 @@ fn deny_toml_licence_checks_dev_dependencies_and_leaves_them_in_the_graph() {
 #[test]
 fn deny_toml_fails_on_an_allowed_source_that_nothing_comes_from() {
     if let Err(reason) = check_unused_allowed_source_is_deny(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_leaves_every_build_target_in_the_graph() {
+    if let Err(reason) = check_graph_covers_every_target(&repo_file("deny.toml")) {
         panic!("{reason}");
     }
 }
@@ -1695,5 +1784,98 @@ yanked = \"deny\"
 # disable-yank-checking = true
 ";
         assert!(check_yanked_is_denied(deny).is_ok());
+    }
+
+    #[test]
+    fn the_graph_the_repository_ships_passes() {
+        assert!(check_graph_covers_every_target("[graph]\nall-features = true\n").is_ok());
+    }
+
+    /// The regression itself: one line, and the whole platform-only half of the
+    /// tree stops being checked. Measured on the stack tip with the vulnerable
+    /// `shlex` 1.2.0 as a `cfg(windows)` dependency — no list exits 1 and names
+    /// RUSTSEC-2024-0006, this list exits 0 with `advisories ok`.
+    #[test]
+    fn restricting_the_graph_to_one_target_fails() {
+        let deny = "[graph]\ntargets = [\"x86_64-unknown-linux-gnu\"]\nall-features = true\n";
+        let error = check_graph_covers_every_target(deny).expect_err("a target list must not pass");
+        assert!(error.contains("RUSTSEC-2024-0006"), "{error}");
+        assert!(error.contains("217 crates to 173"), "{error}");
+    }
+
+    /// A list long enough to look thorough still is not every target. These two
+    /// keep the `windows-*` family and drop `wasi`, `wasm-bindgen` and the
+    /// `objc2-*` tree, so the hole is narrower and still open.
+    #[test]
+    fn a_longer_target_list_that_still_leaves_platforms_out_fails() {
+        let deny = "\
+targets = [
+  \"x86_64-unknown-linux-gnu\",
+  \"x86_64-pc-windows-msvc\",
+]
+";
+        assert!(check_graph_covers_every_target(deny).is_err());
+    }
+
+    /// cargo-deny's other spelling for the same key, and it is not cosmetic:
+    /// measured on the stack tip with the MPL-2.0 `smartstring` as a
+    /// `cfg(windows)` dependency, `targets = [{ triple = "…linux-gnu" }]` exits
+    /// 0 with `licenses ok` exactly like the string form. A reader that only
+    /// understood the string form would call this unrestricted.
+    #[test]
+    fn the_table_form_of_a_target_fails_too() {
+        let deny = "targets = [{ triple = \"x86_64-unknown-linux-gnu\" }]\n";
+        let error = check_graph_covers_every_target(deny)
+            .expect_err("the table form narrows the graph the same way");
+        assert!(error.contains("x86_64-unknown-linux-gnu"), "{error}");
+    }
+
+    /// The allowed half, measured rather than assumed: an empty list leaves the
+    /// checked set at 217 crates, the same as no list at all, so it must not
+    /// fail the guard. Without this the test above would pass on the key merely
+    /// being present.
+    #[test]
+    fn an_empty_target_list_passes() {
+        assert!(check_graph_covers_every_target("targets = []\n").is_ok());
+        assert!(check_graph_covers_every_target("targets = [\n]\n").is_ok());
+    }
+
+    /// A live `targets` line this reader cannot parse fails rather than being
+    /// reported as no restriction at all. cargo-deny also rejects this form
+    /// today (`error[wanted]: expected an array`, exit 1, measured), so the
+    /// branch is belt and braces — but a shape the reader does not understand
+    /// must never be the reason it passes.
+    #[test]
+    fn a_target_line_that_is_not_an_array_fails() {
+        let error = check_graph_covers_every_target("targets = \"x86_64-unknown-linux-gnu\"\n")
+            .expect_err("a scalar must not be read as no restriction");
+        assert!(error.contains("not an array"), "{error}");
+    }
+
+    /// `deny.toml` explains in prose why this key is absent, and this change
+    /// adds a measured arms table above `[graph]` that writes the setting out
+    /// four times — including as `+ targets = ["x86_64-unknown-linux-gnu"]`.
+    /// None of that may be read as the setting, or deleting the comment would
+    /// "fix" a file that has the live line in it.
+    #[test]
+    fn the_comments_about_targets_are_not_read_as_the_setting() {
+        let deny = "\
+# No `targets` list on purpose. Restricting the graph to Linux would hide
+# advisories and licences on the Windows/macOS/wasi crates.
+#   + `targets = [\"x86_64-unknown-linux-gnu\"]`   173 crates
+all-features = true
+";
+        assert!(check_graph_covers_every_target(deny).is_ok());
+
+        // And a commented-out key must not rescue a live one beside it.
+        let deny = "\
+# targets = []
+targets = [\"x86_64-unknown-linux-gnu\"]
+";
+        assert!(check_graph_covers_every_target(deny).is_err());
+
+        // Nor may a trailing comment hide a live entry.
+        let deny = "targets = [\"x86_64-unknown-linux-gnu\"]  # just for CI speed\n";
+        assert!(check_graph_covers_every_target(deny).is_err());
     }
 }
