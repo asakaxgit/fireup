@@ -116,7 +116,8 @@ implementation.
 **Capabilities:**
 - Type mapping from Firestore to PostgreSQL:
   - String → VARCHAR/TEXT
-  - Number → NUMERIC/INTEGER
+  - Integer → BIGINT; double → DOUBLE PRECISION (IEEE 754 binary64, so `-0.0`
+    and `NaN`/`±Infinity` survive); mixed integer/double → NUMERIC
   - Boolean → BOOLEAN
   - Timestamp → TIMESTAMP
   - Reference → UUID (foreign keys)

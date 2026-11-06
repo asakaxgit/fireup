@@ -485,9 +485,9 @@ async fn cli_import_edge_fixture_preserves_every_entity() {
         "namespaced keys must stay distinct"
     );
 
-    // NaN and ±Infinity are legal Datastore doubles and legal `numeric` input.
-    // They used to fail the record outright on the v1 decoder and collapse to
-    // NULL on the legacy one.
+    // NaN and ±Infinity are legal Datastore doubles and legal `double
+    // precision` input. They used to fail the record outright on the v1 decoder
+    // and collapse to NULL on the legacy one.
     let ratios = text_rows(
         &importer,
         "SELECT key_path || '=' || ratio::text FROM \"Values\" ORDER BY key_path",
@@ -502,6 +502,28 @@ async fn cli_import_edge_fixture_preserves_every_entity() {
             "Values/negative-infinity=NaN",
         ],
         "non-finite doubles must reach PostgreSQL"
+    );
+
+    // SAK-202: a Datastore double is IEEE 754 binary64, which has a signed
+    // zero. `numeric` does not, so `-0.0` used to read back out of the column
+    // as plain `0` — indistinguishable from the `+0.0` the next row carries.
+    // The `= 0` term keeps "kept its sign" from being satisfiable by some
+    // other negative number that merely renders with a leading minus.
+    let signed_zeroes = text_rows(
+        &importer,
+        "SELECT key_path || '=' || signed_zero::text || '/' || (signed_zero = 0)::text \
+         FROM \"Values\" ORDER BY key_path",
+    )
+    .await;
+    assert_eq!(
+        signed_zeroes,
+        vec![
+            "Values/coercions=0/true",
+            "Values/infinities=-0/true",
+            "Values/limits=-0/true",
+            "Values/negative-infinity=1.5/false",
+        ],
+        "-0.0 must keep its sign in the column and stay distinct from +0.0"
     );
 
     // int64 limits must not round-trip through f64.

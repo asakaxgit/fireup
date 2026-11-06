@@ -136,13 +136,18 @@ export-edge-onestore/
 A non-default namespace is its own partition directory, and the per-kind
 metadata file is named after the partition — not `all_namespaces_*`.
 
-### Known fidelity gap this fixture documents
+### Fidelity gap this fixture closed
 
-A Datastore double maps to PostgreSQL `numeric`, which has no negative zero: the
-`-0.0` in `Values/limits.signed_zero` survives parsing (asserted in
-`tests/export_fidelity_tests.rs`) and then reads back as `0` from the column.
-`double precision` would be the faithful target. Tracked separately; the fixture
-is here so the day that changes, something notices.
+A Datastore double used to map to PostgreSQL `numeric`, which has no negative
+zero: the `-0.0` in `Values/limits.signed_zero` survived parsing and then read
+back as `0` from the column. SAK-202 maps doubles to `double precision`, which
+is the same IEEE 754 binary64 the export carries, so the sign survives all the
+way into the row. Both ends are asserted:
+
+- parser level — `tests/export_fidelity_tests.rs::negative_zero_keeps_its_sign`
+- column level — the `signed_zero` block in
+  `tests/postgres_import_tests.rs::cli_import_edge_fixture_preserves_every_entity`,
+  which distinguishes `-0` from the `+0.0` in `Values/coercions`
 
 ## Regenerating
 

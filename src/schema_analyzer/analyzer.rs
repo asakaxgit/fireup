@@ -359,7 +359,10 @@ impl DocumentStructureAnalyzer {
             // Datastore integers are int64. INTEGER silently overflows on
             // auto-allocated key ids, which routinely exceed int32.
             "integer" => PostgreSQLType::BigInt,
-            "number" => PostgreSQLType::Numeric(None, None),
+            // Datastore doubles are IEEE 754 binary64. `numeric` is decimal
+            // arbitrary precision: it has no -0.0 and does not round-trip every
+            // binary64 value through its decimal text form.
+            "number" => PostgreSQLType::DoublePrecision,
             "uuid" => PostgreSQLType::Uuid,
             // Covers both the decoder's tag and the RFC 3339 string probe:
             // `DATASTORE_TYPE_TIMESTAMP` is itself "timestamp".
@@ -368,9 +371,10 @@ impl DocumentStructureAnalyzer {
             DATASTORE_TYPE_BLOB => PostgreSQLType::Bytea,
             DATASTORE_TYPE_GEO_POINT => PostgreSQLType::Point,
             DATASTORE_TYPE_KEY => PostgreSQLType::Text,
-            // NaN/±Infinity, which JSON cannot hold but `numeric` accepts, so
-            // they land in the same column type a finite double would.
-            DATASTORE_TYPE_DOUBLE => PostgreSQLType::Numeric(None, None),
+            // NaN/±Infinity, which JSON cannot hold but `double precision`
+            // accepts, so they land in the same column type a finite double
+            // would.
+            DATASTORE_TYPE_DOUBLE => PostgreSQLType::DoublePrecision,
             "string" => {
                 // Determine appropriate string type based on length analysis
                 PostgreSQLType::Text

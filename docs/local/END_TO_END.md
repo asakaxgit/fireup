@@ -49,7 +49,7 @@ Everything below is what that script does, and what each step is evidence of.
 |---|---|---|
 | Shape | Normalized relational tables, one per kind | One row per document, fields as `jsonb` |
 | Read with | `psql`, an ORM, a BI tool, anything that speaks SQL | An official Firestore/Datastore SDK, unchanged |
-| Types | Mapped to real PostgreSQL types: `timestamptz`, `bytea`, `point`, `numeric` | The public Firestore value shape, including the four Datastore types [below](#what-seeding-does-with-datastore-value-types) |
+| Types | Mapped to real PostgreSQL types: `timestamptz`, `bytea`, `point`, `double precision` | The public Firestore value shape, including the four Datastore types [below](#what-seeding-does-with-datastore-value-types) |
 | Good for | Reporting, the actual migration, schema review, constraints | Running existing application code locally, tests, a staged migration |
 
 You usually want both, and at the same time: that is the point of pointing them
