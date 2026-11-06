@@ -10,11 +10,17 @@
 //!
 //! [`Prefilter`]: crate::local::query::Prefilter
 //!
-//! ## One comparator, not two that agree
+//! ## The one rule
 //!
-//! The obvious shape for this module is "translate the filter for the store,
-//! keep the in-process evaluator as it was". That shape does not work here, and
-//! the reason is worth writing down because it is what the design turns on.
+//! Everything here is **sound, not exact**, the same contract
+//! [`postgres_filter`](crate::local::postgres_filter) works under. The
+//! predicate this module produces must keep every entity the filter matches; it
+//! is free to keep entities the filter rejects, because the Datastore evaluator
+//! runs afterwards and has the only vote on the answer. Every function
+//! therefore has two legal answers for a filter it cannot translate faithfully:
+//! translate it, or return `None` and let the row through.
+//!
+//! ## What had to be fixed before anything could be pushed
 //!
 //! The Datastore evaluator compared two `datastore.v1.Value`s with a function
 //! whose fall-through arm returned `Ordering::Equal` for **every type pair it
@@ -22,40 +28,53 @@
 //! therefore "equal", so `priority = 3` matched an entity whose `priority` was
 //! `"high"`, a blob, or a list, and so did `priority <= 3` and `priority >= 3`.
 //! Firestore's comparator — the one a `Predicate` is evaluated with — instead
-//! requires the two values to share a type rank, which is also what Datastore's
-//! published value ordering says.
+//! holds that two values of different types are not comparable at all, which is
+//! also what Datastore's published value ordering says.
 //!
-//! So the two comparators disagreed, and they disagreed in the direction that
-//! makes a pushdown *unsound*: translating `priority = 3` into the obvious
-//! `Predicate` would have asked the store to drop rows the in-process filter
-//! was still keeping, and a pre-filter may only ever keep too many. The ops
-//! that happen to be safe under the old comparator are just `<` and `>`, where
-//! a fall-through `Equal` fails the test anyway — which would have left the
-//! most common filter in Datastore, equality, reading the whole kind forever.
+//! That disagreement pointed the wrong way for a pushdown. Translating
+//! `priority = 3` into the obvious `Predicate` would have asked the store to
+//! drop rows the in-process filter was still keeping, and a pre-filter may only
+//! ever keep too many. Under the old comparator the only ops safe to translate
+//! were `<` and `>`, where a fall-through `Equal` fails the test anyway — which
+//! would have left equality, the most common filter in Datastore, reading the
+//! whole kind forever.
 //!
-//! The fix is not a second comparator that is careful to agree. It is to stop
-//! having two: this module translates the filter, and
-//! [`DatastoreApi::run_structured_query`] evaluates the *translated predicate*
-//! in process, through [`Predicate::admits`], whenever the translation is
-//! exact. The pushed-down filter and the in-process filter are then the same
-//! object evaluated by the same code, so "the translation is exact" is true by
-//! construction rather than by inspection of two functions that can drift.
+//! So `property_matches` now compares its two values through
+//! [`query::comparable`], the same partial order a `Predicate` is evaluated
+//! with, after converting them to the Firestore values the store holds.
+//! Entities whose property has a different type from the filter's value stop
+//! matching as a result: a bug fix, and one that corrects the undocumented,
+//! untested behaviour of a fall-through arm rather than anything this server
+//! promised.
 //!
-//! Entities whose properties have a different type from the filter's value stop
-//! matching as a result. That is a bug fix — real Datastore does not return
-//! them either — and it is the undocumented, untested behaviour of a
-//! fall-through arm rather than anything this server promised.
+//! ## What is deliberately *not* shared
+//!
+//! Only the value comparison is. Each surface keeps its own operator table and
+//! its own field lookup, and [`DatastoreApi::run_structured_query`] still
+//! answers with its own evaluator rather than with the predicate this module
+//! produced.
+//!
+//! That separation is the point. Evaluating the translated predicate in process
+//! would make "the translation is correct" true by construction — and also
+//! untestable, because the pushed and full-scan paths would then be the same
+//! filter, and would agree on a *wrong* answer exactly as readily as on a right
+//! one. The first version of this work did that, and the mutation check in
+//! `tests/local_datastore_pushdown_tests.rs` stayed green with `<` translated
+//! as `>`. Two independent implementations compared against each other is what
+//! gives that test something to find.
+//!
+//! [`query::comparable`]: crate::local::query
 //!
 //! ## What translates
 //!
 //! | Filter | Translated |
 //! | --- | --- |
-//! | `=`, `<`, `<=`, `>`, `>=` on a plain property name | yes, exactly |
+//! | `=`, `<`, `<=`, `>`, `>=` on a plain property name | yes |
 //! | `HAS_ANCESTOR` | already removed upstream by `strip_ancestor_filter`; it is *where* to read, not a predicate |
-//! | `AND` of the above | yes, exactly |
+//! | `AND` of the above | yes |
 //! | `AND` with one untranslatable child | the translatable children are pushed; the whole filter still decides in process |
 //! | `OR` | no — the in-process evaluator does not serve `OR` either, and translating it would quietly start |
-//! | `IN`, `NOT_IN`, `!=`, `NOT_EQUAL` | no — the in-process evaluator refuses them, and a pre-filter that implemented them would answer a query the surface rejects |
+//! | `IN`, `NOT_IN`, `!=` | no — the in-process evaluator refuses them, and a pre-filter that implemented them would narrow a query the surface answers as empty |
 //! | A property *path* (`a.b`), an escaped name, `__key__` | no |
 //!
 //! A property's name is a document *field* name under
@@ -74,108 +93,51 @@ use crate::protos::google::datastore::v1::filter::FilterType;
 use crate::protos::google::datastore::v1::property_filter::Operator as PropertyOp;
 use crate::protos::google::datastore::v1::{Filter, PropertyFilter};
 
-/// What a Datastore filter became.
-pub(crate) struct Translated {
-    /// A predicate sound to hand a store as a pre-filter: it keeps every entity
-    /// the filter matches, and may keep more.
-    ///
-    /// `None` means nothing could be translated, so the read stays unfiltered.
-    /// That is always a legal answer — the pre-filter contract is one-sided.
-    pub prefilter: Option<Predicate>,
-    /// Whether `prefilter` is *equivalent* to the filter rather than merely a
-    /// superset of it, so the in-process pass can evaluate it and skip the
-    /// Datastore evaluator entirely.
-    ///
-    /// False whenever any part of the filter did not translate: those parts
-    /// still have to be decided by the original evaluator, which decides the
-    /// whole filter rather than the leftover.
-    pub exact: bool,
-}
-
-impl Translated {
-    /// Nothing translated: read everything, decide everything in process.
-    fn nothing() -> Self {
-        Self {
-            prefilter: None,
-            exact: false,
-        }
-    }
-}
-
-/// Translate the property half of a Datastore query's filter.
+/// Translate the property half of a Datastore query's filter into a pre-filter.
+///
+/// `None` means nothing could be translated, so the read stays unfiltered. That
+/// is always a legal answer — the pre-filter contract is one-sided.
 ///
 /// `filter` is what `strip_ancestor_filter` left behind, so the `__key__
-/// HAS_ANCESTOR` term is already gone — it chose which collection to read and
-/// is not a predicate over properties.
+/// HAS_ANCESTOR` term is already gone: it chose which collection to read and is
+/// not a predicate over properties.
 pub(crate) fn translate(
     filter: Option<&Filter>,
     project_id: &str,
     database_id: &str,
-) -> Translated {
-    let Some(filter) = filter else {
-        // An unfiltered query is exactly the empty predicate, but there is no
-        // point pushing one down: say "nothing to narrow on" and let the store
-        // take its unfiltered path.
-        return Translated {
-            prefilter: None,
-            exact: true,
-        };
-    };
-
-    match filter.filter_type.as_ref() {
+) -> Option<Predicate> {
+    match filter?.filter_type.as_ref() {
         Some(FilterType::PropertyFilter(property)) => {
-            match property_predicate(property, project_id, database_id) {
-                Some(predicate) => Translated {
-                    prefilter: Some(predicate),
-                    exact: true,
-                },
-                None => Translated::nothing(),
-            }
+            property_predicate(property, project_id, database_id)
         }
         Some(FilterType::CompositeFilter(composite)) => {
             // Only `AND` is translated. `OR` is not an oversight: the
             // in-process evaluator serves `AND` alone and answers an `OR`
-            // filter with "no match", so translating `OR` here would change
-            // what a query *returns* under the cover of an optimisation.
+            // filter with "no match", so a pre-filter for one would narrow a
+            // read whose answer is empty either way — and would quietly become
+            // wrong the day `OR` starts being served.
             if CompositeOp::try_from(composite.op) != Ok(CompositeOp::And) {
-                return Translated::nothing();
-            }
-
-            let mut children = Vec::with_capacity(composite.filters.len());
-            let mut exact = true;
-            for child in &composite.filters {
-                let translated = translate(Some(child), project_id, database_id);
-                exact &= translated.exact;
-                if let Some(predicate) = translated.prefilter {
-                    children.push(predicate);
-                }
+                return None;
             }
 
             // Dropping an untranslatable conjunct widens the predicate, which
-            // is the safe direction: an `AND` matches fewer entities than any
-            // one of its terms, so the terms that did translate still narrow
-            // the read correctly.
+            // is the safe direction: an `AND` matches no more entities than any
+            // one of its terms, so the terms that did translate still keep
+            // every entity the whole filter could match.
+            let mut children: Vec<Predicate> = composite
+                .filters
+                .iter()
+                .filter_map(|child| translate(Some(child), project_id, database_id))
+                .collect();
+
             match children.len() {
-                0 => Translated {
-                    prefilter: None,
-                    exact,
-                },
-                1 => Translated {
-                    prefilter: Some(children.remove(0)),
-                    exact,
-                },
-                _ => Translated {
-                    prefilter: Some(Predicate::All(children)),
-                    exact,
-                },
+                0 => None,
+                1 => Some(children.remove(0)),
+                _ => Some(Predicate::All(children)),
             }
         }
-        // An empty filter matches everything on the Datastore side, which no
-        // pre-filter can improve on.
-        None => Translated {
-            prefilter: None,
-            exact: true,
-        },
+        // An empty filter matches everything, which no pre-filter can improve on.
+        None => None,
     }
 }
 
@@ -235,19 +197,48 @@ fn property_predicate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local::datastore::entity_matches;
+    use crate::local::entity_map::{document_to_entity, entity_to_document};
+    use crate::protos::google::datastore::v1::key::path_element::IdType;
+    use crate::protos::google::datastore::v1::key::PathElement;
     use crate::protos::google::datastore::v1::value::ValueType as DsValueType;
     use crate::protos::google::datastore::v1::{
-        CompositeFilter, PropertyReference, Value as DsValue,
+        ArrayValue as DsArrayValue, CompositeFilter, Entity, Key, PropertyReference,
+        Value as DsValue,
     };
     use crate::protos::google::firestore::v1::value::ValueType as FsValueType;
     use crate::protos::google::firestore::v1::{Document, Value as FsValue};
     use std::collections::HashMap;
+
+    const PROJECT: &str = "demo";
 
     fn ds_value(value_type: DsValueType) -> DsValue {
         DsValue {
             value_type: Some(value_type),
             ..Default::default()
         }
+    }
+
+    fn integer(number: i64) -> DsValue {
+        ds_value(DsValueType::IntegerValue(number))
+    }
+
+    fn double(number: f64) -> DsValue {
+        ds_value(DsValueType::DoubleValue(number))
+    }
+
+    fn text(contents: &str) -> DsValue {
+        ds_value(DsValueType::StringValue(contents.to_string()))
+    }
+
+    fn user_key(name: &str) -> DsValue {
+        ds_value(DsValueType::KeyValue(Key {
+            partition_id: None,
+            path: vec![PathElement {
+                kind: "User".to_string(),
+                id_type: Some(IdType::Name(name.to_string())),
+            }],
+        }))
     }
 
     fn property(name: &str, op: PropertyOp, value: DsValue) -> Filter {
@@ -271,11 +262,32 @@ mod tests {
         }
     }
 
-    fn translated(filter: &Filter) -> Translated {
-        translate(Some(filter), "demo", "")
+    fn translated(filter: &Filter) -> Option<Predicate> {
+        translate(Some(filter), PROJECT, "")
     }
 
-    /// A document with the given top-level fields, under a plausible name.
+    /// An entity of kind `Task`, named `id`, with the given properties.
+    fn entity(id: &str, properties: Vec<(&str, DsValue)>) -> Entity {
+        Entity {
+            key: Some(Key {
+                partition_id: None,
+                path: vec![PathElement {
+                    kind: "Task".to_string(),
+                    id_type: Some(IdType::Name(id.to_string())),
+                }],
+            }),
+            properties: properties
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value))
+                .collect(),
+        }
+    }
+
+    /// The document an entity is stored as, which is what a pre-filter sees.
+    fn stored(entity: &Entity) -> Document {
+        entity_to_document(entity, PROJECT, "").expect("the entity converts")
+    }
+
     fn document(fields: Vec<(&str, FsValue)>) -> Document {
         Document {
             name: "projects/demo/databases/(default)/documents/Task/sample".to_string(),
@@ -300,15 +312,160 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_equality_on_a_property_translates_exactly() {
-        let translated = translated(&property(
-            "priority",
+    // -----------------------------------------------------------------------
+    // The soundness invariant
+    // -----------------------------------------------------------------------
+
+    /// Entities spanning the type and presence cases a comparison can trip on.
+    fn corpus() -> Vec<Entity> {
+        vec![
+            entity(
+                "low",
+                vec![("priority", integer(1)), ("owner", text("ada"))],
+            ),
+            entity(
+                "mid",
+                vec![("priority", integer(3)), ("owner", text("ada"))],
+            ),
+            entity(
+                "high",
+                vec![("priority", integer(9)), ("owner", text("bob"))],
+            ),
+            // Numerically equal to `mid` under a different JSON tag.
+            entity("double", vec![("priority", double(3.0))]),
+            // The types the old fall-through comparator called "equal" to every
+            // number, and the ones this invariant exists to pin.
+            entity("string", vec![("priority", text("urgent"))]),
+            entity(
+                "list",
+                vec![(
+                    "priority",
+                    ds_value(DsValueType::ArrayValue(DsArrayValue {
+                        values: vec![integer(3)],
+                    })),
+                )],
+            ),
+            entity(
+                "blob",
+                vec![("priority", ds_value(DsValueType::BlobValue(vec![3])))],
+            ),
+            entity("nan", vec![("priority", double(f64::NAN))]),
+            entity(
+                "null",
+                vec![("priority", ds_value(DsValueType::NullValue(0)))],
+            ),
+            entity("keyed", vec![("assignee", user_key("ada"))]),
+            // No `priority` at all.
+            entity("bare", vec![("owner", text("dan"))]),
+        ]
+    }
+
+    /// Every filter shape, translatable or not.
+    fn filters() -> Vec<Filter> {
+        let mut filters = Vec::new();
+        for op in [
             PropertyOp::Equal,
-            ds_value(DsValueType::IntegerValue(3)),
-        ));
-        assert!(translated.exact, "an equality is fully translatable");
-        let predicate = translated.prefilter.expect("a predicate");
+            PropertyOp::LessThan,
+            PropertyOp::LessThanOrEqual,
+            PropertyOp::GreaterThan,
+            PropertyOp::GreaterThanOrEqual,
+            PropertyOp::NotEqual,
+            PropertyOp::In,
+        ] {
+            for value in [
+                integer(3),
+                double(3.0),
+                text("urgent"),
+                ds_value(DsValueType::NullValue(0)),
+            ] {
+                filters.push(property("priority", op, value));
+            }
+            filters.push(property("assignee", op, user_key("ada")));
+            filters.push(property("missing", op, integer(3)));
+            filters.push(property("profile.plan", op, text("pro")));
+            filters.push(property("__key__", op, integer(3)));
+        }
+        filters.push(conjunction(vec![
+            property("priority", PropertyOp::GreaterThanOrEqual, integer(3)),
+            property("owner", PropertyOp::Equal, text("ada")),
+        ]));
+        filters.push(conjunction(vec![
+            property("priority", PropertyOp::Equal, integer(3)),
+            property("owner", PropertyOp::In, text("ada")),
+        ]));
+        filters.push(Filter {
+            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                op: CompositeOp::Or as i32,
+                filters: vec![
+                    property("priority", PropertyOp::Equal, integer(3)),
+                    property("owner", PropertyOp::Equal, text("bob")),
+                ],
+            })),
+        });
+        filters
+    }
+
+    /// The property a pre-filter has to have, over every filter × entity pair.
+    ///
+    /// A pre-filter may keep an entity the filter rejects; it must never drop
+    /// one the filter matches. This is the whole contract, and it is checked
+    /// against the Datastore evaluator — a separate implementation with its own
+    /// operator table and its own property lookup — rather than against the
+    /// predicate itself, which would make it a tautology.
+    ///
+    /// Cheap, database-free, and the reason the translation can be trusted
+    /// before `tests/local_datastore_pushdown_tests.rs` runs it for real.
+    #[test]
+    fn a_translated_prefilter_never_drops_an_entity_the_filter_matches() {
+        let mut dropped_by_prefilter = 0usize;
+
+        for filter in filters() {
+            let predicate = translated(&filter);
+            for entity in corpus() {
+                let document = stored(&entity);
+                // Round-tripped so the evaluator sees the properties as a query
+                // would, after the store's own conversion.
+                let read_back = document_to_entity(&document, PROJECT, "")
+                    .expect("the stored document converts back");
+                let matched = entity_matches(&read_back, &filter, PROJECT, "");
+
+                match predicate.as_ref() {
+                    None => {
+                        // Nothing translated: the read is unfiltered, so no
+                        // entity can be dropped. Trivially sound.
+                    }
+                    Some(predicate) => {
+                        let kept = predicate.admits(&document);
+                        assert!(
+                            !matched || kept,
+                            "the pre-filter dropped an entity the filter \
+                             matches, which is the one thing it may never do.\n\
+                             filter: {filter:?}\nentity: {entity:?}"
+                        );
+                        if !kept {
+                            dropped_by_prefilter += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            dropped_by_prefilter > 0,
+            "no entity was narrowed away by any pre-filter, so this test \
+             would pass against a translation that returned None for \
+             everything — the corpus is not exercising the feature"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // What translates, and what it means
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn an_equality_on_a_property_translates() {
+        let predicate = translated(&property("priority", PropertyOp::Equal, integer(3)))
+            .expect("an equality translates");
 
         assert!(predicate.admits(&document(vec![("priority", fs_integer(3))])));
         assert!(!predicate.admits(&document(vec![("priority", fs_integer(4))])));
@@ -318,41 +475,44 @@ mod tests {
         );
     }
 
-    /// The behaviour change this module is responsible for, stated as a test.
+    /// The behaviour change this work carried with it, stated as a test.
     #[test]
     fn an_equality_does_not_match_a_property_of_another_type() {
-        let predicate = translated(&property(
-            "priority",
-            PropertyOp::Equal,
-            ds_value(DsValueType::IntegerValue(3)),
-        ))
-        .prefilter
-        .expect("a predicate");
+        let predicate =
+            translated(&property("priority", PropertyOp::Equal, integer(3))).expect("a predicate");
 
         assert!(
-            !predicate.admits(&document(vec![("priority", fs_text("high"))])),
+            !predicate.admits(&document(vec![("priority", fs_text("urgent"))])),
             "a string property is not equal to an integer filter value. The \
              Datastore comparator this replaced returned Ordering::Equal for \
              every type pair it did not name, so it matched — which is also \
-             what made an exact pushdown of `=` impossible"
+             what made pushing down `=` unsound"
+        );
+
+        // And the evaluator agrees, which is what makes the pushdown sound
+        // rather than merely narrower.
+        let entity = entity("string", vec![("priority", text("urgent"))]);
+        assert!(
+            !entity_matches(
+                &entity,
+                &property("priority", PropertyOp::Equal, integer(3)),
+                PROJECT,
+                ""
+            ),
+            "the Datastore evaluator does not match it either"
         );
     }
 
     #[test]
-    fn a_range_filter_translates_exactly() {
+    fn a_range_filter_translates() {
         for (op, matching, missing) in [
             (PropertyOp::LessThan, 2, 3),
             (PropertyOp::LessThanOrEqual, 3, 4),
             (PropertyOp::GreaterThan, 4, 3),
             (PropertyOp::GreaterThanOrEqual, 3, 2),
         ] {
-            let translated = translated(&property(
-                "priority",
-                op,
-                ds_value(DsValueType::IntegerValue(3)),
-            ));
-            assert!(translated.exact, "{op:?} is fully translatable");
-            let predicate = translated.prefilter.expect("a predicate");
+            let predicate =
+                translated(&property("priority", op, integer(3))).expect("a range translates");
             assert!(
                 predicate.admits(&document(vec![("priority", fs_integer(matching))])),
                 "{op:?} keeps {matching}"
@@ -366,23 +526,8 @@ mod tests {
 
     #[test]
     fn a_key_operand_compares_as_the_reference_string_it_is_stored_as() {
-        use crate::protos::google::datastore::v1::key::path_element::IdType;
-        use crate::protos::google::datastore::v1::key::PathElement;
-        use crate::protos::google::datastore::v1::Key;
-
-        let predicate = translated(&property(
-            "owner",
-            PropertyOp::Equal,
-            ds_value(DsValueType::KeyValue(Key {
-                partition_id: None,
-                path: vec![PathElement {
-                    kind: "User".to_string(),
-                    id_type: Some(IdType::Name("ada".to_string())),
-                }],
-            })),
-        ))
-        .prefilter
-        .expect("a key operand translates");
+        let predicate = translated(&property("owner", PropertyOp::Equal, user_key("ada")))
+            .expect("a key operand translates");
 
         assert!(
             predicate.admits(&document(vec![(
@@ -400,20 +545,11 @@ mod tests {
 
     #[test]
     fn an_and_of_translatable_filters_becomes_one_conjunction() {
-        let translated = translated(&conjunction(vec![
-            property(
-                "priority",
-                PropertyOp::GreaterThanOrEqual,
-                ds_value(DsValueType::IntegerValue(3)),
-            ),
-            property(
-                "owner",
-                PropertyOp::Equal,
-                ds_value(DsValueType::StringValue("ada".to_string())),
-            ),
-        ]));
-        assert!(translated.exact);
-        let predicate = translated.prefilter.expect("a predicate");
+        let predicate = translated(&conjunction(vec![
+            property("priority", PropertyOp::GreaterThanOrEqual, integer(3)),
+            property("owner", PropertyOp::Equal, text("ada")),
+        ]))
+        .expect("a conjunction translates");
         assert!(matches!(&predicate, Predicate::All(children) if children.len() == 2));
 
         assert!(predicate.admits(&document(vec![
@@ -432,28 +568,13 @@ mod tests {
     /// The partial case: push what translates, keep deciding the whole filter.
     #[test]
     fn an_and_with_an_untranslatable_child_still_pushes_the_rest() {
-        let translated = translated(&conjunction(vec![
-            property(
-                "priority",
-                PropertyOp::Equal,
-                ds_value(DsValueType::IntegerValue(3)),
-            ),
+        let predicate = translated(&conjunction(vec![
+            property("priority", PropertyOp::Equal, integer(3)),
             // `IN` is not served in process, so it cannot be translated.
-            property(
-                "owner",
-                PropertyOp::In,
-                ds_value(DsValueType::StringValue("ada".to_string())),
-            ),
-        ]));
+            property("owner", PropertyOp::In, text("ada")),
+        ]))
+        .expect("the translatable conjunct is still worth pushing");
 
-        assert!(
-            !translated.exact,
-            "a dropped conjunct means the predicate is a superset, so the \
-             Datastore evaluator still has to decide the answer"
-        );
-        let predicate = translated
-            .prefilter
-            .expect("the translatable conjunct is still worth pushing");
         assert!(
             predicate.admits(&document(vec![("priority", fs_integer(3))])),
             "the surviving conjunct keeps every entity the whole filter could \
@@ -463,37 +584,26 @@ mod tests {
     }
 
     #[test]
-    fn untranslatable_filters_narrow_nothing_and_stay_inexact() {
-        let key_filter = property(
-            "__key__",
-            PropertyOp::Equal,
-            ds_value(DsValueType::StringValue("x".to_string())),
-        );
-        let path_filter = property(
-            "profile.plan",
-            PropertyOp::Equal,
-            ds_value(DsValueType::StringValue("pro".to_string())),
-        );
-        let not_equal = property(
-            "priority",
-            PropertyOp::NotEqual,
-            ds_value(DsValueType::IntegerValue(3)),
-        );
+    fn untranslatable_filters_narrow_nothing() {
         let disjunction = Filter {
             filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
                 op: CompositeOp::Or as i32,
-                filters: vec![property(
-                    "priority",
-                    PropertyOp::Equal,
-                    ds_value(DsValueType::IntegerValue(3)),
-                )],
+                filters: vec![
+                    property("priority", PropertyOp::Equal, integer(3)),
+                    property("owner", PropertyOp::Equal, text("bob")),
+                ],
             })),
         };
 
-        for filter in [key_filter, path_filter, not_equal, disjunction] {
-            let translated = translated(&filter);
+        for filter in [
+            property("__key__", PropertyOp::Equal, text("x")),
+            property("profile.plan", PropertyOp::Equal, text("pro")),
+            property("priority", PropertyOp::NotEqual, integer(3)),
+            property("owner", PropertyOp::In, text("ada")),
+            disjunction,
+        ] {
             assert!(
-                translated.prefilter.is_none() && !translated.exact,
+                translated(&filter).is_none(),
                 "{filter:?} must narrow nothing and leave the answer to the \
                  in-process evaluator"
             );
@@ -501,13 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_filter_is_exact_and_narrows_nothing() {
-        let translated = translate(None, "demo", "");
-        assert!(translated.prefilter.is_none());
-        assert!(
-            translated.exact,
-            "an unfiltered query has no predicate to disagree about, so the \
-             in-process pass has nothing to run"
-        );
+    fn an_absent_filter_narrows_nothing() {
+        assert!(translate(None, PROJECT, "").is_none());
     }
 }

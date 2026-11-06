@@ -677,9 +677,9 @@ fn datastore_pushable_query(ancestor: Option<datastore::Key>) -> datastore::Quer
                                     }),
                                     op: datastore::property_filter::Operator::HasAncestor as i32,
                                     value: Some(datastore::Value {
-                                        value_type: Some(
-                                            datastore::value::ValueType::KeyValue(key),
-                                        ),
+                                        value_type: Some(datastore::value::ValueType::KeyValue(
+                                            key,
+                                        )),
                                         ..Default::default()
                                     }),
                                 },

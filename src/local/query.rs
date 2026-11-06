@@ -432,13 +432,12 @@ impl Predicate {
     /// no entry in that field's index. Returning it would be the one failure
     /// mode that looks like working code.
     ///
-    /// Public because the Datastore data plane evaluates its own queries
-    /// through this, having translated its `Filter` into a `Predicate` — see
-    /// [`datastore_filter`](crate::local::datastore_filter). Two surfaces that
-    /// read one store decide what a value comparison means in exactly one
-    /// place, which is also what makes the pushdown's translation exact
-    /// rather than merely close.
-    pub fn admits(&self, document: &Document) -> bool {
+    /// `pub(crate)` so the Datastore filter translation can be checked against
+    /// the evaluator it has to stay a superset of — see the soundness matrix in
+    /// [`datastore_filter`](crate::local::datastore_filter). Deliberately not
+    /// what the Datastore data plane *uses* to answer a query: that stays its
+    /// own evaluator, so the translation has an independent reference.
+    pub(crate) fn admits(&self, document: &Document) -> bool {
         self.matches(document)
     }
 
@@ -489,34 +488,58 @@ fn compare_matches(op: Comparison, actual: &Value, expected: &Value) -> bool {
     }
 }
 
-/// Whether `actual` compares to `expected` in one of `wanted` orderings.
+/// Order two values the way a **filter** does, or `None` when a filter cannot
+/// compare them at all.
 ///
-/// An inequality against a value of a different type never matches. Firestore
-/// keeps one index per (field, type), so `where('age', '>', 5)` does not return
-/// a document whose `age` is the string `"old"`, even though strings sort after
-/// numbers in the global value order.
+/// Two values are incomparable in exactly two cases, and both mean "no match"
+/// for every comparison operator rather than some fallback ordering:
+///
+/// - **Different types.** Firestore keeps one index per (field, type), so
+///   `where('age', '>', 5)` does not return a document whose `age` is the
+///   string `"old"`, even though strings sort after numbers in the global value
+///   order. Datastore's published value ordering says the same.
+/// - **`NaN`.** It is not ordered against anything, including itself; `IS_NAN`
+///   is the only way to select it.
+///
+/// `pub(crate)` because the Datastore surface compares *its* property values
+/// through this, having converted them to the Firestore values they are stored
+/// as. The two surfaces keep their own operator tables and their own field
+/// lookup — which is what leaves the pushdown's translation something to get
+/// wrong, and therefore something a differential test can catch — but they do
+/// not get their own answer to "is this string less than that integer".
+pub(crate) fn comparable(left: &Value, right: &Value) -> Option<Ordering> {
+    if type_rank(left) != type_rank(right) {
+        return None;
+    }
+    if is_nan(left) || is_nan(right) {
+        return None;
+    }
+    Some(compare_values(left, right))
+}
+
+/// The **total** order over values, for sorting rather than filtering.
+///
+/// Distinct from [`comparable`] on purpose: a sort comparator has to answer for
+/// every pair, so this orders across types by their rank and treats `NaN` as
+/// equal to itself. `pub(crate)` for the Datastore surface's `order`, which
+/// sorts entities and therefore needs the total answer, not the filter's.
+pub(crate) fn total_order(left: &Value, right: &Value) -> Ordering {
+    compare_values(left, right)
+}
+
+/// Whether `actual` compares to `expected` in one of `wanted` orderings.
 fn ordered(actual: &Value, expected: &Value, wanted: &[Ordering]) -> bool {
-    if type_rank(actual) != type_rank(expected) {
-        return false;
-    }
-    // `NaN` is not ordered against anything, including itself: `IS_NAN` is the
-    // only way to select it.
-    if is_nan(actual) || is_nan(expected) {
-        return false;
-    }
-    wanted.contains(&compare_values(actual, expected))
+    comparable(actual, expected).is_some_and(|ordering| wanted.contains(&ordering))
 }
 
 /// Equality as a *filter* sees it.
 ///
 /// Distinct from `compare_values(..) == Equal` in one place: ordering has to be
 /// a total order, so it treats `NaN` as equal to itself, while an equality
-/// filter on `NaN` must never match.
+/// filter on `NaN` must never match. That is the same distinction
+/// [`comparable`] draws, so it is drawn once, here.
 fn values_equal(left: &Value, right: &Value) -> bool {
-    if is_nan(left) || is_nan(right) {
-        return false;
-    }
-    values_equivalent(left, right)
+    comparable(left, right) == Some(Ordering::Equal)
 }
 
 /// Equality as the **array field transforms** see it.
