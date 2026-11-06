@@ -257,8 +257,8 @@ Three seeding limits, all deliberate refusals rather than silent results:
 - **A document that cannot be mapped fails the command.** `seed` prints each
   reason and exits non-zero.
 
-Everything else that is not production Firestore — no realtime listeners, no
-aggregations, no field transforms, no security rules, unsigned auth tokens — is
+Everything else that is not production Firestore — in-process-only realtime
+listeners, no aggregations, no security rules, unsigned auth tokens — is
 enumerated in the
 [fidelity matrix](README.md#fidelity-matrix). The rule there holds here too:
 **an unsupported feature is an explicit error, never a wrong answer.**

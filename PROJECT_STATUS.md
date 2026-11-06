@@ -356,13 +356,32 @@ and `proto/`, without which the image could not have compiled the generated
 stubs at all.
 
 **Still unserved** (answer `UNIMPLEMENTED` with a message naming the gap):
-realtime listeners (`Listen`, streaming `Write`), aggregation queries,
-`PartitionQuery`, field transforms, nested paths in an `update_mask`,
+the streaming `Write` RPC, aggregation queries, `PartitionQuery`,
 point-in-time reads, and security rules. The fidelity matrix in
 `docs/local/README.md` is the authoritative list.
 
 Collection group queries, query cursors, and nested field paths in filters,
-orders, projections, and read masks are served as of SAK-191.
+orders, projections, and read masks are served as of SAK-191; field transforms
+as of SAK-190; realtime listeners as of SAK-189, below.
+
+**Phase 2.1 (SAK-189, November 6 2026)** — realtime listeners:
+
+- `Listen` is served for document watches (`DocumentsTarget`) and query watches
+  (`QueryTarget`, every query shape the matrix already covers, collection group
+  queries included), which is what `onSnapshot()` in the official SDKs uses.
+- The change feed is a `Store` decorator, so it sits *below* the data plane:
+  every Firestore write RPC, a Datastore `Commit`, and `fireup local seed` all
+  reach a Firestore listener without knowing a listener exists.
+- A query target is re-evaluated per change to its collection, which is what
+  keeps `limit`/`offset`/`orderBy` honest — a write that cannot affect a limited
+  result set reports nothing.
+- An unsupported target is refused as a `TargetChange::REMOVE` carrying the
+  cause, not by failing the call, so one bad target does not take down the other
+  listeners on the same stream. `read_time` resumes are refused; resume tokens
+  are never issued, so a reconnect re-snapshots.
+- **Known limit:** the feed is in-process. With `--postgres-url`, a write by a
+  *different* process does not wake these listeners — nothing polls the table.
+
 
 **Phase L (SAK-168, November 4 2026)** — Firebase Auth / Identity Platform, in
 parallel with Phase 2 and without waiting for a Phase 2 exit:

@@ -9,12 +9,13 @@
 // Run it via scripts/smoke-local-firestore.sh, which starts and stops the
 // server for you. Assumes FIRESTORE_EMULATOR_HOST is already exported.
 //
-// The checks are grouped as document CRUD (Phase 0/1) and then queries,
-// collection listings, and transactions (Phase 2). The SDK picks its own RPCs:
-// .get() on a document goes to BatchGetDocuments, .set() goes to Commit, a
-// query goes to RunQuery, listDocuments() goes to ListDocuments with
-// show_missing, and runTransaction() goes to BeginTransaction + Commit. That is
-// exactly why this layer exists alongside the Rust tests.
+// The checks are grouped as document CRUD (Phase 0/1), then queries, collection
+// listings, and transactions (Phase 2), then realtime listeners (Phase 2.1).
+// The SDK picks its own RPCs: .get() on a document goes to BatchGetDocuments,
+// .set() goes to Commit, a query goes to RunQuery, listDocuments() goes to
+// ListDocuments with show_missing, runTransaction() goes to BeginTransaction +
+// Commit, and onSnapshot() opens a bidirectional Listen stream it drives
+// itself. That is exactly why this layer exists alongside the Rust tests.
 
 import { FieldPath, FieldValue, Firestore, Timestamp } from '@google-cloud/firestore'
 import { strict as assert } from 'node:assert'
@@ -48,6 +49,56 @@ const expectCode = async (expected, fn) => {
     return
   }
   assert.fail(`expected the call to fail with gRPC code ${expected}, but it succeeded`)
+}
+
+// How long a listener gets to deliver a snapshot. Long enough not to flake,
+// short enough that a listener which never fires fails the check instead of
+// hanging the run — which is the failure mode a realtime listener has.
+const WATCH_TIMEOUT_MS = 5000
+
+const withTimeout = (promise, label) => {
+  let timer
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`timed out after ${WATCH_TIMEOUT_MS}ms waiting for ${label}`)), WATCH_TIMEOUT_MS)
+    }),
+  ])
+}
+
+// Turn an `onSnapshot` listener into a queue a check can await one snapshot at
+// a time. Written this way because the interesting assertions are about the
+// *sequence* of snapshots — initial state, then one per change — and a plain
+// callback makes that ordering impossible to assert.
+const snapshotQueue = (attach) => {
+  const queued = []
+  const waiters = []
+
+  const deliver = (value) => {
+    const waiter = waiters.shift()
+    if (waiter) {
+      waiter(value)
+    } else {
+      queued.push(value)
+    }
+  }
+
+  const unsubscribe = attach(
+    (snapshot) => deliver({ snapshot }),
+    (error) => deliver({ error }),
+  )
+
+  const next = async (label) => {
+    const value =
+      queued.shift() ??
+      (await withTimeout(new Promise((resolve) => waiters.push(resolve)), label))
+    if (value.error) {
+      throw value.error
+    }
+    return value.snapshot
+  }
+
+  return { next, unsubscribe }
 }
 
 const main = async () => {
@@ -501,6 +552,103 @@ const main = async () => {
     await expectCode(GRPC_UNIMPLEMENTED, () =>
       counters.doc('page').update({ 'nested.at': FieldValue.serverTimestamp() }),
     )
+  })
+
+  // ---- Phase 2.1: realtime listeners ---------------------------------------
+  //
+  // The SDK drives these over the bidirectional `Listen` stream and does a lot
+  // of its own bookkeeping: it assigns the target id, accumulates document
+  // changes, and only hands a snapshot to the application when the server says
+  // the stream has reached a consistent point. None of that is visible from the
+  // Rust-side tests, which is exactly why these checks live here.
+
+  const watched = db.collection('watched')
+
+  await check('onSnapshot() on a document delivers the current state, then each change', async () => {
+    const ref = watched.doc('alice')
+    await ref.set({ city: 'SF' })
+
+    const listener = snapshotQueue((onNext, onError) => ref.onSnapshot(onNext, onError))
+    try {
+      const initial = await listener.next('the initial document snapshot')
+      assert.equal(initial.exists, true, 'a listener opens with the state already in the store')
+      assert.equal(initial.get('city'), 'SF')
+
+      await ref.update({ city: 'LA' })
+      const updated = await listener.next('the snapshot after an update')
+      assert.equal(updated.get('city'), 'LA')
+
+      await ref.delete()
+      const deleted = await listener.next('the snapshot after a delete')
+      assert.equal(deleted.exists, false, 'a delete reaches the listener as a non-existent snapshot')
+    } finally {
+      listener.unsubscribe()
+    }
+  })
+
+  await check('onSnapshot() on a missing document reports a non-existent snapshot', async () => {
+    const ref = watched.doc('never-written')
+    const listener = snapshotQueue((onNext, onError) => ref.onSnapshot(onNext, onError))
+    try {
+      const initial = await listener.next('the initial snapshot of a missing document')
+      assert.equal(initial.exists, false)
+
+      // And it still fires when the document appears.
+      await ref.set({ city: 'NYC' })
+      const created = await listener.next('the snapshot after the document is created')
+      assert.equal(created.exists, true)
+      assert.equal(created.get('city'), 'NYC')
+    } finally {
+      listener.unsubscribe()
+    }
+  })
+
+  await check('onSnapshot() on a query reports documents entering and leaving the result set', async () => {
+    const query = watched.where('city', '==', 'SF')
+    const listener = snapshotQueue((onNext, onError) => query.onSnapshot(onNext, onError))
+    try {
+      const initial = await listener.next('the initial query snapshot')
+      assert.equal(initial.size, 0, 'nothing matches yet')
+
+      await watched.doc('bob').set({ city: 'SF' })
+      const added = await listener.next('the snapshot after a matching write')
+      assert.deepEqual(added.docs.map((d) => d.id), ['bob'])
+      assert.deepEqual(
+        added.docChanges().map((c) => [c.type, c.doc.id]),
+        [['added', 'bob']],
+        'the SDK should see this as an addition to the result set',
+      )
+
+      // Still in the collection, no longer in the result set.
+      await watched.doc('bob').update({ city: 'LA' })
+      const dropped = await listener.next('the snapshot after the document stops matching')
+      assert.equal(dropped.size, 0)
+      assert.deepEqual(
+        dropped.docChanges().map((c) => [c.type, c.doc.id]),
+        [['removed', 'bob']],
+      )
+    } finally {
+      listener.unsubscribe()
+    }
+  })
+
+  await check('onSnapshot() on a query ignores writes outside it', async () => {
+    const query = watched.where('city', '==', 'SF')
+    const listener = snapshotQueue((onNext, onError) => query.onSnapshot(onNext, onError))
+    try {
+      await listener.next('the initial query snapshot')
+
+      await db.collection('unwatched').doc('x').set({ city: 'SF' })
+      await users.doc('alice').update({ age: 99 })
+
+      await assert.rejects(
+        listener.next('a snapshot that should never arrive'),
+        /timed out/,
+        'a write outside the query must not wake its listener',
+      )
+    } finally {
+      listener.unsubscribe()
+    }
   })
 
   await check('an unsupported query reports a clear UNIMPLEMENTED instead of hanging', async () => {
