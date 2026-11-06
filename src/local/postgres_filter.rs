@@ -113,9 +113,9 @@ const MATCHES_NOTHING: &str = "false";
 /// Width of the canonical timestamp encoding, `YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`.
 ///
 /// Within that width the encoding is fixed-field, so its byte order *is*
-/// chronological order. A timestamp outside years 0001–9999 encodes wider and
-/// is excluded from the comparison instead of being compared wrongly.
-const CANONICAL_TIMESTAMP_LEN: usize = 30;
+/// chronological order. Taken from the encoder rather than restated, because
+/// the whole comparison below is unsound the moment the two disagree.
+const CANONICAL_TIMESTAMP_LEN: usize = value_json::ENCODED_TIMESTAMP_LEN;
 
 /// Accumulates bound parameters and hands out their placeholders.
 struct Binder {
@@ -451,11 +451,17 @@ fn numeric_comparison(
 /// RFC 3339 with four year digits, nine fractional digits and a `Z`, which is
 /// fixed-field, so byte order is chronological order.
 ///
-/// A year outside 0001–9999 encodes wider than that, so such a row is kept
-/// rather than compared and the in-process engine decides it. That is a margin
-/// and not a case the store can reach today: `value_json` cannot decode its own
-/// encoding of such a timestamp (SAK-205), so a document carrying one is
-/// already unreadable for reasons that have nothing to do with queries.
+/// The guard on the stored side is for rows a pre-SAK-205 build wrote, whose
+/// year sits outside 0001–9999 and whose encoding is therefore both wider and
+/// signed — `+11476-…` sorts *before* `2023-…` byte-wise, so comparing one
+/// would drop a row that matches. Such a row is kept as a candidate instead
+/// and the in-process engine decides it. `value_json` no longer writes one,
+/// but it still reads one back, so this is a live case and not a margin; see
+/// `tests/local_query_pushdown_tests.rs`.
+///
+/// The guard on the query side is for the same value arriving as the operand:
+/// `value_json::encode` refuses it, so there is no text to compare against and
+/// the filter is simply not pushed down.
 fn timestamp_range(
     path: &FieldPath,
     op: &str,

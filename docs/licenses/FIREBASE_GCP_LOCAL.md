@@ -343,6 +343,27 @@ copied or consulted. What is not served stays an explicit `UNIMPLEMENTED` or
 `INVALID_ARGUMENT`: `maximum`, `minimum`, a transform on a nested field path,
 and the Datastore spelling (`Mutation.property_transforms`).
 
+### SAK-205 notes — timestamp range in the stored value encoding
+
+**No new Google or Firebase artefact, no new proto, no new Rust dependency, and
+no new npm package.** The proto pin is unchanged at googleapis `57aa4dbc`.
+
+The years 0001–9999 bound this change enforces is **published**, not inferred
+from any emulator. It is the documented range of `google.protobuf.Timestamp`
+itself — `0001-01-01T00:00:00Z` to `9999-12-31T23:59:59.999999999Z`, carried
+into this tree in the `prost-types` doc comment on `Timestamp`
+(Apache-2.0, already rowed above) — and it matches the timestamp range in the
+public Firestore data-types documentation. Nothing was inspected, run, or
+reverse-engineered to find it; the previous behaviour was simply wider than the
+format it writes.
+
+**Fidelity limits this change records rather than hides.** A timestamp outside
+that range now fails the write with `INVALID_ARGUMENT` in both stores instead
+of being written and then failing every read. Payloads a previous build wrote
+with a signed five-digit year remain readable, which is a deliberately wider
+read path than write path and is documented as such in
+`src/local/value_json.rs` and `docs/local/README.md`.
+
 ### SAK-195 notes — managed-export fidelity regression fixtures
 
 **No new Google or Firebase artefact, no new proto, no new Rust dependency, and

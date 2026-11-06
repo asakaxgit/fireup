@@ -805,6 +805,16 @@ The table is created in the connection's default schema, so a role whose
 type an SDK can store, including `int64` past 2^53 (written as a string),
 non-finite doubles, raw bytes, and nested maps and arrays.
 
+A timestamp is written as RFC 3339 with nanosecond precision and a `Z`, which
+is a fixed 30 bytes — the property the
+[pushdown](#query-pushdown-postgres-only) relies on to compare timestamps as
+text. That holds only for years 0001–9999, which is the range both
+`google.protobuf.Timestamp` and Firestore are specified for, so a timestamp
+outside it is refused with `INVALID_ARGUMENT` at the **write**, by both stores.
+Rows a build before that check wrote — the year appears signed and five digits
+wide, `+11476-…` — are still read back exactly, and are kept out of the text
+comparison rather than compared wrongly.
+
 ## Protos
 
 The `.proto` files under `proto/google/` are vendored from the public
