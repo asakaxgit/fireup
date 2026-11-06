@@ -659,14 +659,18 @@ spelling of Firestore's `update_mask` + `update_transforms`.
   not weaken the operation's precondition, and on a `delete` it is ignored.
 - Verified by 5 new gRPC tests in `tests/local_datastore_tests.rs` (16 total), a
   new masked-deletion case in the shared store contract — so **both** backends
-  assert it — a new Firestore gRPC test and unit test (47 and 464), and new
-  steps in both SDK smokes: Datastore 10/10 **against both stores**, Firestore
-  47/47, with Google's official client libraries.
-- Nine new rows in SAK-194's conformance suite (`89/89 matrix features
+  assert it — and a new Firestore gRPC test plus unit test (47 and 475). New
+  steps in both SDK smokes, with Google's official client libraries: Datastore
+  10/10 **against both stores**, Firestore 51/51.
+- Nine new rows in SAK-194's conformance suite (`88/88 matrix features
   verified`, in-memory **and** PostgreSQL), seven of them a new
   `#### Datastore property_mask on a mutation` table in the fidelity matrix. The
   `fidelity_matrix_tests` drift gate caught the new README rows before they had
   probes, which is exactly what it is for.
+- Stacked on [SAK-189](/SAK/issues/SAK-189) (PR #67): both changes edit
+  `matrix.json` and `probes-firestore.mjs` in the same region, and SAK-189
+  removes the `limits.listen-sdk-retry-loop` row this layer sits next to. All
+  gates above were re-run after that rebase.
 
 ---
 
