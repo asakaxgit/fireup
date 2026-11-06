@@ -73,7 +73,14 @@ prost-build = "0.12"
 tonic-build = { version = "0.11", default-features = false, features = ["prost", "transport"] }
 
 [dev-dependencies]
-serde_yaml = "0.9"
+# YAML for `tests/workflow_yaml_tests.rs`. Not `serde_yaml`: it is deprecated
+# and reaches `unsafe-libyaml`, a c2rust translation of libyaml whose repository
+# was archived read-only in 2024 (RUSTSEC-2024-0449, unmaintained, no patched
+# version). `saphyr` is the maintained YAML 1.2 parser in safe Rust, and
+# `serde_yaml_ng` is not an alternative here because it depends on the same
+# `unsafe-libyaml`. The test needs a document to walk rather than a struct to
+# deserialize, so plain `saphyr` and not `serde-saphyr`. See SAK-225.
+saphyr = "0.3"
 tempfile = "3.8"
 tokio-test = "0.4"
 
