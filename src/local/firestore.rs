@@ -35,7 +35,7 @@ use tonic::{Request, Response, Status};
 use tracing::debug;
 
 use crate::local::names::{parse_document_name, parse_parent_name};
-use crate::local::query::Query;
+use crate::local::query::{self, Query};
 use crate::local::store::{self, now_timestamp, Mutation, PendingWrite, SharedStore};
 use crate::local::transactions::Transactions;
 use crate::protos::google::firestore::v1::run_query_request::QueryType;
@@ -145,8 +145,10 @@ fn auto_id() -> String {
 
 /// Apply a response `DocumentMask`, dropping fields the caller did not ask for.
 ///
-/// Phase 0 handles simple top-level field names. Nested (`a.b`) and quoted
-/// (`` `a&b` ``) field paths are rejected rather than silently mishandled.
+/// Nested (`a.b`) and backtick-quoted (`` `a&b` ``) paths are read with the
+/// query engine's field-path parser, so a mask and a `select()` projection
+/// select exactly the same thing: masking `a.b` returns an `a` holding only
+/// `b`, not a flattened `a.b` and not the whole of `a`.
 fn apply_mask(document: &mut Document, mask: &Option<DocumentMask>) -> Result<(), Status> {
     let Some(mask) = mask else {
         return Ok(());
@@ -155,24 +157,17 @@ fn apply_mask(document: &mut Document, mask: &Option<DocumentMask>) -> Result<()
         return Ok(());
     }
 
-    let wanted = simple_field_paths(&mask.field_paths)?;
-    document
-        .fields
-        .retain(|field, _| wanted.iter().any(|path| path == field));
+    let wanted = field_paths(&mask.field_paths)?;
+    query::retain_field_paths(&mut document.fields, &wanted);
     Ok(())
 }
 
-/// Validate that every field path is a single unquoted segment and return them.
-fn simple_field_paths(field_paths: &[String]) -> Result<Vec<String>, Status> {
-    for path in field_paths {
-        if path.contains('.') || path.contains('`') {
-            return Err(unimplemented(
-                &format!("nested field path {path:?}"),
-                "field-path masks land with the query engine",
-            ));
-        }
-    }
-    Ok(field_paths.to_vec())
+/// Parse every path in a mask.
+fn field_paths(field_paths: &[String]) -> Result<Vec<query::FieldPath>, Status> {
+    field_paths
+        .iter()
+        .map(|path| query::FieldPath::parse(path))
+        .collect()
 }
 
 /// The fields an update mask selects, in mask order.
@@ -180,18 +175,31 @@ fn simple_field_paths(field_paths: &[String]) -> Result<Vec<String>, Status> {
 /// A masked field the document does not carry is dropped rather than written as
 /// null: Firestore treats that as "delete this field", and Phase 1 has no field
 /// deletion, so writing a null would be worse than leaving it alone.
+///
+/// Unlike a read mask, this one is still restricted to top-level fields. A
+/// nested update mask has to merge *into* a stored map, which is a change to
+/// the store's write contract rather than to the query engine, so it stays an
+/// explicit refusal instead of overwriting the whole parent map.
 fn masked_fields(
     field_paths: &[String],
     document: &Document,
 ) -> Result<Vec<(String, Value)>, Status> {
-    Ok(simple_field_paths(field_paths)?
-        .into_iter()
+    for path in field_paths {
+        if path.contains('.') || path.contains('`') {
+            return Err(unimplemented(
+                &format!("the nested update_mask path {path:?}"),
+                "an update mask writes whole top-level fields",
+            ));
+        }
+    }
+    Ok(field_paths
+        .iter()
         .filter_map(|field| {
             document
                 .fields
-                .get(&field)
+                .get(field)
                 .cloned()
-                .map(|value| (field, value))
+                .map(|value| (field.clone(), value))
         })
         .collect())
 }
@@ -761,10 +769,18 @@ impl Firestore for FirestoreApi {
         // Compiled before anything is read, so an unsupported query shape fails
         // immediately instead of after a collection scan.
         let query = Query::compile(structured)?;
-        let documents = self
-            .store
-            .scan_collection(&parent.full(), query.collection_id())
-            .await?;
+        let documents = if query.all_descendants() {
+            // A collection group query reads every collection with this id
+            // anywhere beneath the parent, which is the scan the Datastore
+            // kind queries already needed.
+            self.store
+                .scan_kind(&parent.full(), query.collection_id())
+                .await?
+        } else {
+            self.store
+                .scan_collection(&parent.full(), query.collection_id())
+                .await?
+        };
         let results = query.evaluate(documents);
 
         if let Some(token) = &transaction {
@@ -935,9 +951,141 @@ mod tests {
         assert_ne!(id, auto_id(), "ids must not repeat");
     }
 
+    /// `{ address: { city: "Tokyo", zip: "100-0001" }, name: "alice" }`
+    fn nested_document() -> Document {
+        use crate::protos::google::firestore::v1::value::ValueType;
+        use crate::protos::google::firestore::v1::MapValue;
+
+        let text = |value: &str| Value {
+            value_type: Some(ValueType::StringValue(value.to_string())),
+        };
+        Document {
+            name: "projects/demo/databases/(default)/documents/users/alice".to_string(),
+            fields: [
+                (
+                    "address".to_string(),
+                    Value {
+                        value_type: Some(ValueType::MapValue(MapValue {
+                            fields: [
+                                ("city".to_string(), text("Tokyo")),
+                                ("zip".to_string(), text("100-0001")),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        })),
+                    },
+                ),
+                ("name".to_string(), text("alice")),
+            ]
+            .into_iter()
+            .collect(),
+            create_time: None,
+            update_time: None,
+        }
+    }
+
+    /// The value at `path` in `document`, as a debug string.
+    fn at(document: &Document, path: &str) -> Option<String> {
+        use crate::protos::google::firestore::v1::value::ValueType;
+
+        let mut segments = path.split('.');
+        let mut value = document.fields.get(segments.next()?)?;
+        for segment in segments {
+            match &value.value_type {
+                Some(ValueType::MapValue(map)) => value = map.fields.get(segment)?,
+                _ => return None,
+            }
+        }
+        Some(format!("{:?}", value.value_type))
+    }
+
     #[test]
-    fn nested_field_paths_are_rejected_rather_than_mishandled() {
-        let err = simple_field_paths(&["a.b".to_string()]).expect_err("nested path");
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
+    fn a_read_mask_selects_a_nested_field_without_flattening_it() {
+        let mut document = nested_document();
+        apply_mask(
+            &mut document,
+            &Some(DocumentMask {
+                field_paths: vec!["address.city".to_string()],
+            }),
+        )
+        .expect("a nested read mask is served");
+
+        assert!(
+            at(&document, "address.city").is_some(),
+            "the selected leaf stays where it was: {:?}",
+            document.fields
+        );
+        assert_eq!(
+            at(&document, "address.zip"),
+            None,
+            "an unselected sibling inside the map is dropped"
+        );
+        assert_eq!(at(&document, "name"), None, "name was not selected");
+        assert!(
+            !document.fields.contains_key("address.city"),
+            "the mask must not flatten the path into a field name"
+        );
+    }
+
+    #[test]
+    fn a_read_mask_selecting_a_whole_map_keeps_all_of_it() {
+        let mut document = nested_document();
+        apply_mask(
+            &mut document,
+            &Some(DocumentMask {
+                field_paths: vec!["address".to_string()],
+            }),
+        )
+        .expect("a top-level read mask is served");
+
+        assert!(at(&document, "address.city").is_some());
+        assert!(at(&document, "address.zip").is_some());
+        assert_eq!(at(&document, "name"), None);
+    }
+
+    #[test]
+    fn a_read_mask_path_that_is_not_there_selects_nothing() {
+        let mut document = nested_document();
+        apply_mask(
+            &mut document,
+            &Some(DocumentMask {
+                // `name` is a string, so it has no `first` inside it.
+                field_paths: vec!["address.country".to_string(), "name.first".to_string()],
+            }),
+        )
+        .expect("an absent path is not an error");
+
+        assert!(document.fields.is_empty(), "{:?}", document.fields);
+    }
+
+    #[test]
+    fn a_malformed_mask_path_is_an_invalid_argument() {
+        let err = apply_mask(
+            &mut nested_document(),
+            &Some(DocumentMask {
+                field_paths: vec!["address..city".to_string()],
+            }),
+        )
+        .expect_err("a malformed path is rejected");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn a_nested_update_mask_is_still_refused() {
+        let err = masked_fields(&["address.city".to_string()], &nested_document())
+            .expect_err("a nested update mask is not served");
+        assert_eq!(
+            err.code(),
+            tonic::Code::Unimplemented,
+            "writing into a stored map is a write-path change, not a query one"
+        );
+    }
+
+    #[test]
+    fn a_top_level_update_mask_selects_the_whole_field() {
+        let fields = masked_fields(&["address".to_string()], &nested_document())
+            .expect("a top-level update mask is served");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].0, "address");
     }
 }
