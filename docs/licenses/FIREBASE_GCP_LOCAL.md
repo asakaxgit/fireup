@@ -2,7 +2,7 @@
 
 > First-party Fireup code is licensed under **Apache-2.0** (see root `LICENSE`). Brand assets under `brand/` are carved out — see `brand/LICENSE`. Dependency-tree audit: [`CARGO_LICENSE_AUDIT.md`](CARGO_LICENSE_AUDIT.md).
 
-**Status:** current as of SAK-218 — `deny.toml` turns the permissive-only dependency policy into a CI gate instead of a periodic manual audit, and records the one accepted vulnerability (`RUSTSEC-2026-0258` in `h2`, via the pinned `tonic` 0.11); see [`CARGO_LICENSE_AUDIT.md#how-this-is-enforced`](CARGO_LICENSE_AUDIT.md#how-this-is-enforced). No dependency, proto, or generated stub was added. Prior: SAK-216 — `Cargo.lock` committed and `--locked` restored in CI, which turns every "see `Cargo.toml`" pin in this ledger from a semver range into one exact version per commit; SAK-206 README badges, coverage, and the comparison document (the first entry covering claims about third-party software); SAK-203 Datastore `property_mask` on a mutation (masked entity writes, paired with the SAK-198 property transforms); Phase 2.1 (SAK-189) Firestore `Listen` / realtime listeners; SAK-195 managed-export fidelity regression fixtures; SAK-193 Phase L.1 out-of-band email flows (no mail transport); SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
+**Status:** current as of SAK-217 — the comparison's emulator column replaced with **measured** conformance results (the first entry covering the *running* of third-party software). Prior: SAK-218 — `deny.toml` turns the permissive-only dependency policy into a CI gate instead of a periodic manual audit, and records the one accepted vulnerability (`RUSTSEC-2026-0258` in `h2`, via the pinned `tonic` 0.11); see [`CARGO_LICENSE_AUDIT.md#how-this-is-enforced`](CARGO_LICENSE_AUDIT.md#how-this-is-enforced); SAK-216 — `Cargo.lock` committed and `--locked` restored in CI, which turns every "see `Cargo.toml`" pin in this ledger from a semver range into one exact version per commit; SAK-206 README badges, coverage, and the comparison document (the first entry covering claims about third-party software); SAK-203 Datastore `property_mask` on a mutation (masked entity writes, paired with the SAK-198 property transforms); Phase 2.1 (SAK-189) Firestore `Listen` / realtime listeners; SAK-195 managed-export fidelity regression fixtures; SAK-193 Phase L.1 out-of-band email flows (no mail transport); SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -545,6 +545,102 @@ it. [SAK-218](/SAK/issues/SAK-218) carries the decision, along with the
 `deny.toml` licence allow-list that `cargo deny check licenses` needs before it
 can run green. `cargo-audit` is not installed in this workspace and overlaps
 `cargo deny check advisories`, so only one of the two is worth adopting.
+### SAK-217 notes — measuring the comparison instead of reading it
+
+**No new Google or Firebase artefact enters the repository, no new proto, no new
+Rust dependency, and no new npm package.** The proto pin is unchanged at
+googleapis `57aa4dbc`. What this change adds is a **method**: Google's published
+emulator was *executed locally* and its public API was asked questions.
+SAK-206's note above says the Firebase Emulator Suite was not "decompiled,
+disassembled, binary-analysed, or executed" to produce the comparison. The last
+word of that list is superseded here. The first three remain true, and they are
+the line that was not crossed.
+
+#### The method
+
+Black-box conformance testing of a **published** API contract, driven by the
+vendor's own Apache-2.0 client libraries — the same method SAK-163 established
+for verifying Fireup itself, pointed the other way. The official
+`@google-cloud/firestore` and `@google-cloud/datastore` libraries already rowed
+in this ledger honour the documented `FIRESTORE_EMULATOR_HOST` /
+`DATASTORE_EMULATOR_HOST` variables, so a conformance probe reaches any server
+implementing the same contract. `tests/conformance/node/observe.mjs` runs the
+existing probes and records what came back (`serves` / `refuses` / `diverges` /
+`error` / `timeout` / `not-measurable`) instead of asserting Fireup's claimed
+status; `scripts/conformance-target.sh` points it at a host.
+
+**No reverse engineering.** Nothing was decompiled, disassembled, or
+binary-analysed. No JAR, class file, native image, or container layer was
+unpacked or inspected. No code, configuration, test, fixture, or asset was
+copied out of the emulator, and nothing from it was vendored here — the
+artefacts in `docs/local/measurements/` are first-party output of our own probes
+(a row id, a verdict, and the target's own error string). Running a published
+binary and writing down what its public API answers is observation; taking it
+apart is not, and was not done.
+
+#### What was run
+
+| Target | Artefact | Licence | How it was obtained and run | Measured |
+|---|---|---|---|---|
+| Firebase Emulator Suite | `cloud-firestore-emulator` **v1.22.0**, downloaded by `firebase-tools` 15.35.0 | Firebase CLI Apache-2.0; the emulator JAR is **closed-source** | `firebase emulators:start --only firestore,auth --project demo-fireup-local` with a Temurin JRE 21, Firestore on `:18080` and Auth on `:19099` (the documented `8080` was occupied on the measuring host). Separately, the **same JAR** run as `java -jar … --host=127.0.0.1 --port=18081 --database-mode=datastore-mode`. `--database-mode` is the JAR's own published CLI flag — listed in its `--help`, and what `gcloud emulators firestore start --database-mode=datastore-mode` sets — which the Firebase CLI does not expose. Invoking a documented flag on a published binary is use, not analysis | 2026-11-06 |
+| `fireup local` | this commit, in-memory store, `:4589` | Apache-2.0 (first-party) | The negative control. `observe.mjs` asserts nothing about *who* is answering, so without it a harness bug is indistinguishable from a target divergence | 2026-11-06 |
+
+No request was made to a billable Google service. The "Firestore on GCP" column
+of the comparison therefore stays documentation-sourced and carries no measured
+cell. The `demo-` project prefix keeps the emulator from attempting to reach any
+non-emulated Google service, and no credential of any kind was supplied to it.
+
+#### Scope: still Google's products only
+
+SAK-206's decision above stands unchanged. This change measures Google's
+emulator — the thing Fireup is an independent implementation *of* — and does not
+add a column for, name, or characterise any third-party emulator. The
+comparison's prose still says only that others exist and are not compared here.
+The measurement recipe in `tests/conformance/README.md` is deliberately generic,
+because the gate on publishing a named third-party comparison is a publication
+decision, not a technical capability.
+
+#### What the comparison now claims, and on what basis
+
+`docs/local/COMPARISON.md` marks every cell `[M]` (measured) or `[D]`
+(documented), names the emulator version and the date it was measured, and
+commits the raw per-row output under `docs/local/measurements/`. What this
+changes, in both directions:
+
+| Claim | Direction | Basis |
+|---|---|---|
+| The Firebase Emulator Suite **does** emulate Datastore; all 20 `not emulated` cells were wrong | Against our previous document | Measured: the JAR answers every Datastore RPC with `INVALID_ARGUMENT: Database mode not set to Datastore Mode`, and serves 20/20 measurable Datastore rows under `--database-mode=datastore-mode`, including GQL, aggregations, every property transform, and every `property_mask` row |
+| It **refuses** `PartitionQuery`, with the same gRPC status Fireup uses | In Fireup's favour | Measured: `UNIMPLEMENTED: Method google.firestore.v1.Firestore/PartitionQuery is unimplemented` |
+| SAK-203's `property_mask` reading of `datastore.proto` was correct | In Fireup's favour | Measured: Fireup and the reference implementation agree on all six measurable mask rows |
+| Four bugs in **Fireup** | Against us | Measured against the reference implementation; stated in the comparison with the emulator's verbatim error, and filed as follow-up issues |
+
+The four Fireup bugs are worth naming here, because two of them are claims this
+project published about itself and got wrong: `fireup local` accepts an
+`order_by` with a term after `__name__` and serves a descending `__name__` scan,
+both of which the emulator and production reject — and the second has a
+conformance probe *asserting* the divergent behaviour. A probe stops a row
+changing silently; it cannot stop a row from having been wrong when it was
+written. On the auth surface, `accounts:batchCreate` answers `405` with a
+self-contradictory message and `projects:createSessionCookie` answers
+`404 PROJECT_NOT_FOUND` from mis-parsing the `{project}:customMethod` colon, so
+two rows the matrix correctly calls `UNIMPLEMENTED` refuse in a shape that does
+not name the gap.
+
+**Trademarks are used nominatively**, as before: "Firebase", "Firestore",
+"Datastore" and "Google Cloud" appear only to identify the products being
+compared. The independent-implementation notice at the top of `COMPARISON.md` is
+preserved and extended to describe the measurement method and the line it does
+not cross.
+
+#### Tooling used to run the target
+
+Neither is a dependency of anything this project ships; both were fetched into a
+scratch directory outside the repository and neither is vendored.
+
+| Tool | Version | SPDX | Upstream | How we use it | Decision |
+|---|---|---|---|---|---|
+| Eclipse Temurin JRE/JDK | 21.0.13+9 | GPL-2.0-with-classpath-exception | [adoptium.net](https://adoptium.net/) | The JRE Google's emulator documents as a prerequisite ("a Java JRE version 21 or greater") | Public OSS runtime, run outside the repository; nothing links against it |
+| `firebase-tools` | 15.35.0 | MIT | [npm](https://www.npmjs.com/package/firebase-tools) | Downloads and starts Google's emulator. The JAR it fetches is closed-source and was **run, never inspected** | Google's own published CLI, used as published |
 
 ## Existing Fireup notes (pre-local-cloud)
 
@@ -558,14 +654,14 @@ can run green. `cargo-audit` is not installed in this workspace and overlaps
 The PR checklist in `.cursor/rules/firebase-gcp-compliance.mdc`, answered as each
 phase landed.
 
-| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 | SAK-196 | SAK-190 | Phase L.1 (SAK-193) | SAK-195 | Phase 2.1 (SAK-189) | SAK-203 | SAK-206 | SAK-216 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected | Yes — the vendored `write.proto` comments, public `FieldValue` docs, open-source client as a client | Yes — public REST + email-action-link docs, and the open-source client SDK's published link parser; no page markup or asset reproduced | Yes — fixtures generated first-party from the public LevelDB log spec and already-documented `EntityProto` numbering; no Google fixture or export used | Yes — vendored public protos, public `Listen` reference, open-source client source | Yes — the vendored `datastore.proto` comments only; the open-source client run as a client | Yes — public Google documentation only; the emulator was neither decompiled nor run, and every unverified cell is labelled `not documented` | Yes — no binary, proto, document, or third-party project was inspected at all; the change is a generated lock file and CI flags |
-| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added | Yes — none added; first-party SPDX corrected to Apache-2.0; audit linked | Yes — none added | Yes — none added, of any kind | Yes — none added | Yes — none added | Yes — none added, of any kind | Yes — none added to the build; `cargo-llvm-cov` and the shields.io badge URLs are rowed as CI/docs tooling | Yes — none added and none moved; `Cargo.lock` itself and `cargo-deny` are rowed above, and the one advisory the lock file exposes is recorded there |
-| For a REST/JSON surface: public sources named | n/a / prior phases | Yes | n/a (protos) | n/a | n/a | n/a — no new surface | n/a (protos) | Yes — the four sources are rowed in the Phase L.1 notes | n/a — binary export format, sources named above | n/a (protos) | n/a (protos) | n/a — no new surface; the comparison's sources are named in its own Sources table and above | n/a — no surface touched. Cargo's own published guidance to commit the lock file for a binary crate is the only source |
-| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated → `501` (OOB too, until SAK-193) | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a | Yes — `maximum`/`minimum`, nested transform paths, and Datastore property transforms stay refused | Yes — `PHONE_VERIFICATION` → `501`; mail delivery stated as a non-goal rather than faked; the one-hour code lifetime and the landing route labelled as Fireup's own choices | Yes — the `numeric` negative-zero gap is stated in the fixture README and filed as SAK-202, not hidden | Yes — a `read_time` resume is refused per target; no resume tokens and no `ExistenceFilter`, both published in the matrix | Yes — nested mask paths and escaped property names stay `UNIMPLEMENTED`; an empty path and a non-`__key__` reserved name are `INVALID_ARGUMENT` | Yes — the four RPCs and the query/transform rows Fireup refuses are stated as refusals beside a reference implementation that serves them, not hidden | Yes — `RUSTSEC-2026-0258` in `h2` 0.3.27 is stated above with its path and the tonic 0.12 migration it needs, and filed as [SAK-218](/SAK/issues/SAK-218), not hidden |
-| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged | Yes — retained in README licence section | Yes — unchanged | Yes — and the landing route's own response carries a "not a Google page" notice | Yes — unchanged | Yes — on `src/local/watch.rs` and the `Listen` row of `src/local/firestore.rs` | Yes — unchanged | Yes — restated at the top of `COMPARISON.md`, with the trademark note; README unchanged | Yes — unchanged |
-| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added | Yes — no signing key; the link's `apiKey` placeholder is a sentence, not a key-shaped string | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added | Yes — the lock file was checked for credentials, git dependencies, and local path dependencies; none present |
+| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 | SAK-196 | SAK-190 | Phase L.1 (SAK-193) | SAK-195 | Phase 2.1 (SAK-189) | SAK-203 | SAK-206 | SAK-216 | SAK-217 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected | Yes — the vendored `write.proto` comments, public `FieldValue` docs, open-source client as a client | Yes — public REST + email-action-link docs, and the open-source client SDK's published link parser; no page markup or asset reproduced | Yes — fixtures generated first-party from the public LevelDB log spec and already-documented `EntityProto` numbering; no Google fixture or export used | Yes — vendored public protos, public `Listen` reference, open-source client source | Yes — the vendored `datastore.proto` comments only; the open-source client run as a client | Yes — public Google documentation only; the emulator was neither decompiled nor run, and every unverified cell is labelled `not documented` | Yes — no binary, proto, document, or third-party project was inspected at all; the change is a generated lock file and CI flags | Yes — the emulator **run** as a published binary over its public API, driven by Google's open-source client libraries; not decompiled, disassembled, binary-analysed, or unpacked, and nothing copied out of it. The method, version, and date are rowed above |
+| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added | Yes — none added; first-party SPDX corrected to Apache-2.0; audit linked | Yes — none added | Yes — none added, of any kind | Yes — none added | Yes — none added | Yes — none added, of any kind | Yes — none added to the build; `cargo-llvm-cov` and the shields.io badge URLs are rowed as CI/docs tooling | Yes — none added and none moved; `Cargo.lock` itself and `cargo-deny` are rowed above, and the one advisory the lock file exposes is recorded there | Yes — none added to the build or the repository; the Temurin JRE and `firebase-tools` 15.35.0 are rowed as scratch-directory tooling |
+| For a REST/JSON surface: public sources named | n/a / prior phases | Yes | n/a (protos) | n/a | n/a | n/a — no new surface | n/a (protos) | Yes — the four sources are rowed in the Phase L.1 notes | n/a — binary export format, sources named above | n/a (protos) | n/a (protos) | n/a — no new surface; the comparison's sources are named in its own Sources table and above | n/a — no surface touched. Cargo's own published guidance to commit the lock file for a binary crate is the only source | n/a — no new surface; the measured auth rows were driven over the documented Identity Toolkit REST paths with the documented `Authorization: Bearer owner` emulator convention |
+| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated → `501` (OOB too, until SAK-193) | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a | Yes — `maximum`/`minimum`, nested transform paths, and Datastore property transforms stay refused | Yes — `PHONE_VERIFICATION` → `501`; mail delivery stated as a non-goal rather than faked; the one-hour code lifetime and the landing route labelled as Fireup's own choices | Yes — the `numeric` negative-zero gap is stated in the fixture README and filed as SAK-202, not hidden | Yes — a `read_time` resume is refused per target; no resume tokens and no `ExistenceFilter`, both published in the matrix | Yes — nested mask paths and escaped property names stay `UNIMPLEMENTED`; an empty path and a non-`__key__` reserved name are `INVALID_ARGUMENT` | Yes — the four RPCs and the query/transform rows Fireup refuses are stated as refusals beside a reference implementation that serves them, not hidden | Yes — `RUSTSEC-2026-0258` in `h2` 0.3.27 is stated above with its path and the tonic 0.12 migration it needs, and filed as [SAK-218](/SAK/issues/SAK-218), not hidden | Yes — and the four Fireup bugs the measurement exposed are stated in `COMPARISON.md` with the reference implementation's verbatim error rather than left for a user to hit; the 15 unmeasurable rows are labelled `[D]`, not scored |
+| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged | Yes — retained in README licence section | Yes — unchanged | Yes — and the landing route's own response carries a "not a Google page" notice | Yes — unchanged | Yes — on `src/local/watch.rs` and the `Listen` row of `src/local/firestore.rs` | Yes — unchanged | Yes — restated at the top of `COMPARISON.md`, with the trademark note; README unchanged | Yes — unchanged | Yes — restated at the top of `COMPARISON.md` and extended to describe the measurement method and the line it does not cross |
+| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added | Yes — no signing key; the link's `apiKey` placeholder is a sentence, not a key-shaped string | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added | Yes — the lock file was checked for credentials, git dependencies, and local path dependencies; none present | n/a — nothing added; no credential was supplied to the emulator, the `demo-` project prefix keeps it from reaching a real service, and no billable Google service was called |
 
 ## How to add a row
 
