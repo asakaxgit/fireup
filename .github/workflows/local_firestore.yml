@@ -1,4 +1,4 @@
-name: fireup local — Firestore API
+name: fireup local — Firestore, Datastore, Auth
 
 # Triggers are deliberately left off, matching integration_tests.yml: CI in this
 # repository is currently manual-only ("TEMPORARILY DISABLED - Re-enable after
@@ -49,6 +49,13 @@ jobs:
 
       - name: Firestore gRPC tests
         run: cargo test --test local_firestore_tests
+
+      # Needs no server: it compares the fidelity matrix in
+      # docs/local/README.md with tests/conformance/matrix.json, so a row whose
+      # documented status no longer matches what the suite demands fails here in
+      # a second rather than in the SDK job minutes later.
+      - name: Fidelity matrix / docs are in sync
+        run: cargo test --test fidelity_matrix_tests
 
   # Conclusive layer: drives the server with Google's own client library, which
   # picks its own RPCs and does its own serialization. The Rust tests can pass
@@ -122,3 +129,87 @@ jobs:
         env:
           FIREUP_TEST_POSTGRES_URL: postgresql://fireup:fireup_ci_password@localhost:5432/fireup_local
         run: cargo test --test local_postgres_store_tests
+
+  # The regression shield for the fidelity matrix: one probe per documented row,
+  # driven by the official Node and Python client libraries. A served row that
+  # stops working fails here; so does an UNIMPLEMENTED row that stops failing
+  # clearly, or a row somebody flipped in the README without writing its check.
+  #
+  # Both stores, because "the matrix holds" has to be true of the durable
+  # backend too — a Postgres store that disagrees with the in-memory one has to
+  # fail in CI, not in someone's local debugging session.
+  sdk-conformance:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [memory, postgres]
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: fireup_conformance
+          POSTGRES_USER: fireup
+          POSTGRES_PASSWORD: fireup_ci_password
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: tests/conformance/node/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-local-firestore-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install the official Node client libraries
+        working-directory: tests/conformance/node
+        run: npm ci --no-audit --no-fund
+
+      - name: Install the official Node auth client libraries
+        working-directory: tests/local-smoke
+        run: npm ci --no-audit --no-fund
+
+      - name: Install the official Python client libraries
+        run: python -m pip install -r tests/conformance/python/requirements.txt
+
+      - name: SDK conformance (in-memory store)
+        if: matrix.store == 'memory'
+        env:
+          FIREUP_CONFORMANCE_PYTHON: python
+        run: scripts/conformance-local.sh
+
+      - name: SDK conformance (PostgreSQL store)
+        if: matrix.store == 'postgres'
+        env:
+          FIREUP_CONFORMANCE_PYTHON: python
+          FIREUP_CONFORMANCE_POSTGRES_URL: postgresql://fireup:fireup_ci_password@localhost:5432/fireup_conformance
+        run: scripts/conformance-local.sh
