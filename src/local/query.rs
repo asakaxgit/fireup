@@ -278,6 +278,31 @@ impl Comparison {
             Comparison::In | Comparison::NotIn | Comparison::ArrayContainsAny
         )
     }
+
+    /// Whether this operator is an **inequality** in the sense that gives a
+    /// query an implicit order.
+    ///
+    /// Firestore orders an inequality-filtered query by the filtered field, so
+    /// that field joins the query's order whether the client asked for it or
+    /// not — which is what makes a trailing explicit `__name__` illegal beside
+    /// one. Enumerated one operator at a time against
+    /// `cloud-firestore-emulator` v1.22.0 rather than inferred, because the
+    /// split is not the obvious one: `NOT_IN` counts, `IN` does not, and
+    /// neither array operator does.
+    fn is_an_inequality(self) -> bool {
+        match self {
+            Comparison::NotEqual
+            | Comparison::LessThan
+            | Comparison::LessThanOrEqual
+            | Comparison::GreaterThan
+            | Comparison::GreaterThanOrEqual
+            | Comparison::NotIn => true,
+            Comparison::Equal
+            | Comparison::In
+            | Comparison::ArrayContains
+            | Comparison::ArrayContainsAny => false,
+        }
+    }
 }
 
 /// A presence/`NaN` test, which takes no value.
@@ -299,6 +324,18 @@ impl Presence {
             ProtoUnaryOperator::Unspecified => Err(Status::invalid_argument(
                 "a unary filter has no operator set",
             )),
+        }
+    }
+
+    /// See [`Comparison::is_an_inequality`].
+    ///
+    /// `IS_NOT_NULL` and `IS_NOT_NAN` are how `!= null` and `!= NaN` reach the
+    /// wire, so they inherit `!=`'s implicit order; `IS_NULL` and `IS_NAN` come
+    /// from `==` and do not. Measured, like the rest.
+    fn is_an_inequality(self) -> bool {
+        match self {
+            Presence::NotNull | Presence::NotNan => true,
+            Presence::Null | Presence::Nan => false,
         }
     }
 }
@@ -399,6 +436,43 @@ impl Predicate {
                     Presence::NotNan => !is_nan(actual.as_ref()),
                 },
             },
+        }
+    }
+
+    /// Collect every path filtered with an inequality, in first-seen order.
+    ///
+    /// Both composite operators contribute: an `OR` branch's inequality counts
+    /// towards the query's implicit order exactly as an `AND`'s does, which is
+    /// measurable and was measured. Duplicates are not removed — callers only
+    /// ask whether any of these is missing from the explicit order.
+    fn inequality_paths(&self, found: &mut Vec<Path>) {
+        match self {
+            Predicate::All(children) | Predicate::Any(children) => {
+                for child in children {
+                    child.inequality_paths(found);
+                }
+            }
+            Predicate::Compare { path, op, .. } if op.is_an_inequality() => {
+                found.push(path.clone())
+            }
+            Predicate::Test { path, op } if op.is_an_inequality() => found.push(path.clone()),
+            Predicate::Compare { .. } | Predicate::Test { .. } => {}
+        }
+    }
+
+    /// Whether anything here filters on a document **field**.
+    ///
+    /// `__name__` is the document's name rather than one of its fields, so a
+    /// predicate on it does not count. The distinction decides whether a
+    /// descending key scan has an index behind it; see `Query::compile`.
+    fn filters_a_field(&self) -> bool {
+        match self {
+            Predicate::All(children) | Predicate::Any(children) => {
+                children.iter().any(Predicate::filters_a_field)
+            }
+            Predicate::Compare { path, .. } | Predicate::Test { path, .. } => {
+                matches!(path, Path::Field(_))
+            }
         }
     }
 }
@@ -771,6 +845,58 @@ impl Query {
                 descending: term.direction() == Direction::Descending,
             });
         }
+
+        // Nothing may follow the key. `__name__` is the tie-breaker that makes
+        // an order total, so a term after it can never change a result, and
+        // Firestore refuses the shape rather than quietly ignoring the dead
+        // term.
+        //
+        // The refusal is checked against the order Firestore *uses*, which is
+        // not the one on the wire: it also orders by every inequality-filtered
+        // field the client did not order by, appended after the explicit terms.
+        // So `.where('v', '!=', null).orderBy('__name__')` asks for
+        // `[__name__, v]` while sending only `[__name__]`. That matters because
+        // `@google-cloud/firestore` builds exactly that on its own — the shape
+        // is what a user writes on the first day, not a corner case, and
+        // serving it here would mean their query dies in production.
+        let unordered_inequality = filter.as_ref().is_some_and(|filter| {
+            let mut paths = Vec::new();
+            filter.inequality_paths(&mut paths);
+            paths
+                .iter()
+                .any(|path| !order.iter().any(|key| &key.path == path))
+        });
+        if let Some(key) = order.iter().position(|key| key.path == Path::Name) {
+            if key + 1 < order.len() || unordered_inequality {
+                return Err(Status::invalid_argument(
+                    "order by clause cannot contain more fields after the key",
+                ));
+            }
+        }
+
+        // A descending scan of nothing but the key. Firestore reads key order
+        // out of the index that stores the documents, and only forwards, so it
+        // refuses this with `FAILED_PRECONDITION` rather than
+        // `INVALID_ARGUMENT`: the shape is legal, there is just no index that
+        // serves it.
+        //
+        // Anything else to sort or filter by lifts the refusal, because that
+        // field's index ends in the key and *can* be read backwards. An
+        // explicit term before the key is one — which is why
+        // `orderBy('v', 'desc')` keeps working — and so is any predicate on a
+        // field, down to `IS_NULL`. A predicate on `__name__` is not: it is a
+        // range over the same forward-only store. Measured case by case
+        // against `cloud-firestore-emulator` v1.22.0 (SAK-223); fireup does
+        // not model indexes, so this is the one place their shape shows
+        // through, and it is written as the rule rather than derived from one.
+        if matches!(order.as_slice(), [key] if key.path == Path::Name && key.descending)
+            && !filter.as_ref().is_some_and(Predicate::filters_a_field)
+        {
+            return Err(Status::failed_precondition(
+                "Firestore does not support descending key scans",
+            ));
+        }
+
         // Firestore appends `__name__` in the direction of the last explicit
         // order (ascending when there is none), so that every query has a
         // total order and equal documents do not come back in a random order.
@@ -1403,6 +1529,315 @@ mod tests {
             .code(),
             tonic::Code::InvalidArgument,
             "IN needs a list of candidates"
+        );
+    }
+
+    // --- `order_by` shapes Firestore refuses --------------------------------
+    //
+    // Every expectation in this section was measured against
+    // `cloud-firestore-emulator` v1.22.0 over raw gRPC (SAK-223), one case at a
+    // time, rather than read off the documentation. Both rules are narrower
+    // than they first look, so each test carries the shapes production *serves*
+    // beside the ones it refuses: over-refusing here would break working code,
+    // which is a worse failure than the bug being fixed.
+
+    /// Build `(order_by, where)` and compile it.
+    fn compile_order(shape: &[(&str, bool)], filter: Option<Filter>) -> Result<Query, Status> {
+        let mut structured = StructuredQuery {
+            from: vec![CollectionSelector {
+                collection_id: "users".to_string(),
+                all_descendants: false,
+            }],
+            ..Default::default()
+        };
+        structured.order_by = shape
+            .iter()
+            .map(|(path, descending)| Order {
+                field: Some(FieldReference {
+                    field_path: path.to_string(),
+                }),
+                direction: if *descending {
+                    Direction::Descending as i32
+                } else {
+                    Direction::Ascending as i32
+                },
+            })
+            .collect();
+        structured.r#where = filter;
+        Query::compile(&structured)
+    }
+
+    fn unary_filter(path: &str, op: ProtoUnaryOperator) -> Option<Filter> {
+        Some(Filter {
+            filter_type: Some(FilterType::UnaryFilter(UnaryFilter {
+                operand_type: Some(OperandType::Field(FieldReference {
+                    field_path: path.to_string(),
+                })),
+                op: op as i32,
+            })),
+        })
+    }
+
+    fn refused_after_the_key(shape: &[(&str, bool)], filter: Option<Filter>, why: &str) {
+        let error = compile_order(shape, filter).expect_err(why);
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{why}");
+        assert_eq!(
+            error.message(),
+            "order by clause cannot contain more fields after the key",
+            "the refusal has to name the key, so {why} is distinguishable from \
+             every other invalid argument"
+        );
+    }
+
+    fn served(shape: &[(&str, bool)], filter: Option<Filter>, why: &str) {
+        compile_order(shape, filter)
+            .unwrap_or_else(|error| panic!("Firestore serves {why}, and it was refused: {error}"));
+    }
+
+    #[test]
+    fn nothing_may_follow_the_key_in_an_order() {
+        for (shape, why) in [
+            (
+                &[("__name__", false), ("__name__", false)][..],
+                "a duplicate key",
+            ),
+            (&[("__name__", false), ("age", false)][..], "a field after"),
+            (
+                &[("__name__", true), ("age", true)][..],
+                "a field after, descending",
+            ),
+            (
+                &[("age", false), ("__name__", false), ("__name__", false)][..],
+                "a duplicate key, not first",
+            ),
+            (
+                &[("age", false), ("__name__", false), ("city", false)][..],
+                "a field after, not first",
+            ),
+        ] {
+            refused_after_the_key(shape, None, why);
+        }
+
+        served(&[][..], None, "the default order");
+        served(&[("__name__", false)][..], None, "the key alone");
+        served(
+            &[("age", false), ("__name__", false)][..],
+            None,
+            "the key last",
+        );
+        served(
+            &[("age", true), ("__name__", false)][..],
+            None,
+            "the key last, in its own direction",
+        );
+    }
+
+    /// The rule is about the order Firestore *uses*, not the one on the wire.
+    ///
+    /// This is the case that matters most: the wire carries a legal
+    /// `[__name__]`, and it is illegal anyway because the inequality field
+    /// joins the order behind it. `@google-cloud/firestore` builds it from
+    /// `.where('v', '!=', null).orderBy('__name__')` without being asked, so
+    /// serving it locally breaks a first-day query in production.
+    #[test]
+    fn an_unordered_inequality_field_counts_as_a_term_after_the_key() {
+        for (op, name) in [
+            (ProtoFieldOperator::NotEqual, "!="),
+            (ProtoFieldOperator::LessThan, "<"),
+            (ProtoFieldOperator::LessThanOrEqual, "<="),
+            (ProtoFieldOperator::GreaterThan, ">"),
+            (ProtoFieldOperator::GreaterThanOrEqual, ">="),
+        ] {
+            refused_after_the_key(
+                &[("__name__", false)],
+                field_filter("age", op, integer_value(31)),
+                &format!("an unordered `age {name}` behind an explicit key"),
+            );
+            // Ordering by the inequality field first is the fix, and is served.
+            served(
+                &[("age", false), ("__name__", false)],
+                field_filter("age", op, integer_value(31)),
+                &format!("`age {name}` with `age` ordered first"),
+            );
+        }
+        refused_after_the_key(
+            &[("__name__", false)],
+            field_filter(
+                "age",
+                ProtoFieldOperator::NotIn,
+                array_value(vec![integer_value(31)]),
+            ),
+            "NOT_IN is an inequality",
+        );
+        refused_after_the_key(
+            &[("__name__", false)],
+            unary_filter("age", ProtoUnaryOperator::IsNotNull),
+            "IS_NOT_NULL is how `!= null` reaches the wire",
+        );
+        refused_after_the_key(
+            &[("__name__", false)],
+            unary_filter("age", ProtoUnaryOperator::IsNotNan),
+            "IS_NOT_NAN is how `!= NaN` reaches the wire",
+        );
+        refused_after_the_key(
+            &[("__name__", false)],
+            Some(Filter {
+                filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                    op: ProtoCompositeOperator::Or as i32,
+                    filters: vec![
+                        field_filter("city", ProtoFieldOperator::Equal, string_value("Tokyo"))
+                            .expect("a filter"),
+                        field_filter("age", ProtoFieldOperator::LessThan, integer_value(40))
+                            .expect("a filter"),
+                    ],
+                })),
+            }),
+            "an inequality inside an OR branch still joins the order",
+        );
+
+        // The operators that are *not* inequalities get no implicit order, so
+        // an explicit trailing key stays legal beside them. Getting this half
+        // wrong would refuse working queries.
+        for (op, value, name) in [
+            (ProtoFieldOperator::Equal, integer_value(31), "=="),
+            (
+                ProtoFieldOperator::In,
+                array_value(vec![integer_value(31)]),
+                "in",
+            ),
+            (
+                ProtoFieldOperator::ArrayContains,
+                integer_value(31),
+                "array-contains",
+            ),
+            (
+                ProtoFieldOperator::ArrayContainsAny,
+                array_value(vec![integer_value(31)]),
+                "array-contains-any",
+            ),
+        ] {
+            served(
+                &[("__name__", false)],
+                field_filter("age", op, value),
+                &format!("`age {name}` beside an explicit key"),
+            );
+        }
+        served(
+            &[("__name__", false)],
+            unary_filter("age", ProtoUnaryOperator::IsNull),
+            "IS_NULL is an equality",
+        );
+        served(
+            &[("__name__", false)],
+            unary_filter("age", ProtoUnaryOperator::IsNan),
+            "IS_NAN is an equality",
+        );
+        // An inequality on the key itself is already ordered by the key.
+        served(
+            &[("__name__", false)],
+            field_filter(
+                "__name__",
+                ProtoFieldOperator::GreaterThanOrEqual,
+                reference_value(&format!("{ROOT}/users/bob")),
+            ),
+            "`__name__ >=` beside an explicit key",
+        );
+    }
+
+    #[test]
+    fn a_descending_key_scan_with_no_index_behind_it_is_refused() {
+        let error = compile_order(&[("__name__", true)], None).expect_err("a bare descending key");
+        assert_eq!(
+            error.code(),
+            tonic::Code::FailedPrecondition,
+            "the shape is legal and no index serves it, which is not the same \
+             thing as a malformed request"
+        );
+        assert_eq!(
+            error.message(),
+            "Firestore does not support descending key scans"
+        );
+
+        // A filter on the key is a range over the same forward-only store, so
+        // it does not lift the refusal.
+        let error = compile_order(
+            &[("__name__", true)],
+            field_filter(
+                "__name__",
+                ProtoFieldOperator::GreaterThanOrEqual,
+                reference_value(&format!("{ROOT}/users/bob")),
+            ),
+        )
+        .expect_err("a descending key scan over a key range");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+        // Anything else to sort or filter by does lift it: that field's index
+        // ends in the key and can be read backwards.
+        served(
+            &[("age", true), ("__name__", true)],
+            None,
+            "a descending key as the tie-breaker — what orderBy(f, 'desc') compiles to",
+        );
+        served(
+            &[("age", false), ("__name__", true)],
+            None,
+            "a descending key behind an ascending field",
+        );
+        for (op, value, name) in [
+            (ProtoFieldOperator::Equal, integer_value(31), "=="),
+            (
+                ProtoFieldOperator::In,
+                array_value(vec![integer_value(31)]),
+                "in",
+            ),
+            (
+                ProtoFieldOperator::ArrayContains,
+                integer_value(31),
+                "array-contains",
+            ),
+        ] {
+            served(
+                &[("__name__", true)],
+                field_filter("age", op, value),
+                &format!("a descending key scan filtered by `age {name}`"),
+            );
+        }
+        served(
+            &[("__name__", true)],
+            unary_filter("age", ProtoUnaryOperator::IsNull),
+            "a descending key scan filtered by IS_NULL",
+        );
+    }
+
+    /// The explicit direction of a trailing `__name__` survives compilation.
+    ///
+    /// Guards the seam between the two halves above: it would be easy to make
+    /// the descending-key refusal pass by normalising every trailing key to
+    /// ascending, which would silently reorder a served query's ties.
+    #[test]
+    fn an_explicit_trailing_name_keeps_its_own_direction() {
+        let found = query(|q| {
+            q.order_by = vec![
+                Order {
+                    field: Some(FieldReference {
+                        field_path: "age".to_string(),
+                    }),
+                    direction: Direction::Ascending as i32,
+                },
+                Order {
+                    field: Some(FieldReference {
+                        field_path: "__name__".to_string(),
+                    }),
+                    direction: Direction::Descending as i32,
+                },
+            ];
+        })
+        .evaluate(people());
+
+        assert_eq!(
+            ids(&found),
+            ["bob", "alice", "carol"],
+            "alice and bob tie on age 31, so the descending key puts bob first"
         );
     }
 

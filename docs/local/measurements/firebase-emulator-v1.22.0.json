@@ -1,16 +1,16 @@
 {
-  "target": "Firebase Emulator Suite (cloud-firestore-emulator v1.22.0, firestore-native mode)",
-  "measuredAt": "2026-11-06T03:37:25.975Z",
+  "target": "Firebase Emulator Suite v1.22.0",
+  "measuredAt": "2026-11-06T04:38:15.851Z",
   "hosts": {
     "firestore": "127.0.0.1:18080",
     "datastore": "127.0.0.1:18080"
   },
   "projectId": "fireup-local",
-  "runId": "mw4f7xwc3239",
+  "runId": "mw4hetlx3049",
   "timeoutMs": 90000,
   "tally": {
-    "serves": 44,
-    "error": 27,
+    "serves": 49,
+    "error": 23,
     "refuses": 1,
     "not-measurable": 15,
     "diverges": 1
@@ -158,16 +158,14 @@
       "label": "IS_NULL / IS_NOT_NULL / IS_NAN / IS_NOT_NAN",
       "docTable": "queries",
       "fireupStatus": "served",
-      "observed": "error",
-      "detail": "gRPC 3: 3 INVALID_ARGUMENT: order by clause cannot contain more fields after the key"
+      "observed": "serves"
     },
     {
       "id": "query.composite-filters",
       "label": "AND and OR composite filters, nested",
       "docTable": "queries",
       "fireupStatus": "served",
-      "observed": "error",
-      "detail": "gRPC 3: 3 INVALID_ARGUMENT: order by clause cannot contain more fields after the key"
+      "observed": "serves"
     },
     {
       "id": "query.order-by",
@@ -202,8 +200,7 @@
       "label": "Filtering and ordering on __name__",
       "docTable": "queries",
       "fireupStatus": "served",
-      "observed": "error",
-      "detail": "gRPC 9: 9 FAILED_PRECONDITION: Firestore does not support descending key scans"
+      "observed": "serves"
     },
     {
       "id": "query.collection-group",
@@ -390,12 +387,18 @@
       "label": "Integers and doubles compare numerically",
       "docTable": null,
       "fireupStatus": "served",
-      "observed": "error",
-      "detail": "gRPC 3: 3 INVALID_ARGUMENT: order by clause cannot contain more fields after the key"
+      "observed": "serves"
     },
     {
       "id": "semantics.name-appended-to-order",
       "label": "__name__ is appended to every orderBy, in the last term's direction",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "semantics.nothing-follows-the-key-in-an-order",
+      "label": "An order_by term after __name__",
       "docTable": null,
       "fireupStatus": "served",
       "observed": "serves"

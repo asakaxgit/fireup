@@ -30,7 +30,7 @@ contract.
 It is the negative control, and without it the other files are worth nothing.
 `observe.mjs` reuses the suite's probes but drops every assertion about *who* is
 answering, so the obvious failure mode is a harness that reports divergences
-which are really its own bugs. The fireup run is the check: **67 `serves`, 6
+which are really its own bugs. The fireup run is the check: **68 `serves`, 6
 `refuses`, 15 `not-measurable`, and zero `diverges` or `error`**. Every probe
 therefore works when pointed at an implementation that claims the row, which is
 what makes another target's verdicts its answers rather than ours.
@@ -44,7 +44,33 @@ exactly this way:
 - `expectUnimplemented` demanding Fireup's own refusal wording (`/fireup local
   does not (serve|support)/`) from a stranger, which nothing else will ever say.
 
-Both are fixed. The control is how we knew.
+Both are fixed. The control is how we knew. A third was caught the same way in
+SAK-223: a probe asserting three refusals through `@google-cloud/firestore`
+scored `timeout` against **fireup**, because the client retries a refused query
+with backoff and three of those overrun the 20s probe timeout. The fix is in
+the probe, not the timeout — see
+[`../../../tests/conformance/README.md`](../../../tests/conformance/README.md#measuring-something-that-is-not-fireup).
+
+## What the emulator column changed about fireup
+
+Measuring is not the deliverable; four rows moved because of it. The first run
+found four probes building an `order_by` shape production rejects, and two
+`order_by` shapes fireup served that production refuses — one of them with a
+matrix probe *asserting* the false parity. SAK-223 fixed the behaviour, inverted
+that probe, and rebuilt the four others on a shape production accepts:
+
+| Row | First run | Now |
+|---|---|---|
+| `query.unary-filters` | `error` | `serves` |
+| `query.composite-filters` | `error` | `serves` |
+| `query.document-id-filter-and-order` | `error` | `serves` |
+| `semantics.integer-double-compare-numerically` | `error` | `serves` |
+| `semantics.nothing-follows-the-key-in-an-order` | — | `serves` (new row) |
+
+No row in `firebase-emulator-v1.22.0.json` now rejects a query fireup accepts.
+The 23 that remain are the 21 Datastore rows wanting `--database-mode` (served
+in the Datastore-mode file beside this one) and the two duplex-streaming rows
+the harness cannot drive.
 
 ## Reading a row
 

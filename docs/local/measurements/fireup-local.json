@@ -1,15 +1,15 @@
 {
-  "target": "fireup local (in-memory store)",
-  "measuredAt": "2026-11-06T03:34:25.479Z",
+  "target": "fireup local",
+  "measuredAt": "2026-11-06T04:43:53.605Z",
   "hosts": {
     "firestore": "127.0.0.1:4589",
     "datastore": "127.0.0.1:4589"
   },
   "projectId": "fireup-local",
-  "runId": "mw4f7air7079",
-  "timeoutMs": 90000,
+  "runId": "mw4hocua4904",
+  "timeoutMs": 20000,
   "tally": {
-    "serves": 67,
+    "serves": 68,
     "refuses": 6,
     "not-measurable": 15
   },
@@ -385,6 +385,13 @@
     {
       "id": "semantics.name-appended-to-order",
       "label": "__name__ is appended to every orderBy, in the last term's direction",
+      "docTable": null,
+      "fireupStatus": "served",
+      "observed": "serves"
+    },
+    {
+      "id": "semantics.nothing-follows-the-key-in-an-order",
+      "label": "An order_by term after __name__",
       "docTable": null,
       "fireupStatus": "served",
       "observed": "serves"

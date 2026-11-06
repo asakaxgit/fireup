@@ -204,7 +204,7 @@ immediately rather than after a scan.
 | `limit()`, `offset()` | served |
 | `select()` projection, including keys-only (`__name__`) | served |
 | `limitToLast()` | served — the SDK flips the order and reverses client-side |
-| Filtering and ordering on `__name__` | served |
+| Filtering and ordering on `__name__` | served — ascending; a *lone* descending key scan is `FAILED_PRECONDITION`, as in Firestore |
 | Collection group queries (`all_descendants`) | served — every collection of that id below the request's parent |
 | Cursors (`startAt`/`startAfter`/`endAt`/`endBefore`) | served, including `startAfter(documentSnapshot)` paging |
 | Nested field paths (`a.b`) in filters, orders, projections, and read masks | served, with `` `a.b` `` for a field whose name contains a dot |
@@ -231,6 +231,19 @@ wrong. Fireup implements the published Firestore behaviour for each:
 - **`__name__` is appended to every `orderBy`** in the direction of the last
   explicit term, so results have a total order instead of depending on the
   order documents came out of the store.
+- **An `order_by` term after `__name__`** is `INVALID_ARGUMENT` — *order by
+  clause cannot contain more fields after the key*. The key is the tie-breaker
+  that makes the order total, so nothing after it can change a result, and
+  Firestore refuses the shape rather than ignoring the dead term. It is easy to
+  send without meaning to: `@google-cloud/firestore` appends the implicit order
+  on an inequality field *after* an explicit one, so
+  `.where('v', '!=', null).orderBy('__name__')` builds it. Drop the explicit
+  `orderBy('__name__')` — the SDK adds the key itself.
+- **A lone descending key scan** — an `order_by` of nothing but `__name__`
+  descending — is `FAILED_PRECONDITION`: *Firestore does not support descending
+  key scans*. A descending `__name__` *after* an explicit term is served, which
+  is what `orderBy('v', 'desc')` compiles to, so this costs nothing but
+  `orderBy(FieldPath.documentId(), 'desc')` on its own.
 - **A cursor is a position, not a filter.** Its values line up positionally
   with the leading `orderBy` terms, so `startAfter(31)` skips *every* document
   whose first sort value is `31`, not just one of them. Passing a whole

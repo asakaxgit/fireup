@@ -255,7 +255,8 @@
       "label": "Filtering and ordering on __name__",
       "status": "served",
       "driver": "node-sdk",
-      "python": false
+      "python": false,
+      "note": "Ascending. SAK-223 inverted this probe: it asserted that a lone descending key scan returns documents in descending name order, which production refuses with FAILED_PRECONDITION, so the row published a parity claim that was false while the probe stayed green. The probe now asserts the refusal. A descending __name__ *after* an explicit term is still served — that is what every orderBy(field, 'desc') compiles to."
     },
     {
       "id": "query.collection-group",
@@ -668,6 +669,15 @@
       "status": "served",
       "driver": "node-sdk",
       "python": false
+    },
+    {
+      "id": "semantics.nothing-follows-the-key-in-an-order",
+      "docTable": null,
+      "label": "An order_by term after __name__",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false,
+      "note": "SAK-223. Refused with INVALID_ARGUMENT and production's own message, measured against cloud-firestore-emulator v1.22.0 over raw gRPC. `served` rather than `unimplemented` on purpose: this is not a gap, it is the behaviour the row promises, and `unimplemented` would demand gRPC UNIMPLEMENTED plus fireup's own refusal wording — wrong for a refusal Firestore owns. The official Node SDK builds this shape unprompted from orderBy('__name__') plus an inequality filter, which is why serving it locally broke a real query in production."
     },
     {
       "id": "transaction.atomic-commit",
