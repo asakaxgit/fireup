@@ -530,20 +530,26 @@ after the PR is merged"; this is the mechanism that makes it so.
 | `Cargo.lock` | first-party, generated | Apache-2.0 (repo) | Fireup | Pins the exact resolved version of all 229 transitive crates per commit | N/A | First-party generated metadata. Every entry resolves to `registry+https://github.com/rust-lang/crates.io-index`; checked for git dependencies, local path dependencies, and credentials — none present |
 | `cargo-deny` | 0.20.2, installed locally, not in CI | Apache-2.0 OR MIT | crates.io | Audited the committed lock file once, for this change; never linked into the binary | Yes (crate licence) | Developer tool. Adding it to CI is [SAK-218](/SAK/issues/SAK-218), not this change — see below |
 
-#### One known advisory, recorded rather than carried silently
+#### The one known advisory, now fixed rather than carried
 
-`cargo deny check` against the committed lock file reports `bans` clean and one
-vulnerability: **`RUSTSEC-2026-0258`** in `h2` 0.3.27 (empty `DATA` frames
-queued without limit; unbounded memory or a length-overflow panic; low
-severity). Its path is `fireup → tonic 0.11 → axum 0.6 → hyper 0.14 → h2 0.3`,
-and the exposure is the gRPC surface of `fireup local` — a local development
-emulator, not something this repository asks anyone to expose. The fix needs
-`h2 >= 0.4.16`, hence hyper 1.x, hence **tonic 0.12+**, and `Cargo.toml` pins
-tonic 0.11 deliberately so the local data plane and the export parser share one
-`prost` version. So it is not a lock-file bump, and this change does not move
-it. [SAK-218](/SAK/issues/SAK-218) carries the decision, along with the
-`deny.toml` licence allow-list that `cargo deny check licenses` needs before it
-can run green. `cargo-audit` is not installed in this workspace and overlaps
+`cargo deny check` against the committed lock file reports `advisories ok,
+bans ok, licenses ok, sources ok`. Nothing is accepted; `[advisories] ignore` in
+`deny.toml` is empty.
+
+It reported one vulnerability when this section was written:
+**`RUSTSEC-2026-0258`** in `h2` 0.3.27 (empty `DATA` frames queued without
+limit; unbounded memory or a length-overflow panic; low severity), reached as
+`fireup → tonic 0.11 → axum 0.6 → hyper 0.14 → h2 0.3`. The fix needed
+`h2 >= 0.4.16`, hence hyper 1.x, hence **tonic 0.12+** — and `Cargo.toml` pinned
+tonic 0.11 deliberately, so the local data plane and the export parser would
+share one `prost` version. That made it a migration rather than a lock-file bump,
+so [SAK-218](/SAK/issues/SAK-218) recorded the acceptance with a review date and
+[SAK-220](/SAK/issues/SAK-220) did the migration: tonic 0.13 / prost 0.13, which
+makes the chain `fireup → tonic 0.13 → axum 0.8 → hyper 1.12 → h2 0.4.20`, still
+on a single `prost`. The `ignore` entry went with it, which
+`-D advisory-not-detected` in the CI job required rather than merely encouraged.
+
+`cargo-audit` is not installed in this workspace and overlaps
 `cargo deny check advisories`, so only one of the two is worth adopting.
 ### SAK-217 notes — measuring the comparison instead of reading it
 
