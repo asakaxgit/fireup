@@ -20,6 +20,14 @@ on:
   # repository is stacked (one PR based on another, not on `main`), so a
   # `branches: [main]` filter would skip exactly the PRs that most need
   # checking — every layer of a stack but the bottom one.
+  #
+  # Removing the filter is necessary but not sufficient: GitHub only schedules a
+  # `pull_request` run for a workflow that already exists on the PR's **base**
+  # branch. Measured on this very PR — the layer above it (base
+  # `sak-206/badges-matrix`, which carries this file) got automatic CI, while
+  # this PR (base `sak-203/...`, which predates the file) got none and had to be
+  # checked by `workflow_dispatch`. That resolves itself the moment this lands on
+  # `main`; until then, dispatch manually and say so in the PR.
   pull_request:
   workflow_dispatch:
 
