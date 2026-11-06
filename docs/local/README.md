@@ -148,6 +148,11 @@ is a gRPC `UNIMPLEMENTED` (or `INVALID_ARGUMENT` for a malformed request) whose
 message names the missing piece, so an SDK failure reads as a clear gap instead
 of a hang, a protocol error, or — worst — a plausible-looking wrong result.
 
+Every row below is checked, not just written down:
+[`tests/conformance/`](../../tests/conformance/README.md) drives one probe per
+row with the official SDKs, and `cargo test --test fidelity_matrix_tests` fails
+if this table and that suite stop agreeing. See [Tests](#tests).
+
 ### RPCs
 
 All 17 RPCs of `google.firestore.v1.Firestore`. The 12 marked **served** are the
@@ -168,7 +173,7 @@ v1 surface frozen in the `firestore-v1-contract` document on
 | `RunQuery` | served | See the query matrix below. Transactions and `new_transaction` supported; `read_time` and `explain_options` refused. |
 | `BatchWrite` | served | Deliberately **not** atomic, per the API: one status per write. Serves [field transforms](#field-transforms). |
 | `ListCollectionIds` | served | Paged by resume token. `read_time` refused. |
-| `Listen` | `UNIMPLEMENTED` | Realtime listeners. No change feed exists to drive them. |
+| `Listen` | `UNIMPLEMENTED` | Realtime listeners. No change feed exists to drive them. The refusal is clear on the wire, but the Node SDK swallows it — see [Other known limits](#other-known-limits). |
 | `Write` (streaming) | `UNIMPLEMENTED` | `Commit` is the write path SDKs use. |
 | `RunAggregationQuery` | `UNIMPLEMENTED` | `count()`/`sum()`/`average()`. |
 | `PartitionQuery` | `UNIMPLEMENTED` | Parallel-scan partitioning, for data-pipeline clients. |
@@ -333,6 +338,18 @@ cursors, property transforms, and nested property masks are refused.
   transforms](#field-transforms) are served, but their Datastore spelling
   (`Mutation.property_transforms`) is still `UNIMPLEMENTED` — the entity
   encoding has to be mapped onto them first.
+- **`onSnapshot()` hangs instead of failing.** This is the one place the "a gap
+  is never a hang" rule does not reach the caller, and it is upstream rather
+  than ours. The server refuses `Listen` with a clear `UNIMPLEMENTED` — verified
+  on the wire — but `@google-cloud/firestore` marks the stream healthy before
+  the trailers-only status lands, so its `Watch` attaches its own error handler
+  too late, sees only the stream end, and synthesises
+  `GoogleError('Stream ended unexpectedly')` with code `UNKNOWN`, which it
+  treats as retryable. It then reopens the stream forever and the error callback
+  is never called. Nothing in this repository can fix that from the server side;
+  use a gRPC client directly if you need to see the refusal. The conformance
+  suite pins the behaviour (`limits.listen-sdk-retry-loop`) so it cannot change
+  silently, and that row goes away when `Listen` is served.
 - **No field deletion through a mask.** A masked field that the request does not
   carry is left alone instead of being deleted.
 - **No point-in-time reads.** The store keeps only the current version of a
@@ -680,7 +697,7 @@ project rule, not a preference.
 
 ## Tests
 
-Two layers, because they prove different things:
+Three layers, because they prove different things:
 
 ```bash
 # Fast: drives the server over real gRPC and real HTTP/1.1.
@@ -689,11 +706,19 @@ cargo test --test local_datastore_tests
 cargo test --test local_auth_tests
 cargo test --lib local::
 
+# Faster still, and needs no server: the matrix above and the suite that
+# checks it have to agree.
+cargo test --test fidelity_matrix_tests
+
 # Durable stores. Skip unless a dedicated test database is configured.
 FIREUP_TEST_POSTGRES_URL=postgresql://fireup:pw@127.0.0.1:5433/fireup_dev \
   cargo test --test local_postgres_store_tests --test local_auth_postgres_tests
 
-# Slow but conclusive: drives it with Google's official client libraries.
+# Slow but conclusive: every row of the fidelity matrix, driven by Google's
+# official client libraries. One command for all three layers below.
+scripts/conformance-local.sh
+
+# Or the individual smoke scripts, which are narrower and quicker to read.
 scripts/smoke-local-firestore.sh
 scripts/smoke-local-datastore.sh
 scripts/smoke-local-auth.sh
@@ -703,6 +728,60 @@ Each smoke script builds the binary, starts the server on a free port, runs its
 Node test, and stops the server. They need network access the first time, to
 `npm install` into `tests/local-smoke/` (Firestore and Auth) and
 `tests/local-smoke-datastore/`.
+
+### The conformance suite
+
+The fidelity matrix above is the promise `fireup local` makes about itself, and
+`tests/conformance/` is what keeps it honest. The matrix is mirrored as data in
+[`tests/conformance/matrix.json`](../../tests/conformance/matrix.json) — one
+entry per documented row, each with the status it claims — and the suite runs
+one probe per entry:
+
+| Status in the matrix | What the probe has to prove |
+|---|---|
+| `served` | the feature works through an official SDK |
+| `unimplemented` | the call fails with gRPC `UNIMPLEMENTED` **and** a message naming the gap |
+| `documented-divergence` | the documented, deliberately-different behaviour still holds |
+
+The matrix decides which of those a row demands, so **flipping a row flips what
+CI requires**. A probe with no branch for the status its row claims is a
+failure, not a skip: you cannot mark something served without writing the check
+that proves it. Coverage is enforced in both directions too — a documented row
+with no probe fails, and a probe for a row that no longer exists fails.
+
+`cargo test --test fidelity_matrix_tests` is the cheap half of that. It parses
+the tables in this file, compares them with `matrix.json` row by row, checks
+every RPC in the vendored protos has a documented status, and checks every
+entry is claimed by a probe. No server, no network, under a second — so drift
+is caught long before anyone waits on an SDK.
+
+Three drivers run the probes, because a client library only exercises the RPCs
+it chooses:
+
+- **`node-sdk`** — `@google-cloud/firestore` and `@google-cloud/datastore`.
+- **`node-grpc`** — raw gRPC over the vendored public protos, for what no SDK
+  will send: `GetDocument` (a `.get()` goes to `BatchGetDocuments`),
+  `CreateDocument`/`UpdateDocument`/`DeleteDocument` (all of which go through
+  `Commit`), `PartitionQuery`, `ExecutePipeline`, the streaming `Write`,
+  `Listen` (see below), `ReserveIds`, Datastore GQL, cursors, property masks and
+  property transforms, a `read_time` consistency selector, a `find_nearest`
+  clause, a `maximum`/`minimum` field transform, a collection group query with
+  no collection id, and a literal `== NaN`.
+- **`auth-smoke`** — the Identity Toolkit rows, driven by `firebase-admin` and
+  the `firebase` client SDK in `scripts/smoke-local-auth.sh`.
+
+`tests/conformance/python/conformance.py` then re-runs the subset marked
+`"python": true` with Google's official **Python** libraries. Two SDKs do not
+agree about which RPC implements which call or how a status maps to an
+exception — the Python library reports `UNIMPLEMENTED` as
+`MethodNotImplemented`, for one — so a server that satisfies one can still fail
+the other. It is optional: `scripts/conformance-local.sh` skips it with a
+message when `google-cloud-firestore` is not installed, and never counts a
+missing dependency as a pass.
+
+```bash
+python3 -m pip install -r tests/conformance/python/requirements.txt
+```
 
 Each store trait has one contract that both of its implementations must satisfy:
 `store::conformance` for documents and `auth::store::conformance` for accounts.
@@ -736,8 +815,14 @@ The Rust tests can pass while the SDK test fails — the SDK picks its own RPCs
 `RunQuery`, `listDocuments()` goes to `ListDocuments` with `show_missing`) and
 does its own serialization. Keep both.
 
-Both layers also run in CI, in `.github/workflows/local_firestore.yml`: the Rust
-tests, then the SDK smoke test against the in-memory **and** PostgreSQL stores.
+Every layer also runs in CI, in `.github/workflows/local_firestore.yml`: the
+Rust tests and the matrix/docs sync check, then the SDK smoke tests, then the
+full conformance suite — each SDK job against the in-memory **and** PostgreSQL
+stores, because "the matrix holds" has to be true of the durable backend too.
+The conformance suite is re-runnable against a persistent database: every
+resource name carries a run id, so a second run starts from a clean namespace
+instead of tripping over the last one's documents.
+
 Its triggers are commented out for now, matching `integration_tests.yml` — CI in
 this repository is manual-only until the repo-wide re-enable, so run it with
 `workflow_dispatch`.
