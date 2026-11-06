@@ -27,6 +27,11 @@
       "labelColumn": "Endpoint",
       "statusColumn": null
     },
+    "datastore-property-transforms": {
+      "heading": "#### Datastore property transforms",
+      "labelColumn": "PropertyTransform",
+      "statusColumn": 1
+    },
     "auth-email-flows": {
       "heading": "### Email flows: no mail is sent, and the link is readable",
       "labelColumn": "requestType",
@@ -762,13 +767,73 @@
       "python": false
     },
     {
-      "id": "datastore.property-transforms",
-      "docTable": null,
-      "label": "Datastore property transforms (Mutation.property_transforms)",
-      "status": "unimplemented",
+      "id": "datastore.transform.server-value",
+      "docTable": "datastore-property-transforms",
+      "label": "set_to_server_value: REQUEST_TIME",
+      "status": "served",
       "driver": "node-grpc",
       "python": false,
-      "note": "The Firestore spelling is served; the Datastore one is not."
+      "note": "@google-cloud/datastore has no handwritten surface for property_transforms, so every row here is driven on the wire."
+    },
+    {
+      "id": "datastore.transform.increment",
+      "docTable": "datastore-property-transforms",
+      "label": "increment",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "@google-cloud/datastore has no handwritten surface for property_transforms, so every row here is driven on the wire."
+    },
+    {
+      "id": "datastore.transform.array-union",
+      "docTable": "datastore-property-transforms",
+      "label": "append_missing_elements",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "@google-cloud/datastore has no handwritten surface for property_transforms, so every row here is driven on the wire."
+    },
+    {
+      "id": "datastore.transform.array-remove",
+      "docTable": "datastore-property-transforms",
+      "label": "remove_all_from_array",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "@google-cloud/datastore has no handwritten surface for property_transforms, so every row here is driven on the wire."
+    },
+    {
+      "id": "datastore.transform.maximum-minimum",
+      "docTable": "datastore-property-transforms",
+      "label": "maximum / minimum",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false
+    },
+    {
+      "id": "datastore.transform.property-path",
+      "docTable": "datastore-property-transforms",
+      "label": "A property path (foo.bar) or an escaped property name",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false
+    },
+    {
+      "id": "datastore.transform.runs-after-the-operation",
+      "docTable": null,
+      "label": "A Datastore transform runs after the operation, so an unmasked update resets the property first",
+      "status": "documented-divergence",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "Faithful to the proto and surprising in practice: an increment accumulates only when the submitted entity carries the current value. SAK-203 (masked mutations) is what makes it ergonomic."
+    },
+    {
+      "id": "datastore.transform.on-delete",
+      "docTable": null,
+      "label": "A transform on a delete mutation is INVALID_ARGUMENT",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false
     },
     {
       "id": "limits.read-time-consistency",

@@ -31,9 +31,12 @@ fn matrix() -> serde_json::Value {
 }
 
 /// Markdown and prose both say the same thing in several ways; compare meaning,
-/// not formatting. Backticks are decoration, and so is runs of whitespace.
+/// not formatting. Backticks, emphasis, and runs of whitespace are decoration —
+/// re-styling a row must not count as changing what it claims.
 fn normalize_label(cell: &str) -> String {
-    let stripped: String = cell.chars().filter(|c| *c != '`').collect();
+    // Not underscores: `set_to_server_value` and `all_descendants` are names,
+    // not emphasis, and flattening them could conflate two distinct rows.
+    let stripped: String = cell.chars().filter(|c| *c != '`' && *c != '*').collect();
     stripped.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

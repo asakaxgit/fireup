@@ -30,6 +30,28 @@ const expectCode = async (expected, fn) => {
 
 const names = (rows, datastore) => rows.map((row) => row[datastore.KEY].name)
 
+const entityKey = (projectId, kind, name) => ({
+  partition_id: { project_id: projectId },
+  path: [{ kind, name }],
+})
+
+/**
+ * Upsert an entity with `properties` and apply `transforms` to it, on the wire.
+ * Returns the `CommitResponse` so a probe can check
+ * `mutation_results[].transform_results` as well as the stored entity.
+ */
+const commitWithTransforms = (raw, projectId, kind, name, transforms, properties = {}) =>
+  unary(raw.datastore, 'Commit', {
+    project_id: projectId,
+    mode: 'NON_TRANSACTIONAL',
+    mutations: [
+      {
+        upsert: { key: entityKey(projectId, kind, name), properties },
+        property_transforms: transforms,
+      },
+    ],
+  })
+
 /** Four tasks of one kind, the dataset the query probes read. */
 const seedTasks = async (datastore, kind) => {
   await datastore.save([
@@ -346,35 +368,203 @@ export const datastoreProbes = [
     },
   },
 
+  // ---- property transforms --------------------------------------------------
+  //
+  // @google-cloud/datastore has no handwritten surface for
+  // `Mutation.property_transforms` — `save()` has no increment — so every probe
+  // below drives the published proto directly. `mutationResults[].transform_results`
+  // is read back as well as the stored entity: a client reads the new counter
+  // off the commit rather than with a second round trip, so a correct value in
+  // the store and a wrong one in the response is still a bug.
+
   {
-    id: 'datastore.property-transforms',
-    unimplemented: async ({ datastore, raw, projectId, freshKind, expectUnimplemented }) => {
-      // The Firestore spelling of a transform is served; the Datastore one is
-      // not, and @google-cloud/datastore has no sentinel for it — so this goes
-      // on the wire.
-      const kind = freshKind('propertytransform')
+    id: 'datastore.transform.server-value',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('dstransformtime')
       const key = datastore.key([kind, 'one'])
       await datastore.save({ key, data: { n: 1 } })
 
-      await expectUnimplemented(
-        () =>
-          unary(raw.datastore, 'Commit', {
-            project_id: projectId,
-            mode: 'NON_TRANSACTIONAL',
-            mutations: [
-              {
-                update: {
-                  key: { partition_id: { project_id: projectId }, path: [{ kind, name: 'one' }] },
-                  properties: {},
-                },
-                property_transforms: [{ property: 'n', increment: { integer_value: '1' } }],
-              },
-            ],
-          }),
-        { names: /property transform/i },
+      const response = await commitWithTransforms(raw, projectId, kind, 'one', [
+        { property: 'at', set_to_server_value: 'REQUEST_TIME' },
+      ])
+      const [result] = response.mutation_results
+      assert.ok(
+        result.transform_results?.[0]?.timestamp_value,
+        `transform_results must carry the timestamp, got ${JSON.stringify(result.transform_results)}`,
       )
+      assert.ok((await datastore.get(key))[0].at, 'the property must have been written')
+    },
+  },
 
-      assert.equal((await datastore.get(key))[0].n, 1, 'a refused transform writes nothing')
+  {
+    id: 'datastore.transform.increment',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('dstransformincr')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { n: datastore.int(10) } })
+
+      // The entity carries the current value, because an unmasked update
+      // replaces the entity before the transform reads it — see
+      // datastore.transform.runs-after-the-operation.
+      const response = await commitWithTransforms(
+        raw,
+        projectId,
+        kind,
+        'one',
+        [{ property: 'n', increment: { integer_value: '5' } }],
+        { n: { integer_value: '10' } },
+      )
+      assert.equal(
+        response.mutation_results[0].transform_results[0].integer_value,
+        '15',
+        'an integer increment of an integer property stays exact',
+      )
+      assert.equal(Number((await datastore.get(key))[0].n), 15)
+    },
+  },
+
+  {
+    id: 'datastore.transform.array-union',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('dstransformunion')
+      const key = datastore.key([kind, 'one'])
+
+      const response = await commitWithTransforms(
+        raw,
+        projectId,
+        kind,
+        'one',
+        [
+          {
+            property: 'tags',
+            append_missing_elements: {
+              values: [{ string_value: 'a' }, { string_value: 'b' }, { string_value: 'b' }],
+            },
+          },
+        ],
+        { tags: { array_value: { values: [{ string_value: 'a' }] } } },
+      )
+      assert.ok(
+        'null_value' in (response.mutation_results[0].transform_results[0] ?? {}),
+        'the array transforms report null, as the contract specifies',
+      )
+      assert.deepEqual((await datastore.get(key))[0].tags, ['a', 'b'])
+    },
+  },
+
+  {
+    id: 'datastore.transform.array-remove',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('dstransformremove')
+      const key = datastore.key([kind, 'one'])
+
+      await commitWithTransforms(
+        raw,
+        projectId,
+        kind,
+        'one',
+        [{ property: 'tags', remove_all_from_array: { values: [{ string_value: 'a' }] } }],
+        {
+          tags: {
+            array_value: {
+              values: [{ string_value: 'a' }, { string_value: 'b' }, { string_value: 'a' }],
+            },
+          },
+        },
+      )
+      assert.deepEqual((await datastore.get(key))[0].tags, ['b'], 'every occurrence is removed')
+    },
+  },
+
+  {
+    id: 'datastore.transform.maximum-minimum',
+    unimplemented: async ({ datastore, raw, projectId, freshKind, expectUnimplemented }) => {
+      const kind = freshKind('dstransformmax')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { n: datastore.int(1) } })
+
+      for (const transform of [
+        { property: 'n', maximum: { integer_value: '5' } },
+        { property: 'n', minimum: { integer_value: '5' } },
+      ]) {
+        await expectUnimplemented(
+          () => commitWithTransforms(raw, projectId, kind, 'one', [transform]),
+          { names: /field transform/i },
+        )
+      }
+      assert.equal(Number((await datastore.get(key))[0].n), 1, 'a refused transform writes nothing')
+    },
+  },
+
+  {
+    id: 'datastore.transform.property-path',
+    unimplemented: async ({ datastore, raw, projectId, freshKind, expectUnimplemented }) => {
+      const kind = freshKind('dstransformpath')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { n: datastore.int(1) } })
+
+      // A path names a property inside an entity value — a nested document
+      // field — and Datastore escapes `.` and `\` in a property name, so a name
+      // containing either is refused too. Incrementing the wrong property is
+      // worse than saying no.
+      for (const property of ['outer.inner', 'odd\\name']) {
+        await expectUnimplemented(
+          () =>
+            commitWithTransforms(raw, projectId, kind, 'one', [
+              { property, increment: { integer_value: '1' } },
+            ]),
+          { names: /property paths in transforms/i },
+        )
+      }
+      assert.equal(Number((await datastore.get(key))[0].n), 1)
+    },
+  },
+
+  {
+    id: 'datastore.transform.on-delete',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('dstransformdelete')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { n: datastore.int(1) } })
+
+      // The proto allows transforms only on insert/update/upsert.
+      await expectCode(GRPC.INVALID_ARGUMENT, () =>
+        unary(raw.datastore, 'Commit', {
+          project_id: projectId,
+          mode: 'NON_TRANSACTIONAL',
+          mutations: [
+            {
+              delete: entityKey(projectId, kind, 'one'),
+              property_transforms: [{ property: 'n', increment: { integer_value: '1' } }],
+            },
+          ],
+        }),
+      )
+      assert.ok((await datastore.get(key))[0], 'the refused delete must not have applied')
+    },
+  },
+
+  {
+    id: 'datastore.transform.runs-after-the-operation',
+    'documented-divergence': async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('dstransformorder')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { n: datastore.int(10) } })
+
+      // `property_mask` on a mutation is still unserved, so an unmasked update
+      // replaces the whole entity before the transform reads it: an increment
+      // accumulates only when the submitted entity carries the current value.
+      // Faithful to the proto, surprising in practice, so it is pinned here
+      // rather than left for somebody to discover as a lost counter.
+      const response = await commitWithTransforms(raw, projectId, kind, 'one', [
+        { property: 'n', increment: { integer_value: '5' } },
+      ])
+      assert.equal(
+        response.mutation_results[0].transform_results[0].integer_value,
+        '5',
+        'docs/local/README.md: a mutation that omits the property resets it to the operand',
+      )
+      assert.equal(Number((await datastore.get(key))[0].n), 5)
     },
   },
 
