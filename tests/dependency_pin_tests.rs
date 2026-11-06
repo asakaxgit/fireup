@@ -984,6 +984,313 @@ fn check_advisory_db_is_the_official_one(deny: &str) -> Result<(), String> {
     }
 }
 
+/// `true` if `entry` has `key` as a key — `key` followed by `=`, not merely the
+/// text `key` somewhere inside it.
+///
+/// The prefix check is what keeps `allow` from matching `allow-globs`: the text
+/// is there, but what follows it is `-globs =` and not `=`.
+fn has_key(entry: &str, key: &str) -> bool {
+    count_key(entry, key) > 0
+}
+
+/// How many times `key` appears as a key in `entry`.
+///
+/// Counted rather than merely found, because one bypass entry may list several
+/// `allow = [{ path, checksum }]` pairs and the guard below needs to know that
+/// *every* path is checksummed, not that one of them is.
+fn count_key(entry: &str, key: &str) -> usize {
+    let bytes = entry.as_bytes();
+    let mut count = 0;
+    let mut from = 0;
+    while let Some(at) = entry[from..].find(key) {
+        let start = from + at;
+        let end = start + key.len();
+        let joined_to_a_longer_name = start > 0
+            && matches!(bytes[start - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-');
+        if !joined_to_a_longer_name && entry[end..].trim_start().starts_with('=') {
+            count += 1;
+        }
+        from = end;
+    }
+    count
+}
+
+/// The inline-table entries of `[bans.build] bypass`, one `String` each.
+///
+/// `setting_array` is no use here: it splits the array on commas, and every
+/// entry of this one is an inline table full of commas. This reader collects the
+/// array's text the same way — comments stripped, newlines ignored until the
+/// brackets balance — and then splits it into the `{ … }` groups at depth one.
+///
+/// `None` means there is a live `bypass` line whose value this reader cannot
+/// read as an array of inline tables. The caller turns that into a failure
+/// rather than a pass, for the reason SAK-235 gave for `[graph] targets`.
+fn bypass_entries(deny: &str) -> Option<Vec<String>> {
+    let mut collected: Option<String> = None;
+    let mut body: Option<String> = None;
+    for line in deny.lines() {
+        let code = line.split('#').next().unwrap_or("");
+        if let Some(open) = body.as_mut() {
+            open.push(' ');
+            open.push_str(code);
+        } else if let Some((candidate, value)) = code.split_once('=') {
+            if candidate.trim() == "bypass" {
+                if !value.trim_start().starts_with('[') {
+                    return None;
+                }
+                body = Some(value.to_string());
+            }
+        }
+
+        let Some(open) = body.as_deref() else {
+            continue;
+        };
+        if open.matches('[').count() != open.matches(']').count() {
+            continue;
+        }
+        collected = Some(open.to_string());
+        body = None;
+    }
+    // An array that never closes is not readable either.
+    if body.is_some() {
+        return None;
+    }
+
+    let inner = collected?
+        .trim()
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .map(str::to_string)?;
+
+    let mut entries = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in inner.chars() {
+        match ch {
+            '{' => {
+                depth += 1;
+                if depth > 1 {
+                    current.push(ch);
+                }
+            }
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    entries.push(std::mem::take(&mut current));
+                } else {
+                    current.push(ch);
+                }
+            }
+            // Between entries only whitespace and separators belong. A bare
+            // value at depth zero is a shape this reader does not know.
+            _ if depth == 0 => {
+                if !ch.is_whitespace() && ch != ',' {
+                    return None;
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    Some(entries)
+}
+
+/// `Err` unless `[bans.build]` actually scans the binaries the build runs, and
+/// every exemption is pinned to a path and its bytes.
+///
+/// This table did not exist in `deny.toml` until SAK-237, which means cargo-deny
+/// was looking at no build script and no bundled executable anywhere in the
+/// tree. Everything else in that file reasons about source — its licence, its
+/// advisories, its version, its registry — and none of that says anything about
+/// an ELF binary inside a `.crate` tarball. `protoc-bin-vendored` is a direct
+/// build-dependency of Fireup (`cargo tree --locked -i protoc-bin-vendored` →
+/// `[build-dependencies] fireup v0.1.0`); its eight platform crates each ship
+/// one precompiled `protoc`, and `build.rs` executes the linux-x86_64 one on
+/// every build in CI and on every developer machine.
+///
+/// **Four assertions, because three of the four ways to lose this are green.**
+/// All measured on the stack tip (SAK-237) by varying only this table:
+///
+///   no `[bans.build]` at all                      exit 0   —            <- hole
+///   `executables = "deny"` alone                  exit 0   0 findings   <- inert
+///   + `include-dependencies = true`               exit 2   8 findings
+///   `executables = "allow"` + include             exit 0   0 findings   control
+///
+/// `include-dependencies` defaults to false, which scopes the scan to the
+/// workspace, and Fireup bundles no binaries of its own — so `executables =
+/// "deny"` on its own reads as enforcement and enforces nothing. Absence of
+/// `include-dependencies` therefore has to fail rather than pass: the same
+/// two-keys-one-fact shape as `yanked` / `disable-yank-checking` (SAK-231) and
+/// `include-dev` / `exclude-dev` (SAK-234).
+///
+/// The bypass list is the third assertion, and it has two inert shapes of its
+/// own. Measured against the eight-crate shipping shape:
+///
+///   `allow = [{ path, checksum }]` x8             exit 0   `bans ok`
+///   one checksum, one hex digit flipped           exit 2   `error[checksum-mismatch]`
+///   one path wrong, checksum right                exit 2   `error[detected-executable]`
+///   `bypass = [{ crate = "…" }]` — name only      exit 2   8 findings   <- inert
+///   `allow = [{ path }]`, no `checksum`           exit 0   0 findings   <- hole
+///   `allow-globs = ["bin/*"]`, one entry          exit 2   7 findings
+///   `allow-globs = ["bin/*"]`, all eight          exit 0   0 findings
+///   same glob on an unrelated crate               exit 2   8 findings   control
+///   `executables = "allow"`                       exit 0   0 findings   control
+///
+/// A bare crate name exempts nothing at all. `allow` without `checksum` exempts
+/// everything at that path for ever, and `checksum` is optional in cargo-deny's
+/// schema (`error[unexpected-keys]` lists `["path", "checksum"]`) — so dropping
+/// it is a one-token edit that keeps the gate green while unpinning the bytes of
+/// every binary in the list. `allow-globs` is the shape that *looks* right and
+/// exempts whatever the crate ever puts in `bin/`, including a second binary
+/// that does not exist yet. The two control arms are what make the glob green a
+/// statement about these entries rather than about the check being switched off.
+///
+/// The fourth assertion is the fail-closed branch: a live `bypass` line this
+/// reader cannot parse as an array of inline tables must not be reported as a
+/// checksum-pinned list.
+///
+/// Also measured, and deliberately not asserted: `include-dependencies` is the
+/// only kill switch this policy has. `[bans] skip` and `skip-tree` leave the
+/// count at eight (they only touch duplicate-version analysis),
+/// `[graph] exclude-dev` leaves it at eight (a build-dependency is not a dev
+/// dependency), and `[graph] targets = ["x86_64-unknown-linux-gnu"]` leaves it
+/// at eight too — so unlike the licence and advisory checks, this one does not
+/// depend on SAK-235's decision. `[graph] exclude` does narrow it, 8 -> 7, and
+/// is left alone for the reason SAK-234 and SAK-235 left it alone: it names the
+/// crate it excuses.
+///
+/// Unlike most of this file, this guard is not the only thing watching: the
+/// `deny` job runs the same config, so a developer who flips one checksum sees
+/// `bans FAILED` from the tool. What the tool cannot report is the table going
+/// away, `include-dependencies` going false, or a checksum being deleted —
+/// every one of those makes it greener.
+fn check_build_executables_are_pinned(deny: &str) -> Result<(), String> {
+    match setting(deny, "executables").as_deref() {
+        Some("deny") => {}
+        Some(level) => {
+            return Err(format!(
+                "deny.toml sets `[bans.build] executables = \"{level}\"`, not \"deny\", so the \
+                 only binary blob Fireup's build actually runs is not checked at all. \
+                 `protoc-bin-vendored` is a direct build-dependency and its eight platform \
+                 crates ship a precompiled `protoc` each, downloaded from crates.io; `build.rs` \
+                 executes the linux-x86_64 one on every build. Measured on this tree (SAK-237): \
+                 \"deny\" with `include-dependencies = true` exits 2 with eight \
+                 `error[detected-executable]`, and the same tree at this value exits 0 with \
+                 `bans ok`. Set it to \"deny\"."
+            ));
+        }
+        None => {
+            return Err(
+                "deny.toml has no `[bans.build] executables` setting. Without it cargo-deny \
+                 looks at no build script and no bundled executable anywhere in the tree — every \
+                 other check in that file reasons about source, and none of them says anything \
+                 about an ELF binary inside a `.crate` tarball. That is how this file shipped \
+                 before SAK-237: `cargo deny check bans` exited 0 and reported nothing while \
+                 `build.rs` ran a vendored `protoc` on every build. Set it to \"deny\" and add \
+                 `include-dependencies = true` beside it."
+                    .into(),
+            );
+        }
+    }
+
+    match setting(deny, "include-dependencies").as_deref() {
+        Some("true") => {}
+        Some(value) => {
+            return Err(format!(
+                "deny.toml sets `[bans.build] include-dependencies = {value}`, which scopes the \
+                 executable scan to the workspace — and Fireup bundles no binaries of its own, \
+                 so the scan finds nothing and reports success with `executables = \"deny\"` \
+                 still sitting above it. Measured on this tree (SAK-237): `executables = \
+                 \"deny\"` alone exits 0 with zero findings, and adding this key takes the \
+                 identical tree to exit 2 with eight. Set it to true."
+            ));
+        }
+        None => {
+            return Err(
+                "deny.toml has no `[bans.build] include-dependencies`, and absence is the \
+                 cargo-deny default of false — the executable scan then covers the workspace \
+                 only, which bundles no binaries, so `executables = \"deny\"` above it is inert. \
+                 This is the trap this guard exists for: the key that says `deny` is not the key \
+                 that decides whether anything is scanned. Measured on this tree (SAK-237), \
+                 `executables = \"deny\"` with this line deleted exits 0 with `bans ok` and zero \
+                 findings while eight vendored `protoc` binaries sit in the build graph. Set it \
+                 to true."
+                    .into(),
+            );
+        }
+    }
+
+    // No `bypass` list at all is the strictest configuration there is, and has
+    // to pass — the same reason `check_graph_covers_every_target` returns early
+    // on an absent `targets`. The two cases below are "a live line this reader
+    // cannot parse", which is a different thing from absence.
+    if setting(deny, "bypass").is_none() {
+        return Ok(());
+    }
+
+    let Some(entries) = bypass_entries(deny) else {
+        return Err(
+            "deny.toml has a live `[bans.build] bypass` line that this guard cannot read as an \
+             array of inline tables, so it cannot tell whether the exemptions are pinned to a \
+             checksum and must not report them as pinned. Same reasoning as the `[graph] targets` \
+             scalar branch (SAK-235): a form this reader does not understand must never be what \
+             makes it pass. Write it as `bypass = [{ crate = \"…\", allow = [{ path = \"…\", \
+             checksum = \"…\" }] }]`."
+                .into(),
+        );
+    };
+
+    for entry in &entries {
+        if has_key(entry, "allow-globs") {
+            return Err(format!(
+                "deny.toml has a `[bans.build] bypass` entry using `allow-globs`:{entry}. A glob \
+                 exempts whatever that crate ever puts in the matching directory, including a \
+                 second binary that does not exist yet, so the exemption grows silently with \
+                 upstream. Measured on this tree (SAK-237): `allow-globs = [\"bin/*\"]` on all \
+                 eight crates is exit 0 and `bans ok`, exactly like the checksum form — the \
+                 difference only shows up later. Use `allow = [{{ path, checksum }}]`, which \
+                 fixes the path and the bytes: a flipped hex digit gives \
+                 `error[checksum-mismatch]` and a wrong path gives \
+                 `error[detected-executable]` (both measured)."
+            ));
+        }
+
+        let paths = count_key(entry, "path");
+        let checksums = count_key(entry, "checksum");
+
+        if paths == 0 {
+            return Err(format!(
+                "deny.toml has a `[bans.build] bypass` entry that exempts no path:{entry}. A bare \
+                 crate name is completely inert against `executables` — measured on this tree \
+                 (SAK-237), `bypass = [{{ crate = \"protoc-bin-vendored-linux-x86_64\" }}]` \
+                 leaves the finding count at eight, unchanged — so an entry in this shape reads \
+                 as an exemption that was granted and was not. Either give it \
+                 `allow = [{{ path, checksum }}]`, or delete it. (An entry carrying only \
+                 `build-script` lands here too: that key does nothing while \
+                 `allow-build-scripts` is unset, and adopting that key is a deliberate change to \
+                 make here as well.)"
+            ));
+        }
+
+        if checksums != paths {
+            return Err(format!(
+                "deny.toml has a `[bans.build] bypass` entry with {paths} exempted path(s) but \
+                 {checksums} checksum(s):{entry}. `checksum` is optional in cargo-deny's schema, \
+                 so leaving it out is a one-token edit that keeps the gate green while unpinning \
+                 the bytes: measured on this tree (SAK-237), all eight entries written as \
+                 `allow = [{{ path }}]` with no checksum exit 0 with `bans ok` and zero \
+                 findings. The point of this list is that a new upstream binary has to be looked \
+                 at, which is what the checksum forces — regenerate with `sha256sum \
+                 ~/.cargo/registry/src/*/protoc-bin-vendored-*-<version>/bin/*`."
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -1095,6 +1402,13 @@ fn deny_toml_reports_unsound_advisories_for_the_whole_graph() {
 #[test]
 fn deny_toml_reads_the_official_advisory_database() {
     if let Err(reason) = check_advisory_db_is_the_official_one(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_scans_the_binaries_the_build_runs_and_pins_every_exemption() {
+    if let Err(reason) = check_build_executables_are_pinned(&repo_file("deny.toml")) {
         panic!("{reason}");
     }
 }
@@ -2224,5 +2538,278 @@ db-urls = [\"https://github.com/acme/advisory-db\"]
         // Nor may a trailing comment hide a live fork.
         let deny = "db-urls = [\"https://github.com/acme/advisory-db\"]  # mirror, faster\n";
         assert!(check_advisory_db_is_the_official_one(deny).is_err());
+    }
+
+    /// The `[bans.build]` table in the shape `deny.toml` ships it, with the
+    /// eight `protoc` crates collapsed to two and the checksums truncated. The
+    /// shape is what is under test; the real file is checked by
+    /// `deny_toml_scans_the_binaries_the_build_runs_and_pins_every_exemption`
+    /// above, and the checksum *values* are checked by cargo-deny itself.
+    fn build_table(bypass: &str) -> String {
+        format!("[bans.build]\nexecutables = \"deny\"\ninclude-dependencies = true\n{bypass}")
+    }
+
+    const SHIPPED_BYPASS: &str = "\
+bypass = [
+  { crate = \"protoc-bin-vendored-linux-x86_64\", allow = [{ path = \"bin/protoc\", checksum = \"f6ee22d6\" }] },
+  { crate = \"protoc-bin-vendored-win32\", allow = [{ path = \"bin/protoc.exe\", checksum = \"ab254642\" }] },
+]
+";
+
+    #[test]
+    fn the_build_scan_the_repository_ships_passes() {
+        assert!(check_build_executables_are_pinned(&build_table(SHIPPED_BYPASS)).is_ok());
+    }
+
+    /// The hole as it actually shipped: no table at all, so cargo-deny looked at
+    /// no build script and no bundled executable anywhere in the tree and
+    /// reported `bans ok`.
+    #[test]
+    fn omitting_the_build_table_entirely_fails() {
+        let deny = "[bans]\nmultiple-versions = \"warn\"\nwildcards = \"deny\"\ndeny = []\n";
+        let error = check_build_executables_are_pinned(deny)
+            .expect_err("a missing [bans.build] must not pass");
+        assert!(error.contains("no `[bans.build] executables`"), "{error}");
+    }
+
+    #[test]
+    fn allowing_executables_fails() {
+        for level in ["allow", "warn"] {
+            let deny = build_table(SHIPPED_BYPASS).replace(
+                "executables = \"deny\"",
+                &format!("executables = \"{level}\""),
+            );
+            assert!(
+                check_build_executables_are_pinned(&deny).is_err(),
+                "executables = {level:?} must fail"
+            );
+        }
+    }
+
+    /// Trap 1, and the reason this guard needs two value assertions rather than
+    /// one. `executables = "deny"` on its own is **inert**: measured on this tree
+    /// (SAK-237) it exits 0 with zero findings, because `include-dependencies`
+    /// defaults to false and Fireup's own workspace bundles no binaries. A guard
+    /// that read only the first key would call that config correct.
+    #[test]
+    fn omitting_the_include_dependencies_key_fails() {
+        let deny = format!("[bans.build]\nexecutables = \"deny\"\n{SHIPPED_BYPASS}");
+        let error = check_build_executables_are_pinned(&deny)
+            .expect_err("a workspace-only scan must not pass as enforcement");
+        assert!(
+            error.contains("no `[bans.build] include-dependencies`"),
+            "{error}"
+        );
+    }
+
+    /// The same hole written out loud. `false` is the default, so this and the
+    /// test above are the same regression in two spellings — and the explicit
+    /// one is the more plausible edit, because it looks like a decision.
+    #[test]
+    fn an_explicit_false_include_dependencies_fails() {
+        let deny = build_table(SHIPPED_BYPASS).replace(
+            "include-dependencies = true",
+            "include-dependencies = false",
+        );
+        let error = check_build_executables_are_pinned(&deny)
+            .expect_err("include-dependencies = false must not pass");
+        assert!(
+            error.contains("scopes the executable scan to the workspace"),
+            "{error}"
+        );
+    }
+
+    /// Trap 2. A `bypass` entry that is only a crate name exempts *nothing*:
+    /// measured on this tree (SAK-237) the finding count stays at eight. It is
+    /// the shape that most looks like an exemption without being one, so it has
+    /// to fail rather than be quietly tolerated as harmless.
+    #[test]
+    fn a_bypass_entry_with_only_a_crate_name_fails() {
+        let deny = build_table("bypass = [{ crate = \"protoc-bin-vendored-linux-x86_64\" }]\n");
+        let error = check_build_executables_are_pinned(&deny)
+            .expect_err("a bare crate name must not pass as an exemption");
+        assert!(error.contains("exempts no path"), "{error}");
+    }
+
+    /// The shape that is green *today* and wrong *later*: `allow-globs` exempts
+    /// whatever the crate ever puts in `bin/`. Measured on all eight crates it
+    /// is exit 0 and `bans ok`, indistinguishable from the checksum form until a
+    /// second binary appears upstream.
+    #[test]
+    fn a_bypass_entry_with_a_glob_fails() {
+        let deny = build_table(
+            "bypass = [{ crate = \"protoc-bin-vendored-linux-x86_64\", \
+             allow-globs = [\"bin/*\"] }]\n",
+        );
+        let error = check_build_executables_are_pinned(&deny)
+            .expect_err("a glob must not pass as a pinned exemption");
+        assert!(error.contains("allow-globs"), "{error}");
+
+        // Including beside a properly pinned path in the same entry: the glob
+        // still exempts everything else in that directory.
+        let deny = build_table(
+            "bypass = [{ crate = \"protoc-bin-vendored-linux-x86_64\", \
+             allow = [{ path = \"bin/protoc\", checksum = \"f6ee22d6\" }], \
+             allow-globs = [\"bin/*\"] }]\n",
+        );
+        assert!(check_build_executables_are_pinned(&deny).is_err());
+    }
+
+    /// Trap 3, found while auditing the keys this change does *not* set, and the
+    /// quietest of the three: `checksum` is optional in cargo-deny's schema, so
+    /// `allow = [{ path }]` is a one-token deletion that exits 0 with `bans ok`
+    /// and zero findings while the bytes at that path are no longer pinned at
+    /// all.
+    #[test]
+    fn a_bypass_entry_with_a_path_and_no_checksum_fails() {
+        let deny = build_table(
+            "bypass = [{ crate = \"protoc-bin-vendored-linux-x86_64\", \
+             allow = [{ path = \"bin/protoc\" }] }]\n",
+        );
+        let error =
+            check_build_executables_are_pinned(&deny).expect_err("an unpinned path must not pass");
+        assert!(
+            error.contains("1 exempted path(s) but 0 checksum(s)"),
+            "{error}"
+        );
+    }
+
+    /// And partially: one entry may list several paths, so finding *a* checksum
+    /// is not the same as every path having one.
+    #[test]
+    fn a_bypass_entry_with_one_checksum_for_two_paths_fails() {
+        let deny = build_table(
+            "bypass = [{ crate = \"protoc-bin-vendored-linux-x86_64\", allow = [\
+             { path = \"bin/protoc\", checksum = \"f6ee22d6\" }, \
+             { path = \"bin/protoc-gen-go\" }] }]\n",
+        );
+        let error = check_build_executables_are_pinned(&deny)
+            .expect_err("a second unpinned path must not pass");
+        assert!(
+            error.contains("2 exempted path(s) but 1 checksum(s)"),
+            "{error}"
+        );
+    }
+
+    /// No bypass list at all is the strictest configuration there is, so it has
+    /// to pass. (It would make *this* tree red, because the eight `protoc`
+    /// binaries are really there — but that is cargo-deny's job to report, and
+    /// a guard that failed on it would be forbidding the strict case.)
+    #[test]
+    fn an_absent_or_empty_bypass_list_passes() {
+        assert!(check_build_executables_are_pinned(&build_table("")).is_ok());
+        assert!(check_build_executables_are_pinned(&build_table("bypass = []\n")).is_ok());
+        assert!(check_build_executables_are_pinned(&build_table("bypass = [\n]\n")).is_ok());
+    }
+
+    /// Fail closed on a shape this reader does not understand, for the reason
+    /// SAK-235 gave for `[graph] targets`: a form the guard cannot parse must
+    /// never be the thing that makes it pass.
+    #[test]
+    fn a_bypass_line_this_reader_cannot_parse_fails() {
+        for bypass in [
+            // Not an array.
+            "bypass = \"protoc-bin-vendored-linux-x86_64\"\n",
+            // An array that never closes.
+            "bypass = [\n  { crate = \"protoc-bin-vendored-linux-x86_64\",\n",
+            // A bare value where an inline table belongs.
+            "bypass = [\"protoc-bin-vendored-linux-x86_64\"]\n",
+            // Braces that do not balance.
+            "bypass = [ } ]\n",
+        ] {
+            let deny = build_table(bypass);
+            let error = check_build_executables_are_pinned(&deny)
+                .expect_err("an unreadable bypass line must not be read as a pinned list");
+            assert!(
+                error.contains("cannot read as an array"),
+                "{bypass:?}: {error}"
+            );
+        }
+    }
+
+    /// `deny.toml` quotes every one of these keys in the prose that explains
+    /// them, including the values that must fail, and the arms table above the
+    /// live lines spells out `executables = "allow"` and `allow = [{ path }]`.
+    /// None of that may stand in for — or rescue — the live setting.
+    #[test]
+    fn the_comments_about_the_build_scan_are_not_read_as_the_settings() {
+        // Prose quoting the good value must not rescue a live bad one.
+        let deny = "\
+[bans.build]
+#   `executables = \"deny\"` alone          exit 0   0 findings
+#   + `include-dependencies = true`       exit 2   8 findings
+executables = \"allow\"
+include-dependencies = true
+";
+        assert!(check_build_executables_are_pinned(deny).is_err());
+
+        // A commented-out key is not the key being present.
+        let deny = "\
+[bans.build]
+executables = \"deny\"
+# include-dependencies = true
+";
+        assert!(check_build_executables_are_pinned(deny).is_err());
+
+        // Nor may a trailing comment hide the live value.
+        let deny = "\
+[bans.build]
+executables = \"deny\"
+include-dependencies = false  # workspace is enough for now
+";
+        assert!(check_build_executables_are_pinned(deny).is_err());
+
+        // A commented-out bypass list is not the list, and absence is legal —
+        // so this has to pass for the right reason.
+        let deny = "\
+[bans.build]
+executables = \"deny\"
+include-dependencies = true
+# bypass = [{ crate = \"protoc-bin-vendored-linux-x86_64\", allow-globs = [\"bin/*\"] }]
+";
+        assert!(check_build_executables_are_pinned(deny).is_ok());
+
+        // And a trailing comment on a live entry must not hide its shape.
+        let deny = build_table(
+            "bypass = [{ crate = \"protoc-bin-vendored-linux-x86_64\", \
+             allow-globs = [\"bin/*\"] }]  # pending real checksums\n",
+        );
+        assert!(check_build_executables_are_pinned(&deny).is_err());
+    }
+
+    /// The readers this guard is built on, exercised directly. Without this the
+    /// `allow` / `allow-globs` prefix rule and the entry splitter are only
+    /// tested through whole configs, where a wrong answer can be masked by
+    /// another branch reaching the same verdict.
+    #[test]
+    fn the_entry_reader_reads_the_shapes_it_claims_to() {
+        // `allow` must not match `allow-globs`, and `path` must not match a
+        // crate whose name happens to end in `path`.
+        assert!(has_key("{ allow-globs = [\"bin/*\"] }", "allow-globs"));
+        assert!(!has_key("{ allow-globs = [\"bin/*\"] }", "allow"));
+        assert!(has_key("{ allow = [{ path = \"a\" }] }", "allow"));
+        assert!(!has_key("{ crate = \"camino-path\" }", "path"));
+        assert_eq!(count_key("{ path = \"a\" }, { path = \"b\" }", "path"), 2);
+        assert_eq!(count_key("{ crate = \"x\" }", "checksum"), 0);
+
+        // Entries split at depth one, with the nested `allow` array kept inside
+        // the entry it belongs to.
+        let deny =
+            "bypass = [\n  { crate = \"a\", allow = [{ path = \"p\", checksum = \"c\" }] },\n  \
+                    { crate = \"b\", allow-globs = [\"bin/*\"] },\n]\n";
+        let entries = bypass_entries(deny).expect("a two-entry array is readable");
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].contains("crate = \"a\"") && entries[0].contains("checksum"));
+        assert!(entries[1].contains("allow-globs"));
+
+        // A single-line array reads the same way.
+        let entries = bypass_entries("bypass = [{ crate = \"a\" }, { crate = \"b\" }]\n")
+            .expect("a one-line array is readable");
+        assert_eq!(entries.len(), 2);
+
+        // No key at all is "no list", which is distinct from an unreadable one.
+        assert_eq!(bypass_entries("executables = \"deny\"\n"), None);
+        assert_eq!(bypass_entries("bypass = []\n"), Some(Vec::new()));
+        assert_eq!(bypass_entries("bypass = \"nope\"\n"), None);
     }
 }
