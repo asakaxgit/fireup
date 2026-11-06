@@ -1,0 +1,242 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -37 214 113" role="img" aria-label="FireUp"
+     fill="none" stroke="#0B1220" stroke-width="8" stroke-linecap="butt" stroke-linejoin="round"
+     data-baseline="50" data-x-top="20" data-asc-top="4" data-descender="66" data-stroke="8"
+     data-ireup-left="30" data-letter-gap="8">
+  <!-- MASTER. Hand-drawn geometric monoline wordmark. Drawn rather than set, so
+       the identity carries no webfont licence and does not depend on a font
+       file being present to render. Construction: baseline y=50, x-height top
+       y=20, ascender y=4, descender y=66, stroke 8, bowl radius 15 — carried on
+       the root as data-* so the scripts read them rather than repeating them.
+
+       The monoline paint sits on the root and inherits, so every letter below is
+       a flat, self-contained group addressed by data-glyph. The lockup composes
+       itself by naming the glyphs it wants (brand/scripts/word.mjs); it does not
+       count paths. Counting is how a change here silently reaches the wrong
+       letter there.
+
+       data-letter-gap is the whitespace this drawing keeps between two letters,
+       measured off it: the i's stem ends at 38 and the r's begins at 46. The
+       lockup spaces the mark like a letter, so it uses the same 8.
+
+       The word is FireUp — round 7. The capital U is the note's; the capital F
+       is its consequence, because the lockup's F is the mark and a word that
+       spelled itself "fireUp" on its own would be a second spelling of the
+       name. See brand/scripts/arrow.mjs sheet 7d. The logotype styles the name;
+       it does not rename the product, which stays "Fireup" in prose.
+
+       The viewBox clears the ink by 6 units left, top and right and 9.9 below
+       — measured off the rendered alpha, not counted. The topmost ink is the
+       arrow's head, not the ascender, so the box follows the accent: down 4
+       with it in round 10, back up 3 in round 11, holding the same 6.3 over
+       the head throughout. This box is the word-alone variant's own frame; the
+       lockup measures its own, and the mark's fire sets that, so none of this
+       reaches the lockup. If a drawing here grows past the box,
+       `npm run smoke` fails rather than the renderer quietly cutting the ink
+       flat, which is what happened in round 4 and is invisible at every size
+       because a master is only ever rendered through its own box.
+
+       Colour variants and lockups are generated from this file and mark.svg —
+       see brand/scripts/build.mjs. -->
+
+  <!-- F. Not drawn in the lockup: there the mark is this letter. 24 units
+       across against a 46-unit cap, which a capital needs and the lowercase f's
+       slot did not have — so it is set back into the left margin instead, and
+       every other letter stays where it was. Squeezed into the f's old slot it
+       comes out 15 wide and still reads as an f (7d-B). Middle arm at 73% of
+       the top one, the proportion the mark's own F uses. -->
+  <g data-glyph="F">
+    <path d="M2 50 V4 H22"/>
+    <path d="M2 27 H15.5"/>
+  </g>
+  <g data-glyph="i">
+    <path d="M34 20 V50"/>
+  </g>
+  <g data-glyph="r">
+    <path d="M50 20 V50"/>
+    <path d="M50 32 Q50 20 63 20"/>
+  </g>
+  <g data-glyph="e">
+    <path d="M104 35 A15 15 0 1 0 96.5 48"/>
+    <path d="M74 35 H104"/>
+  </g>
+  <!-- U. The capital stands on the lowercase u's own stems, so the word's
+       rhythm is untouched and only the height changes: both stems run up to the
+       cap line and the right one stops at the bowl instead of carrying on to
+       the baseline. This drawing does not overshoot its round letters — the e's
+       bowl tops out on the x-height line, not above it — so the U does not
+       either.
+
+       Round 11: the stems terminate on y=0, not on the ascender line at y=4.
+       They are butt-capped, so where they stop is where the ink stops; the
+       capital F's cap is a horizontal stroke *centred* on y=4, so its ink runs
+       up to y=0. Ending the stems on the ascender line therefore left the U
+       four units short of the F — invisible in the lockup, where the mark is
+       the F, and plain in the word-alone variant that draws both. Measured, not
+       reasoned: `npm run align` renders each capital on its own and reads the
+       top off the raster. Both now come back at y=-0.02, the same sampling
+       error on the same edge. -->
+  <g data-glyph="U">
+    <path d="M120 0 V35 A15 15 0 0 0 150 35 V0"/>
+  </g>
+  <g data-glyph="p">
+    <path d="M166 20 V66"/>
+    <path d="M166 20 H181 A15 15 0 0 1 181 50 H166"/>
+  </g>
+  <!-- dot of the i, drawn solid so it keeps its weight at small sizes. Its
+       underside sits 3 units above the stem's ink, which is what the identity
+       has meant by an accent clearance all along.
+
+       It kept 7 until round 11. The stem is butt-capped and terminates on the
+       x-height line rather than straddling it, so the 3 units this drawing
+       claimed were 3 above `xTop - stroke / 2` — a line the ink never reaches.
+       Rounds 7 to 9 then borrowed that 3 for the arrow over the U and inherited
+       the same error. Round 10 found it by measuring; round 11 is where the
+       dot itself comes down to the number.
+
+       Dropping it 4 is not free: scripts/build.mjs sizes the mark by clearing
+       this dot, so the rule as written would return a mark 8% smaller. See the
+       note there — the clearance is a floor, not a size to re-derive, and the
+       mark stays the size it was signed off at. -->
+  <g data-glyph="tittle">
+    <circle cx="34" cy="13" r="4" fill="#0B1220" stroke="none"/>
+  </g>
+
+  <!-- The accent over the U: a curved arrow, up and to the right, the way the
+       fire blows off the mark's bar. Round 7, round 9 after a detour, round 10
+       four units lower, round 11 three units higher than that, round 12 one
+       unit to the right, and ROUND 13 THE FIRST TO REDRAW IT — the chord comes
+       in from 30 to 28.5 so the accent can be flush with the U at both ends.
+       Rounds 7 to 12 all drew round 7's arrow and argued about where to put it;
+       round 13 is the one that changed the drawing, and it changed exactly one
+       number in it.
+
+       ROUND 11 MOVES IT UP IN ORDER TO TIGHTEN IT, which is worth a sentence
+       because it looks like a contradiction. The U's stems were raised 4 units
+       to the cap line in the same round, so the letter grew up into the gap;
+       had the arrow held still it would have ended up 1 unit *inside* the
+       letter. It follows the letter up 4 and comes back down 1 for the tighter
+       gap. Net: 3 units higher, 1 unit closer. Only the slot between them is
+       visible, and that is measured rather than reasoned.
+
+       The shape did not change. Every y in both paths below moved by the same
+       whole -3, so this is the approved round 7 drawing at a different height
+       — not a redrawing of it. `npm run align` places the glyph it finds in
+       this file and prints the offset; asked for today's gap over today's U it
+       prints 0, which is a standing check that the file and the script agree.
+
+       Round 8 drew the other reading of the same note — the arc spanning the
+       whole of "Up", a 76-unit chord, the largest object in the identity. It
+       was drawn, rendered, costed and shown, and the answer on it was to come
+       back here: "the gesture is too much". So this accent is the shipped
+       drawing by decision, not by default, and round 8 was not a defect. Its
+       four chords are kept in gesture/ as the record of that comparison.
+
+       Round 10 is the same drawing moved down 4 units, and nothing about its
+       shape changed. "Tighten the gap of arrow and U" turned out to be a
+       correction rather than an adjustment: rounds 7 and 9 placed the arrow 3
+       units above y=0, where `ascTop - stroke / 2` says a capital's ink begins.
+       The U's stems are butt-capped verticals, so they *terminate* on the
+       ascender line and its topmost ink is at y=4 — the arrow was clearing the
+       letter by 7. Measured, not reasoned: `npm run tighten` renders the
+       options and prints both edges off the raster every run.
+
+       Nothing here is a free choice:
+         * The shaft is 8, the same as every letter. The word is a monoline and
+           its one existing accent, the tittle, is an 8-unit circle; an accent
+           at any other weight is a second voice. It does not scale with the
+           arrow's length — in the first cut of round 7 it did, which makes a
+           longer arc a heavier drawing rather than a bigger one.
+         * Its lowest ink sits 2 units above the U's topmost ink. Exactly 2,
+           by construction and not approximately: the tail is a butt cap on a
+           horizontal, so its ink runs to -6 + 4 = -2, and the U's stems
+           terminate on 0. Both whole numbers, so unlike round 10 there is no
+           rounding residue to report.
+           2 is what the round 10 sheet costed as the tightest usable value —
+           at the 96px lockup minimum the slot comes out at one device pixel,
+           so the renderer is deciding and the drawing is not. At 0 the accent
+           stops floating and grows a hook off the letter (10a-E).
+         * The i's tittle keeps 3 units over its own stem, measured the same
+           way. The two accents were 3 and 7 before round 11 and are 3 and 2
+           now. They are deliberately not the same number: the tittle is a
+           circle over a flat stem, so its slot pinches at one point and opens
+           out on both sides (3.0 at its tightest, 3.9 averaged over its run),
+           while the arrow's tail is flat over a flat cap and its slot is
+           parallel, so its mean air is its minimum. Equal minimums would not
+           have read as equal air. Matching the number instead — the dot at 2 —
+           is drawn as 11a-E.
+         * The chord is 28.55 across and 12.28 up — a rise of 43% of the run,
+           which is the proportion round 7 drew and every round since has kept.
+           It was 30, the U's stem pitch, until round 13 took 1.45 off it; see
+           the horizontal rule below, which is what spends it. The arrow's
+           overhang is 1.40 and the chord gives up 1.45, because every
+           coordinate here is written to a tenth: the head's corner moves in
+           steps, and 28.55 is the run that lands it ON 154 rather than near it.
+           `npm run flush` scans for that run rather than subtracting.
+           It cannot go much under this. Narrower and the head is as long as the
+           shaft, with no curve left to read; out to the p and it stops being an
+           accent and becomes a second ember object the size of the fire (7c).
+           Round 8 drew exactly that and measured it: the arc tipped 12.9 units
+           above the fire, which handed the lockup's envelope to the arrow
+           instead of the mark and moved the site header with it.
+         * Horizontally it IS THE WIDTH OF THE LETTER AND STARTS WHERE IT
+           STARTS — the arrow's measured ink box and the U's are the same box,
+           x=116 to x=154, 38.0 units. Round 13, and the reason the chord is no
+           longer the stem pitch.
+           Rounds 7 to 11 centred the arrow's box on the U's. The head's corner
+           overhangs the chord, so the arrow was 39.4 against the U's 38.0, and
+           centring an object 1.4 wider than the letter leaves it hanging off
+           BOTH ends — 1 unit left, 0.5 right. Round 12 aligned the left edges
+           instead and sent the whole 1.4 off the right. Both of those are
+           placements of a drawing that is the wrong width; the question round 13
+           was asked is whether to make it the right width, and the answer was
+           to draw it.
+           There are only two places that width can come off: the chord, or the
+           head. Taking it off the head puts it at 2.4 shafts, under the 2.5
+           this identity wrote down as the floor where a head starts reading as
+           a comma — so it comes off the chord, which gives up 5% of its length
+           and nothing else. The rise, and the head's length along its own axis,
+           were both measured and neither can do it at all: the rightmost ink is
+           the head's CORNER, and flattening or steepening the curve only swings
+           that corner further out. `npm run flush` prints that scan, renders
+           all four options, and reads both edges off the raster.
+           What this buys beyond tidiness: the three alignment rules that have
+           been argued over since round 7 — flush left, flush right, and centred
+           — now give the same answer, because an object the same width as the
+           letter is centred on it when its edges line up. There is no horizontal
+           placement question left to have.
+           The envelope is unmoved: both of the arrow's ends are well inside the
+           word, the p's bowl is still the rightmost ink, so the header sizing,
+           the clear-space rule and the social card do not follow.
+         * The head is 2.8 shafts wide and 1.7 long, square to the arc's end
+           tangent — below about 2.5 it reads as a comma. Its base is wider than
+           the shaft's end cap, so the join is covered rather than butted.
+       The curve bows like a growth curve, flat out of the tail and turning up
+       at the head: the control point is level with the tail, 72% along. Bowed
+       the other way it reads as arriving and flattening out.
+
+       The coordinates come from `npm run flush`, which builds the arrow from
+       the rules above and prints the two paths to transcribe. It then CHECKS
+       that this file draws what it printed, and throws if it does not — so the
+       script and the drawing cannot drift apart. They did in round 12, in both
+       directions at once, and that is the whole reason the check exists: a
+       sheet composed from "the master, plus an offset" is only correct until
+       the master moves, which is exactly when it is being looked at.
+
+       Why there are tenths here when the letters are whole units: the chord has
+       to land the head's corner on the U's right edge, and the corner is the
+       far end of a triangle set square to a tangent, so it does not fall on a
+       whole unit. The two ends that the round is about ARE whole — the tail
+       starts on 116 and the head's corner lands on 154, both exactly. -->
+  <!-- ROUND 13 FIRST DREW THIS WITH THE TAIL AT 116.1, which is worth keeping a
+       note of. The placement was taken from a raster probe, and `contentBox`
+       rounds outward to whole sample pixels — 0.166 units at the probe's
+       viewBox, sixteen times coarser than the tenth of a unit it was then
+       snapped to. So the drawing came out a tenth off flush in the round whose
+       whole subject is being flush, and it was the built-asset check at the
+       foot of flush.mjs that caught it rather than any sheet. The geometry is
+       closed form now and the raster is the check on it, not its source. -->
+  <g data-glyph="arrow">
+    <path d="M116 -6 Q136.6 -6 144.6 -18.3" stroke="#C2410C" stroke-width="8" stroke-linecap="butt"/>
+    <path d="M154 -12.2 L152 -29.7 L135.2 -24.4 Z" fill="#C2410C" stroke="none"/>
+  </g>
+</svg>

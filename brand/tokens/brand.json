@@ -1,0 +1,70 @@
+{
+  "$comment": "Fireup brand tokens — single source of truth. tokens/brand.css is generated from this file by `npm run tokens`. Do not edit the CSS by hand.",
+  "name": "Fireup",
+  "version": "0.1.0",
+  "status": "approved and locked 2026-11-06 (SAK-173, round 13) — the mark, the lockup (FireUp with the mark as its F, the ember accent exactly the width of the U and flush at both ends) and this palette; changes go back through the CEO and `npm run lock` fails the build on an unapproved one. Not settled by the sign-off: the fireup.pro name collision and the flame prior art, both legal questions",
+  "color": {
+    "ink": "#0B1220",
+    "ink-raised": "#141E31",
+    "ink-muted": "#4A5568",
+    "paper": "#FFFFFF",
+    "paper-sunk": "#F5F7FA",
+    "paper-muted": "#AEBBD0",
+    "ember": "#FF5A2B",
+    "ember-deep": "#C2410C",
+    "azure": "#5AA9FF",
+    "azure-deep": "#1D4ED8",
+    "ok": "#4ADE80",
+    "ok-deep": "#15803D",
+    "warn": "#FBBF24",
+    "warn-deep": "#A16207",
+    "border-dark": "#6B7B96",
+    "border-light": "#767F8C",
+    "rule-dark": "#22304A",
+    "rule-light": "#E3E8EF"
+  },
+  "colorNotes": {
+    "ember": "Primary accent. Use on ink only — on white it is 3.11:1, which carries a logo or a 24px+ heading but never body text.",
+    "ember-deep": "The light-background counterpart of ember: accent text, links, and the primary button fill with white text.",
+    "rule-dark": "Decorative hairline on dark. Carries no meaning on its own, so it is exempt from the 3:1 non-text minimum; use border-dark where an edge has to be perceivable.",
+    "rule-light": "Decorative hairline on light, same exemption as rule-dark.",
+    "status": "ok/warn pairs always ship with a text label or glyph — colour never carries the meaning alone."
+  },
+  "font": {
+    "sans": "'Inter var', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+    "mono": "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace"
+  },
+  "fontNotes": "The site ships no font files. It asks for Inter and falls back to the platform UI stack, so there is no webfont licence to clear and no third-party request at load time.",
+  "size": {
+    "step--1": "0.833rem",
+    "step-0": "1rem",
+    "step-1": "1.2rem",
+    "step-2": "1.44rem",
+    "step-3": "1.728rem",
+    "step-4": "2.074rem",
+    "step-5": "2.488rem",
+    "step-6": "2.986rem"
+  },
+  "sizeNotes": "A 1.2 (minor third) modular scale on a 16px base. Display sizes clamp between step-4 and step-6 in CSS.",
+  "space": {
+    "3xs": "0.25rem",
+    "2xs": "0.5rem",
+    "xs": "0.75rem",
+    "s": "1rem",
+    "m": "1.5rem",
+    "l": "2rem",
+    "xl": "3rem",
+    "2xl": "4.5rem",
+    "3xl": "7rem"
+  },
+  "radius": {
+    "s": "4px",
+    "m": "8px",
+    "l": "14px"
+  },
+  "logo": {
+    "clearSpace": "On all sides, equal to the height of one bar of the mark (1/8 of the mark's height). Nothing else sits inside it.",
+    "minSizeMark": "16px",
+    "minSizeLockup": "96px wide — below that, use the mark alone."
+  }
+}

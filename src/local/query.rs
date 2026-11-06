@@ -27,6 +27,7 @@
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use tonic::Status;
 
@@ -37,7 +38,7 @@ use crate::protos::google::firestore::v1::structured_query::{
     FieldReference,
 };
 use crate::protos::google::firestore::v1::value::ValueType;
-use crate::protos::google::firestore::v1::{Document, StructuredQuery, Value};
+use crate::protos::google::firestore::v1::{Cursor, Document, MapValue, StructuredQuery, Value};
 
 /// Firestore's `__name__` pseudo-field, which stands for the document's own
 /// resource name. SDKs order and filter on it, and it is the implicit tiebreak
@@ -48,22 +49,166 @@ fn unsupported(what: &str, why: &str) -> Status {
     Status::unimplemented(format!("fireup local does not support {what} yet ({why})"))
 }
 
+/// A field path, split into the segments it addresses.
+///
+/// `a.b` addresses the `b` entry of the map under `a`, which is a different
+/// thing from a top-level field literally named `a.b`. A field whose name
+/// contains a dot (or any other character the unquoted syntax does not allow)
+/// is addressed as a single backtick-quoted segment: `` `a.b` ``.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldPath {
+    /// Always non-empty.
+    segments: Vec<String>,
+}
+
+impl FieldPath {
+    /// Parse Firestore's field-path syntax: dot-separated segments, each
+    /// either an unquoted identifier (`[A-Za-z_][A-Za-z_0-9]*`) or a
+    /// backtick-quoted literal in which `` \` `` and `\\` are escapes.
+    ///
+    /// Anything outside that grammar is an `INVALID_ARGUMENT` rather than a
+    /// best guess: a path the server read differently from the way the client
+    /// wrote it would return a confidently wrong result set.
+    pub fn parse(text: &str) -> Result<Self, Status> {
+        let malformed = |reason: &str| {
+            Status::invalid_argument(format!("the field path {text:?} is malformed: {reason}"))
+        };
+        if text.is_empty() {
+            return Err(Status::invalid_argument("a field path must not be empty"));
+        }
+
+        let mut segments = Vec::new();
+        let mut characters = text.chars().peekable();
+        loop {
+            let segment = if characters.peek() == Some(&'`') {
+                characters.next();
+                let mut segment = String::new();
+                loop {
+                    match characters.next() {
+                        None => return Err(malformed("a ` quote is never closed")),
+                        Some('`') => break,
+                        // Only the two characters that would otherwise end or
+                        // escape the segment can be escaped; anything else is
+                        // a client mistake worth reporting.
+                        Some('\\') => match characters.next() {
+                            Some(escaped @ ('`' | '\\')) => segment.push(escaped),
+                            _ => return Err(malformed("a \\ escapes only ` or \\")),
+                        },
+                        Some(character) => segment.push(character),
+                    }
+                }
+                if segment.is_empty() {
+                    return Err(malformed("a quoted segment must not be empty"));
+                }
+                segment
+            } else {
+                let mut segment = String::new();
+                while let Some(&character) = characters.peek() {
+                    if character == '.' {
+                        break;
+                    }
+                    characters.next();
+                    segment.push(character);
+                }
+                if segment.is_empty() {
+                    return Err(malformed("a segment must not be empty"));
+                }
+                let identifier = segment.chars().enumerate().all(|(at, character)| {
+                    character == '_'
+                        || character.is_ascii_alphabetic()
+                        || (at > 0 && character.is_ascii_digit())
+                });
+                if !identifier {
+                    return Err(malformed(&format!(
+                        "the segment {segment:?} must be quoted as `{segment}`"
+                    )));
+                }
+                segment
+            };
+            segments.push(segment);
+
+            match characters.next() {
+                None => break,
+                Some('.') => continue,
+                // Only reachable after a quoted segment; the unquoted branch
+                // stops at a dot or the end of the path.
+                Some(character) => {
+                    return Err(malformed(&format!(
+                        "a quoted segment must be followed by . or the end, not {character:?}"
+                    )))
+                }
+            }
+        }
+        Ok(Self { segments })
+    }
+
+    /// The value this path addresses in `fields`, if any.
+    ///
+    /// Only maps are walked into. Firestore field paths do not index into
+    /// arrays, so `tags.0` addresses the `0` key of a map named `tags` and
+    /// nothing at all when `tags` is a list.
+    fn resolve<'a>(&self, fields: &'a HashMap<String, Value>) -> Option<&'a Value> {
+        let (first, rest) = self.segments.split_first()?;
+        let mut value = fields.get(first)?;
+        for segment in rest {
+            match &value.value_type {
+                Some(ValueType::MapValue(map)) => value = map.fields.get(segment)?,
+                _ => return None,
+            }
+        }
+        Some(value)
+    }
+}
+
+/// Keep only the values `paths` select, preserving the nesting around them.
+///
+/// This is what both a `select()` projection and a read `DocumentMask` do, so
+/// they share one implementation: selecting `a.b` returns a document whose `a`
+/// is a map holding only `b`, not a flattened field called `a.b` and not the
+/// whole of `a`.
+pub fn retain_field_paths(fields: &mut HashMap<String, Value>, paths: &[FieldPath]) {
+    let mut kept: HashMap<String, Value> = HashMap::new();
+    for path in paths {
+        if let Some(value) = path.resolve(fields) {
+            graft(&mut kept, &path.segments, value.clone());
+        }
+    }
+    *fields = kept;
+}
+
+/// Insert `value` at `segments`, creating the maps above it as needed.
+fn graft(fields: &mut HashMap<String, Value>, segments: &[String], value: Value) {
+    match segments {
+        [] => {}
+        [last] => {
+            fields.insert(last.clone(), value);
+        }
+        [first, rest @ ..] => {
+            let parent = fields.entry(first.clone()).or_insert_with(|| Value {
+                value_type: Some(ValueType::MapValue(MapValue {
+                    fields: HashMap::new(),
+                })),
+            });
+            // A non-map here means a broader path already selected the whole
+            // of this field, which covers the narrower one too.
+            if let Some(ValueType::MapValue(map)) = &mut parent.value_type {
+                graft(&mut map.fields, rest, value);
+            }
+        }
+    }
+}
+
 /// A field path a query can address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Path {
     /// `__name__`: the document's resource name.
     Name,
-    /// A top-level field of the document.
-    Field(String),
+    /// A field of the document, possibly nested.
+    Field(FieldPath),
 }
 
 impl Path {
     /// Parse a `FieldReference`.
-    ///
-    /// Nested (`a.b`) and quoted (`` `a&b` ``) paths are rejected rather than
-    /// matched against a top-level field that happens to be spelled the same
-    /// way: answering a query about `address.city` by looking at a field
-    /// literally named `address.city` would return a confidently wrong result.
     fn parse(reference: &Option<FieldReference>) -> Result<Self, Status> {
         let path = reference
             .as_ref()
@@ -72,12 +217,10 @@ impl Path {
 
         match path {
             "" => Err(Status::invalid_argument("a field path must not be empty")),
+            // Unquoted only: `` `__name__` `` is an ordinary field that merely
+            // shares the pseudo-field's spelling.
             DOCUMENT_NAME_FIELD => Ok(Path::Name),
-            path if path.contains('.') || path.contains('`') => Err(unsupported(
-                &format!("the nested field path {path:?}"),
-                "only top-level field names and __name__ are supported",
-            )),
-            path => Ok(Path::Field(path.to_string())),
+            path => Ok(Path::Field(FieldPath::parse(path)?)),
         }
     }
 
@@ -89,7 +232,7 @@ impl Path {
             Path::Name => Some(Cow::Owned(Value {
                 value_type: Some(ValueType::ReferenceValue(document.name.clone())),
             })),
-            Path::Field(field) => document.fields.get(field).map(Cow::Borrowed),
+            Path::Field(path) => path.resolve(&document.fields).map(Cow::Borrowed),
         }
     }
 }
@@ -313,6 +456,18 @@ fn values_equal(left: &Value, right: &Value) -> bool {
     if is_nan(left) || is_nan(right) {
         return false;
     }
+    values_equivalent(left, right)
+}
+
+/// Equality as the **array field transforms** see it.
+///
+/// `arrayUnion`/`arrayRemove` are documented to treat equivalent numbers of
+/// different types (`3` and `3.0`) as equal, and — unlike an equality filter —
+/// `NaN` as equal to `NaN` and `null` as equal to `null`. That is exactly the
+/// sort order's notion of equality, so it is defined here, beside it, rather
+/// than as a second value comparator in
+/// [`transforms`](crate::local::transforms) that could drift from this one.
+pub(crate) fn values_equivalent(left: &Value, right: &Value) -> bool {
     type_rank(left) == type_rank(right) && compare_values(left, right) == Ordering::Equal
 }
 
@@ -461,6 +616,77 @@ struct SortKey {
     descending: bool,
 }
 
+/// Which end of the result range a cursor bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum End {
+    Start,
+    End,
+}
+
+/// One end of the result range, compiled from a `start_at`/`end_at` cursor.
+///
+/// A cursor is a *position* in the query's sort order, not a filter on a
+/// field: its values line up positionally with the leading `order_by` terms,
+/// and may be shorter than the full order.
+#[derive(Debug, Clone)]
+struct Bound {
+    values: Vec<Value>,
+    /// Whether a document sitting exactly at `values` is inside the range.
+    inclusive: bool,
+}
+
+impl Bound {
+    /// Compile a cursor against the query's compiled `order`.
+    ///
+    /// The proto carries `before` — whether the position is just before or
+    /// just after the values — which the SDK methods map onto like this:
+    ///
+    /// | SDK call | end | `before` | equal documents |
+    /// |---|---|---|---|
+    /// | `startAt` | start | `true` | included |
+    /// | `startAfter` | start | `false` | excluded |
+    /// | `endBefore` | end | `true` | excluded |
+    /// | `endAt` | end | `false` | included |
+    fn compile(cursor: &Cursor, order: &[SortKey], end: End) -> Result<Self, Status> {
+        let at = match end {
+            End::Start => "start_at",
+            End::End => "end_at",
+        };
+        if cursor.values.is_empty() {
+            return Err(Status::invalid_argument(format!(
+                "the {at} cursor has no values"
+            )));
+        }
+        if cursor.values.len() > order.len() {
+            return Err(Status::invalid_argument(format!(
+                "the {at} cursor has {} values but the query orders by {} field(s)",
+                cursor.values.len(),
+                order.len()
+            )));
+        }
+        // A `__name__` position is a document, so it has to arrive as a
+        // reference. A string of the same text sorts in a different type
+        // bucket, which would silently move the cursor somewhere else.
+        for (key, value) in order.iter().zip(cursor.values.iter()) {
+            if key.path == Path::Name
+                && !matches!(value.value_type, Some(ValueType::ReferenceValue(_)))
+            {
+                return Err(Status::invalid_argument(format!(
+                    "the {at} cursor's {DOCUMENT_NAME_FIELD} value must be a referenceValue"
+                )));
+            }
+        }
+
+        Ok(Self {
+            values: cursor.values.clone(),
+            inclusive: match end {
+                End::Start => cursor.before,
+                End::End => !cursor.before,
+            },
+        })
+    }
+}
+
 /// What a query returned.
 #[derive(Debug, Clone, Default)]
 pub struct Results {
@@ -478,14 +704,21 @@ pub struct Results {
 pub struct Query {
     /// The collection to read, as named by the single `from` selector.
     collection_id: String,
+    /// Whether that selector asked for every collection with this id anywhere
+    /// beneath the request's parent, rather than the one directly under it.
+    all_descendants: bool,
     filter: Option<Predicate>,
     /// Always non-empty and always ends with `__name__`, which is Firestore's
     /// implicit tiebreak and what makes the result order deterministic.
     order: Vec<SortKey>,
+    /// The `start_at` cursor, if the query is bounded below.
+    start: Option<Bound>,
+    /// The `end_at` cursor, if the query is bounded above.
+    end: Option<Bound>,
     offset: usize,
     limit: Option<usize>,
-    /// `select` projection: the top-level fields to return, if restricted.
-    projection: Option<Vec<String>>,
+    /// `select` projection: the field paths to return, if restricted.
+    projection: Option<Vec<FieldPath>>,
 }
 
 impl Query {
@@ -494,12 +727,6 @@ impl Query {
     pub fn compile(query: &StructuredQuery) -> Result<Self, Status> {
         if query.find_nearest.is_some() {
             return Err(unsupported("vector search (find_nearest)", "out of scope"));
-        }
-        if query.start_at.is_some() || query.end_at.is_some() {
-            return Err(unsupported(
-                "query cursors (start_at/end_at)",
-                "use limit and offset for now",
-            ));
         }
 
         let selector = match query.from.as_slice() {
@@ -516,16 +743,18 @@ impl Query {
                 ))
             }
         };
-        if selector.all_descendants {
-            return Err(unsupported(
-                "collection group queries (all_descendants)",
-                "a query reads one collection under one parent",
-            ));
-        }
         if selector.collection_id.is_empty() {
-            return Err(Status::invalid_argument(
-                "`from` must name a collection id",
-            ));
+            // With `all_descendants` this is the kindless scan of every
+            // document under the parent, which the API allows and this server
+            // does not serve; without it, it is simply a malformed query.
+            return Err(if selector.all_descendants {
+                unsupported(
+                    "a collection group query with no collection id",
+                    "name the collection id to scan",
+                )
+            } else {
+                Status::invalid_argument("`from` must name a collection id")
+            });
         }
         if selector.collection_id.contains('/') {
             return Err(Status::invalid_argument(
@@ -552,6 +781,19 @@ impl Query {
                 descending,
             });
         }
+
+        // Compiled after `order`, because a cursor's values are positions in
+        // that order rather than named fields.
+        let start = query
+            .start_at
+            .as_ref()
+            .map(|cursor| Bound::compile(cursor, &order, End::Start))
+            .transpose()?;
+        let end = query
+            .end_at
+            .as_ref()
+            .map(|cursor| Bound::compile(cursor, &order, End::End))
+            .transpose()?;
 
         let offset = usize::try_from(query.offset)
             .map_err(|_| Status::invalid_argument("offset must not be negative"))?;
@@ -581,8 +823,11 @@ impl Query {
 
         Ok(Self {
             collection_id: selector.collection_id.clone(),
+            all_descendants: selector.all_descendants,
             filter,
             order,
+            start,
+            end,
             offset,
             limit,
             projection,
@@ -592,6 +837,13 @@ impl Query {
     /// The collection this query reads, relative to the request's parent.
     pub fn collection_id(&self) -> &str {
         &self.collection_id
+    }
+
+    /// Whether this is a collection group query: every collection called
+    /// [`collection_id`](Self::collection_id) anywhere beneath the request's
+    /// parent, rather than only the one directly under it.
+    pub fn all_descendants(&self) -> bool {
+        self.all_descendants
     }
 
     /// Filter, order, page, and project `documents`.
@@ -615,12 +867,12 @@ impl Query {
         }
     }
 
-    /// Whether a document is a candidate at all: it must match the filter and
-    /// carry every field the query orders by.
+    /// Whether a document is a candidate at all: it must match the filter,
+    /// carry every field the query orders by, and lie between the cursors.
     ///
-    /// The second half is easy to miss and visible to users: Firestore cannot
-    /// order a document that has no value for the sort field, so such documents
-    /// are absent from the result rather than sorted to one end.
+    /// The second condition is easy to miss and visible to users: Firestore
+    /// cannot order a document that has no value for the sort field, so such
+    /// documents are absent from the result rather than sorted to one end.
     fn admits(&self, document: &Document) -> bool {
         if !self
             .order
@@ -629,10 +881,62 @@ impl Query {
         {
             return false;
         }
+        if !self.within_bounds(document) {
+            return false;
+        }
         match &self.filter {
             None => true,
             Some(filter) => filter.matches(document),
         }
+    }
+
+    /// Whether a document lies inside the `start_at`/`end_at` range.
+    ///
+    /// A cursor describes a position in the sort order, but because that order
+    /// is total and known per document, membership is decided per document
+    /// rather than by slicing the sorted sequence.
+    fn within_bounds(&self, document: &Document) -> bool {
+        if let Some(start) = &self.start {
+            match self.position(document, start) {
+                Ordering::Less => return false,
+                Ordering::Equal if !start.inclusive => return false,
+                _ => {}
+            }
+        }
+        if let Some(end) = &self.end {
+            match self.position(document, end) {
+                Ordering::Greater => return false,
+                Ordering::Equal if !end.inclusive => return false,
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// Where `document` sits relative to a cursor, in the query's sort order.
+    ///
+    /// Only the leading order terms the cursor supplies values for are
+    /// compared, so a short cursor positions on a whole group of documents
+    /// that share that prefix.
+    fn position(&self, document: &Document, bound: &Bound) -> Ordering {
+        for (key, value) in self.order.iter().zip(bound.values.iter()) {
+            // `admits` checks the ordered fields before this runs, so a
+            // missing value is impossible; skipping the term keeps the
+            // comparison total either way.
+            let Some(actual) = key.path.resolve(document) else {
+                continue;
+            };
+            let ordering = compare_values(actual.as_ref(), value);
+            let ordering = if key.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+        }
+        Ordering::Equal
     }
 
     fn compare_documents(&self, left: &Document, right: &Document) -> Ordering {
@@ -658,10 +962,8 @@ impl Query {
 
     /// Drop the fields a `select` projection did not ask for.
     fn project(&self, mut document: Document) -> Document {
-        if let Some(fields) = &self.projection {
-            document
-                .fields
-                .retain(|field, _| fields.iter().any(|wanted| wanted == field));
+        if let Some(paths) = &self.projection {
+            retain_field_paths(&mut document.fields, paths);
         }
         document
     }
@@ -704,6 +1006,23 @@ mod tests {
     fn array_value(values: Vec<Value>) -> Value {
         Value {
             value_type: Some(ValueType::ArrayValue(ArrayValue { values })),
+        }
+    }
+
+    fn map_value(fields: Vec<(&str, Value)>) -> Value {
+        Value {
+            value_type: Some(ValueType::MapValue(MapValue {
+                fields: fields
+                    .into_iter()
+                    .map(|(field, value)| (field.to_string(), value))
+                    .collect(),
+            })),
+        }
+    }
+
+    fn reference_value(name: &str) -> Value {
+        Value {
+            value_type: Some(ValueType::ReferenceValue(name.to_string())),
         }
     }
 
@@ -1059,27 +1378,18 @@ mod tests {
         };
 
         assert_eq!(
-            compile(|q| q.from[0].all_descendants = true).code(),
+            compile(|q| q.find_nearest = Some(Default::default())).code(),
             tonic::Code::Unimplemented,
-            "collection group queries are not served"
-        );
-        assert_eq!(
-            compile(|q| q.start_at = Some(Default::default())).code(),
-            tonic::Code::Unimplemented,
-            "cursors are not served"
+            "vector search is not served"
         );
         assert_eq!(
             compile(|q| {
-                q.order_by = vec![Order {
-                    field: Some(FieldReference {
-                        field_path: "address.city".to_string(),
-                    }),
-                    direction: Direction::Ascending as i32,
-                }]
+                q.from[0].all_descendants = true;
+                q.from[0].collection_id = String::new();
             })
             .code(),
             tonic::Code::Unimplemented,
-            "nested field paths are not served"
+            "a kindless collection group scan is not served"
         );
         assert_eq!(
             compile(|q| q.from.clear()).code(),
@@ -1093,6 +1403,396 @@ mod tests {
             .code(),
             tonic::Code::InvalidArgument,
             "IN needs a list of candidates"
+        );
+    }
+
+    // --- Cursors -----------------------------------------------------------
+
+    fn cursor(values: Vec<Value>, before: bool) -> Option<Cursor> {
+        Some(Cursor { values, before })
+    }
+
+    fn order_by(path: &str, descending: bool) -> Vec<Order> {
+        vec![Order {
+            field: Some(FieldReference {
+                field_path: path.to_string(),
+            }),
+            direction: if descending {
+                Direction::Descending as i32
+            } else {
+                Direction::Ascending as i32
+            },
+        }]
+    }
+
+    /// `__name__`-only cursors, which is what a default-ordered
+    /// `startAt`/`endAt` over document ids compiles to.
+    #[test]
+    fn cursors_bound_the_default_name_order() {
+        let at = |values, before, end: End| {
+            query(|q| match end {
+                End::Start => q.start_at = cursor(values, before),
+                End::End => q.end_at = cursor(values, before),
+            })
+            .evaluate(people())
+        };
+        let bob = vec![reference_value(&format!("{ROOT}/users/bob"))];
+
+        assert_eq!(
+            ids(&at(bob.clone(), true, End::Start)),
+            ["bob", "carol", "dan"],
+            "startAt includes the cursor document"
+        );
+        assert_eq!(
+            ids(&at(bob.clone(), false, End::Start)),
+            ["carol", "dan"],
+            "startAfter excludes it"
+        );
+        assert_eq!(
+            ids(&at(bob.clone(), false, End::End)),
+            ["alice", "bob"],
+            "endAt includes it"
+        );
+        assert_eq!(
+            ids(&at(bob, true, End::End)),
+            ["alice"],
+            "endBefore excludes it"
+        );
+    }
+
+    #[test]
+    fn a_start_and_an_end_cursor_make_a_range() {
+        let found = query(|q| {
+            q.start_at = cursor(vec![reference_value(&format!("{ROOT}/users/bob"))], true);
+            q.end_at = cursor(vec![reference_value(&format!("{ROOT}/users/dan"))], true);
+        })
+        .evaluate(people());
+
+        assert_eq!(ids(&found), ["bob", "carol"]);
+    }
+
+    /// The case that matters for paging: `startAfter(lastDocumentSnapshot)`
+    /// sends one value per order term, ending in the document's own name.
+    #[test]
+    fn a_full_snapshot_cursor_pages_past_a_tie() {
+        let page = |after: Option<&str>| {
+            query(|q| {
+                q.order_by = order_by("age", false);
+                q.limit = Some(2);
+                if let Some(id) = after {
+                    let age = if id == "carol" { 41 } else { 31 };
+                    q.start_at = cursor(
+                        vec![
+                            integer_value(age),
+                            reference_value(&format!("{ROOT}/users/{id}")),
+                        ],
+                        false,
+                    );
+                }
+            })
+            .evaluate(people())
+        };
+
+        // alice and bob are both 31, so only the name breaks the tie.
+        assert_eq!(ids(&page(None)), ["alice", "bob"]);
+        assert_eq!(
+            ids(&page(Some("bob"))),
+            ["carol"],
+            "paging after a tied document must not repeat its partner"
+        );
+        assert_eq!(ids(&page(Some("carol"))), [] as [&str; 0]);
+    }
+
+    #[test]
+    fn a_short_cursor_positions_on_every_document_sharing_the_prefix() {
+        let found = query(|q| {
+            q.order_by = order_by("age", false);
+            q.start_at = cursor(vec![integer_value(31)], false);
+        })
+        .evaluate(people());
+
+        assert_eq!(
+            ids(&found),
+            ["carol"],
+            "startAfter(31) skips the whole group of 31s, not just one of them"
+        );
+    }
+
+    #[test]
+    fn a_cursor_follows_a_descending_order() {
+        let found = query(|q| {
+            q.order_by = order_by("age", true);
+            q.start_at = cursor(vec![integer_value(41)], false);
+        })
+        .evaluate(people());
+
+        assert_eq!(
+            ids(&found),
+            ["bob", "alice"],
+            "descending, 'after 41' means the smaller ages"
+        );
+    }
+
+    #[test]
+    fn a_cursor_applies_before_offset_and_limit() {
+        let found = query(|q| {
+            q.start_at = cursor(vec![reference_value(&format!("{ROOT}/users/alice"))], false);
+            q.offset = 1;
+            q.limit = Some(1);
+        })
+        .evaluate(people());
+
+        // After alice: bob, carol, dan. Offset 1, limit 1 of that.
+        assert_eq!(ids(&found), ["carol"]);
+        assert_eq!(found.skipped, 1);
+    }
+
+    #[test]
+    fn a_cursor_the_query_cannot_position_is_rejected() {
+        let compile = |mutate: fn(&mut StructuredQuery)| {
+            let mut structured = StructuredQuery {
+                from: vec![CollectionSelector {
+                    collection_id: "users".to_string(),
+                    all_descendants: false,
+                }],
+                ..Default::default()
+            };
+            mutate(&mut structured);
+            Query::compile(&structured).expect_err("should be rejected")
+        };
+
+        assert_eq!(
+            compile(|q| q.start_at = cursor(vec![], true)).code(),
+            tonic::Code::InvalidArgument,
+            "a cursor with no values has no position"
+        );
+        assert_eq!(
+            compile(|q| {
+                // The implicit order is `__name__` alone, so two values cannot
+                // line up with it.
+                q.start_at = cursor(vec![integer_value(1), integer_value(2)], true)
+            })
+            .code(),
+            tonic::Code::InvalidArgument,
+            "a cursor must not be longer than the order"
+        );
+        assert_eq!(
+            compile(|q| q.end_at = cursor(vec![string_value("bob")], false)).code(),
+            tonic::Code::InvalidArgument,
+            "a __name__ position must arrive as a reference, not a string"
+        );
+    }
+
+    // --- Collection group queries ------------------------------------------
+
+    #[test]
+    fn a_collection_group_query_is_compiled_and_flagged() {
+        let group = query(|q| q.from[0].all_descendants = true);
+        assert!(group.all_descendants(), "the scan has to widen");
+        assert_eq!(group.collection_id(), "users");
+
+        assert!(
+            !query(|_| {}).all_descendants(),
+            "an ordinary query still reads one collection"
+        );
+    }
+
+    #[test]
+    fn a_collection_group_query_orders_documents_from_different_parents() {
+        let at = |name: &str, age: i64| Document {
+            name: format!("{ROOT}/{name}"),
+            fields: [("age".to_string(), integer_value(age))]
+                .into_iter()
+                .collect(),
+            create_time: None,
+            update_time: None,
+        };
+        let documents = vec![
+            at("teams/b/members/zoe", 20),
+            at("members/root", 30),
+            at("teams/a/members/amy", 20),
+        ];
+
+        let found = query(|q| {
+            q.from[0].collection_id = "members".to_string();
+            q.from[0].all_descendants = true;
+            q.order_by = order_by("age", false);
+        })
+        .evaluate(documents);
+
+        let names: Vec<&str> = found
+            .documents
+            .iter()
+            .map(|document| {
+                document
+                    .name
+                    .strip_prefix(&format!("{ROOT}/"))
+                    .expect("under the root")
+            })
+            .collect();
+        assert_eq!(
+            names,
+            ["teams/a/members/amy", "teams/b/members/zoe", "members/root"],
+            "age first, then the full resource name as the tiebreak"
+        );
+    }
+
+    // --- Nested field paths ------------------------------------------------
+
+    fn addressed() -> Vec<Document> {
+        vec![
+            document(
+                "alice",
+                vec![(
+                    "address",
+                    map_value(vec![
+                        ("city", string_value("Tokyo")),
+                        ("zip", string_value("100-0001")),
+                    ]),
+                )],
+            ),
+            document(
+                "bob",
+                vec![("address", map_value(vec![("city", string_value("Kyoto"))]))],
+            ),
+            // A document whose `address` is not a map at all.
+            document("carol", vec![("address", string_value("Osaka"))]),
+            // A document with a top-level field literally spelled "address.city".
+            document("dan", vec![("address.city", string_value("Tokyo"))]),
+        ]
+    }
+
+    #[test]
+    fn a_filter_on_a_nested_path_reads_inside_the_map() {
+        let found = query(|q| {
+            q.r#where = field_filter(
+                "address.city",
+                ProtoFieldOperator::Equal,
+                string_value("Tokyo"),
+            );
+        })
+        .evaluate(addressed());
+
+        assert_eq!(
+            ids(&found),
+            ["alice"],
+            "carol's address is a string and dan's field is only spelled that way"
+        );
+    }
+
+    #[test]
+    fn a_quoted_segment_addresses_a_field_whose_name_has_a_dot() {
+        let found = query(|q| {
+            q.r#where = field_filter(
+                "`address.city`",
+                ProtoFieldOperator::Equal,
+                string_value("Tokyo"),
+            );
+        })
+        .evaluate(addressed());
+
+        assert_eq!(
+            ids(&found),
+            ["dan"],
+            "the backticks make it one segment, not a walk into a map"
+        );
+    }
+
+    #[test]
+    fn ordering_by_a_nested_path_drops_documents_that_lack_it() {
+        let found = query(|q| q.order_by = order_by("address.city", false)).evaluate(addressed());
+
+        assert_eq!(
+            ids(&found),
+            ["bob", "alice"],
+            "Kyoto before Tokyo; carol and dan have no address.city to order by"
+        );
+    }
+
+    #[test]
+    fn a_projection_of_a_nested_path_keeps_the_nesting() {
+        let found = query(|q| {
+            q.select = Some(Projection {
+                fields: vec![FieldReference {
+                    field_path: "address.city".to_string(),
+                }],
+            });
+            q.r#where = field_filter(
+                "address.city",
+                ProtoFieldOperator::Equal,
+                string_value("Tokyo"),
+            );
+        })
+        .evaluate(addressed());
+
+        let only = &found.documents[0];
+        assert!(
+            !only.fields.contains_key("address.city"),
+            "the path must not be flattened into a field name"
+        );
+        let address = only.fields.get("address").expect("address survives");
+        let Some(ValueType::MapValue(map)) = &address.value_type else {
+            panic!("address stays a map: {address:?}");
+        };
+        assert!(map.fields.contains_key("city"));
+        assert!(
+            !map.fields.contains_key("zip"),
+            "an unselected sibling inside the map is dropped"
+        );
+    }
+
+    #[test]
+    fn field_paths_parse_to_their_segments() {
+        let segments = |path: &str| {
+            FieldPath::parse(path)
+                .unwrap_or_else(|error| panic!("{path:?} should parse: {error}"))
+                .segments
+        };
+
+        assert_eq!(segments("a"), ["a"]);
+        assert_eq!(segments("a.b.c"), ["a", "b", "c"]);
+        assert_eq!(segments("a_1.b2"), ["a_1", "b2"]);
+        assert_eq!(segments("`a.b`"), ["a.b"], "a quoted dot is literal");
+        assert_eq!(segments("`a.b`.c"), ["a.b", "c"]);
+        assert_eq!(segments("`a b`"), ["a b"]);
+        assert_eq!(segments(r"`a\`b`"), ["a`b"], "an escaped backtick");
+        assert_eq!(segments(r"`a\\b`"), [r"a\b"], "an escaped backslash");
+    }
+
+    #[test]
+    fn a_malformed_field_path_is_an_invalid_argument() {
+        for path in [
+            "", ".", "a.", ".a", "a..b", "`a", "``", "1abc", "a b", "a-b", r"`a\nb`", "`a`b",
+        ] {
+            let error = FieldPath::parse(path).expect_err(&format!("{path:?} is malformed"));
+            assert_eq!(
+                error.code(),
+                tonic::Code::InvalidArgument,
+                "{path:?} should be an invalid argument, not {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quoted_name_field_is_an_ordinary_field() {
+        let documents = vec![
+            document("alice", vec![(DOCUMENT_NAME_FIELD, string_value("mine"))]),
+            document("bob", vec![("age", integer_value(1))]),
+        ];
+
+        let found = query(|q| {
+            q.r#where = field_filter(
+                &format!("`{DOCUMENT_NAME_FIELD}`"),
+                ProtoFieldOperator::Equal,
+                string_value("mine"),
+            );
+        })
+        .evaluate(documents);
+
+        assert_eq!(
+            ids(&found),
+            ["alice"],
+            "quoted, it is a stored field rather than the resource name"
         );
     }
 }

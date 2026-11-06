@@ -16,7 +16,7 @@
 // show_missing, and runTransaction() goes to BeginTransaction + Commit. That is
 // exactly why this layer exists alongside the Rust tests.
 
-import { Firestore } from '@google-cloud/firestore'
+import { FieldPath, FieldValue, Firestore, Timestamp } from '@google-cloud/firestore'
 import { strict as assert } from 'node:assert'
 
 const PROJECT_ID = 'fireup-smoke'
@@ -213,6 +213,145 @@ const main = async () => {
     assert.equal(reloaded.get('population'), 25)
   })
 
+  // ---- Query fidelity 2.1: cursors, collection groups, nested paths --------
+  //
+  // The SDK builds these request shapes itself: a cursor becomes a positional
+  // start_at/end_at proto, a dotted string becomes a nested field path, and a
+  // FieldPath with one dotted segment becomes a backtick-quoted one. Driving
+  // them from here is the check that our reading of the protos matches the
+  // client's, rather than only matching itself.
+
+  await check('startAt()/startAfter() bound the results from below', async () => {
+    const ids = async (query) => (await query.get()).docs.map((d) => d.id)
+    const ordered = cities.orderBy('population')
+
+    assert.deepEqual(await ids(ordered.startAt(19)), ['osaka', 'seoul', 'tokyo'])
+    assert.deepEqual(await ids(ordered.startAfter(19)), ['seoul', 'tokyo'])
+  })
+
+  await check('endAt()/endBefore() bound the results from above', async () => {
+    const ids = async (query) => (await query.get()).docs.map((d) => d.id)
+    const ordered = cities.orderBy('population')
+
+    assert.deepEqual(await ids(ordered.endAt(25)), ['kyoto', 'osaka', 'seoul'])
+    assert.deepEqual(await ids(ordered.endBefore(25)), ['kyoto', 'osaka'])
+  })
+
+  await check('a start and an end cursor make a range', async () => {
+    const snapshot = await cities.orderBy('population').startAfter(15).endBefore(37).get()
+    assert.deepEqual(snapshot.docs.map((d) => d.id), ['osaka', 'seoul'])
+  })
+
+  await check('startAfter(snapshot) pages through a collection exactly once', async () => {
+    // The paging idiom from the published docs. The SDK sends every ordered
+    // value plus the document's own name, so this is also the check that the
+    // implicit __name__ tiebreak lines up with the cursor.
+    const seen = []
+    let cursor = null
+    for (let page = 0; page < 10; page += 1) {
+      let query = cities.orderBy('population').limit(2)
+      if (cursor) {
+        query = query.startAfter(cursor)
+      }
+      const snapshot = await query.get()
+      if (snapshot.empty) {
+        break
+      }
+      seen.push(...snapshot.docs.map((d) => d.id))
+      cursor = snapshot.docs[snapshot.docs.length - 1]
+    }
+
+    assert.deepEqual(seen, ['kyoto', 'osaka', 'seoul', 'tokyo'], 'each document exactly once, in order')
+  })
+
+  await check('a cursor on a tied sort field does not repeat or drop a document', async () => {
+    // Three documents share a population, so only __name__ separates them.
+    const tied = db.collection('tied')
+    const batch = db.batch()
+    for (const id of ['a', 'b', 'c']) {
+      batch.set(tied.doc(id), { population: 7 })
+    }
+    batch.set(tied.doc('d'), { population: 9 })
+    await batch.commit()
+
+    const first = await tied.orderBy('population').limit(2).get()
+    assert.deepEqual(first.docs.map((d) => d.id), ['a', 'b'])
+
+    const next = await tied.orderBy('population').startAfter(first.docs[1]).get()
+    assert.deepEqual(next.docs.map((d) => d.id), ['c', 'd'], 'the tie must not swallow c')
+  })
+
+  await check('collectionGroup() spans every depth under the database', async () => {
+    const batch = db.batch()
+    batch.set(db.doc('teams/a').collection('members').doc('amy'), { rank: 2 })
+    batch.set(db.doc('teams/b').collection('members').doc('zoe'), { rank: 3 })
+    batch.set(db.doc('teams/a/squads/x').collection('members').doc('deep'), { rank: 1 })
+    // A different collection at the same depth must not be swept in.
+    batch.set(db.doc('teams/a').collection('guests').doc('gil'), { rank: 9 })
+    await batch.commit()
+
+    const snapshot = await db.collectionGroup('members').orderBy('rank').get()
+    assert.deepEqual(
+      snapshot.docs.map((d) => d.ref.path),
+      ['teams/a/squads/x/members/deep', 'teams/a/members/amy', 'teams/b/members/zoe'],
+    )
+  })
+
+  await check('collectionGroup() still filters, orders and limits', async () => {
+    const snapshot = await db.collectionGroup('members').where('rank', '>', 1).orderBy('rank').limit(1).get()
+    assert.deepEqual(snapshot.docs.map((d) => d.ref.path), ['teams/a/members/amy'])
+  })
+
+  const residents = db.collection('residents')
+
+  await check('a nested field path filters on the value inside the map', async () => {
+    const batch = db.batch()
+    batch.set(residents.doc('alice'), { address: { city: 'Tokyo', zip: '100-0001' }, name: 'Alice' })
+    batch.set(residents.doc('bob'), { address: { city: 'Kyoto', zip: '600-8216' }, name: 'Bob' })
+    await batch.commit()
+
+    const snapshot = await residents.where('address.city', '==', 'Tokyo').get()
+    assert.deepEqual(snapshot.docs.map((d) => d.id), ['alice'])
+  })
+
+  await check('a nested field path orders by the value inside the map', async () => {
+    const snapshot = await residents.orderBy('address.city').get()
+    assert.deepEqual(snapshot.docs.map((d) => d.id), ['bob', 'alice'], 'Kyoto before Tokyo')
+  })
+
+  await check('select() on a nested path returns the nesting, not a flat key', async () => {
+    const snapshot = await residents.select('address.city').where('address.city', '==', 'Tokyo').get()
+    assert.deepEqual(snapshot.docs[0].data(), { address: { city: 'Tokyo' } })
+    assert.equal(snapshot.docs[0].get('address.city'), 'Tokyo')
+  })
+
+  await check('a one-segment FieldPath addresses a field whose name contains a dot', async () => {
+    // The SDK serializes this as the backtick-quoted `address.city`, which has
+    // to select the literal field rather than walk into the map.
+    const dotted = new FieldPath('address.city')
+    await residents.doc('dan').set({ 'address.city': 'Tokyo' })
+
+    const literal = await residents.where(dotted, '==', 'Tokyo').get()
+    assert.deepEqual(literal.docs.map((d) => d.id), ['dan'], 'the quoted path is one field name')
+
+    const nested = await residents.where('address.city', '==', 'Tokyo').get()
+    assert.deepEqual(nested.docs.map((d) => d.id), ['alice'], 'the dotted string walks into the map')
+  })
+
+  await check('a nested fieldMask on getAll() selects only that leaf', async () => {
+    // getAll() is where the SDK exposes a read mask; it goes to
+    // BatchGetDocuments with a DocumentMask on the wire.
+    const [snapshot] = await db.getAll(residents.doc('alice'), { fieldMask: ['address.zip'] })
+    assert.deepEqual(snapshot.data(), { address: { zip: '100-0001' } })
+  })
+
+  await check('a one-segment FieldPath in a fieldMask stays one field name', async () => {
+    const [snapshot] = await db.getAll(residents.doc('dan'), {
+      fieldMask: [new FieldPath('address.city')],
+    })
+    assert.deepEqual(snapshot.data(), { 'address.city': 'Tokyo' })
+  })
+
   await check('listDocuments() lists a collection, including documents that only have children', async () => {
     await cities.doc('ghost').collection('districts').doc('d1').set({ name: 'Nowhere' })
 
@@ -284,6 +423,84 @@ const main = async () => {
 
     assert.equal((await cities.doc('nagoya').get()).get('population'), 9)
     assert.equal((await cities.doc('sapporo').get()).get('population'), 5)
+  })
+
+  // ---- Field transforms ----------------------------------------------------
+  //
+  // The SDK decides how a FieldValue sentinel reaches the wire — a masked
+  // update plus update_transforms, a transform-only write, or a transform
+  // riding on a full set() — so this is the layer that proves we read whatever
+  // shape it picks. The values themselves are computed by the server, which is
+  // the point: the client never sends them.
+
+  const counters = db.collection('counters')
+
+  await check('serverTimestamp(), increment(), and arrayUnion() resolve on a set()', async () => {
+    const ref = counters.doc('page')
+    await ref.set({
+      label: 'home',
+      seen: FieldValue.serverTimestamp(),
+      hits: FieldValue.increment(5),
+      tags: FieldValue.arrayUnion('a', 'b'),
+    })
+
+    const snapshot = await ref.get()
+    assert.equal(snapshot.get('label'), 'home')
+    assert.equal(snapshot.get('hits'), 5, 'increment on a missing field sets it to the operand')
+    assert.deepEqual(snapshot.get('tags'), ['a', 'b'])
+    assert.ok(
+      snapshot.get('seen') instanceof Timestamp,
+      `serverTimestamp() should come back as a Timestamp, got ${snapshot.get('seen')}`,
+    )
+    assert.ok(
+      snapshot.get('seen').toMillis() <= snapshot.updateTime.toMillis(),
+      'the server timestamp must not be after the write that produced it',
+    )
+  })
+
+  await check('increment() accumulates and arrayUnion() stays idempotent across updates', async () => {
+    const ref = counters.doc('page')
+    await ref.update({ hits: FieldValue.increment(3), tags: FieldValue.arrayUnion('b', 'c') })
+    await ref.update({ hits: FieldValue.increment(-1) })
+
+    const snapshot = await ref.get()
+    assert.equal(snapshot.get('hits'), 7, 'each increment reads the value the last one wrote')
+    assert.deepEqual(snapshot.get('tags'), ['a', 'b', 'c'], 'an element already present is not appended twice')
+    assert.equal(snapshot.get('label'), 'home', 'a transform must not disturb the other fields')
+  })
+
+  await check('arrayRemove() drops the elements it names', async () => {
+    const ref = counters.doc('page')
+    await ref.update({ tags: FieldValue.arrayRemove('a', 'c') })
+
+    assert.deepEqual((await ref.get()).get('tags'), ['b'])
+  })
+
+  await check('increment() on a float field stays a float', async () => {
+    const ref = counters.doc('ratio')
+    await ref.set({ value: 1.5 })
+    await ref.update({ value: FieldValue.increment(1) })
+
+    assert.equal((await ref.get()).get('value'), 2.5)
+  })
+
+  await check('concurrent increments all land', async () => {
+    // The whole reason a transform is computed server-side: ten clients adding
+    // one each must end at ten, which a read-modify-write from the client
+    // cannot guarantee.
+    const ref = counters.doc('contended')
+    await ref.set({ hits: 0 })
+    await Promise.all(Array.from({ length: 10 }, () => ref.update({ hits: FieldValue.increment(1) })))
+
+    assert.equal((await ref.get()).get('hits'), 10, 'no increment may be lost')
+  })
+
+  await check('a transform the server does not serve reports UNIMPLEMENTED', async () => {
+    // Nested field paths are a documented gap, and a transform on one has to
+    // fail loudly rather than write to a top-level field called "a.b".
+    await expectCode(GRPC_UNIMPLEMENTED, () =>
+      counters.doc('page').update({ 'nested.at': FieldValue.serverTimestamp() }),
+    )
   })
 
   await check('an unsupported query reports a clear UNIMPLEMENTED instead of hanging', async () => {

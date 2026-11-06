@@ -1,0 +1,11 @@
+Fireup
+Copyright 2025-2026 Saks Industries
+
+This product includes software developed at Saks Industries.
+
+The Apache License 2.0 that covers the source code does not grant rights to the
+Fireup name, logos, or brand assets. See brand/LICENSE.
+
+Third-party Google/Firebase-related material (notably the vendored public
+googleapis .proto definitions under proto/google/) is recorded with attribution
+in docs/licenses/FIREBASE_GCP_LOCAL.md.

@@ -19,6 +19,13 @@
 //! | `ListCollectionIds`  | served |
 //! | everything else      | `UNIMPLEMENTED` |
 //!
+//! A write's `update_transforms` — and a transform-only `DocumentTransform`
+//! write — are served for `serverTimestamp`, `increment`, `arrayUnion`, and
+//! `arrayRemove`; see [`transforms`](crate::local::transforms) for the
+//! semantics and for what is still refused. `UpdateDocument` does not carry
+//! transforms in the contract, so an SDK's `update()` with a `FieldValue`
+//! sentinel arrives here as a `Commit`.
+//!
 //! Every unimplemented RPC answers with an explicit `UNIMPLEMENTED` status and a
 //! message naming the phase that will add it, so an SDK failure is immediately
 //! legible instead of looking like a hang or a protocol error.
@@ -35,9 +42,10 @@ use tonic::{Request, Response, Status};
 use tracing::debug;
 
 use crate::local::names::{parse_document_name, parse_parent_name};
-use crate::local::query::Query;
-use crate::local::store::{self, now_timestamp, Mutation, PendingWrite, SharedStore};
+use crate::local::query::{self, Query};
+use crate::local::store::{self, now_timestamp, Mutation, PendingWrite, SharedStore, WriteEffect};
 use crate::local::transactions::Transactions;
+use crate::local::transforms;
 use crate::protos::google::firestore::v1::run_query_request::QueryType;
 use crate::protos::google::rpc::Status as RpcStatus;
 use crate::protos::google::firestore::v1::{
@@ -62,7 +70,7 @@ const AUTO_ID_LENGTH: usize = 20;
 /// has to satisfy the trait.
 type UnimplementedStream<T> = ReceiverStream<Result<T, Status>>;
 
-fn unimplemented(rpc: &str, plan: &str) -> Status {
+pub(crate) fn unimplemented(rpc: &str, plan: &str) -> Status {
     Status::unimplemented(format!(
         "fireup local does not serve {rpc} yet ({plan}). \
          See docs/local/README.md for the full fidelity matrix."
@@ -145,34 +153,39 @@ fn auto_id() -> String {
 
 /// Apply a response `DocumentMask`, dropping fields the caller did not ask for.
 ///
-/// Phase 0 handles simple top-level field names. Nested (`a.b`) and quoted
-/// (`` `a&b` ``) field paths are rejected rather than silently mishandled.
+/// Nested (`a.b`) and backtick-quoted (`` `a&b` ``) paths are read with the
+/// query engine's field-path parser, so a mask and a `select()` projection
+/// select exactly the same thing: masking `a.b` returns an `a` holding only
+/// `b`, not a flattened `a.b` and not the whole of `a`.
 fn apply_mask(document: &mut Document, mask: &Option<DocumentMask>) -> Result<(), Status> {
-    let Some(mask) = mask else {
-        return Ok(());
-    };
-    if mask.field_paths.is_empty() {
-        return Ok(());
-    }
-
-    let wanted = simple_field_paths(&mask.field_paths)?;
-    document
-        .fields
-        .retain(|field, _| wanted.iter().any(|path| path == field));
+    apply_parsed_mask(document, &parse_mask(mask)?);
     Ok(())
 }
 
-/// Validate that every field path is a single unquoted segment and return them.
-fn simple_field_paths(field_paths: &[String]) -> Result<Vec<String>, Status> {
-    for path in field_paths {
-        if path.contains('.') || path.contains('`') {
-            return Err(unimplemented(
-                &format!("nested field path {path:?}"),
-                "field-path masks land with the query engine",
-            ));
-        }
+/// Parse a response `DocumentMask`, or `None` when it selects everything.
+///
+/// Separate from applying it so a caller can reject a malformed mask *before*
+/// reading: a bad request should be reported as one even when the document it
+/// names is also missing.
+fn parse_mask(mask: &Option<DocumentMask>) -> Result<Option<Vec<query::FieldPath>>, Status> {
+    let Some(mask) = mask else {
+        return Ok(None);
+    };
+    if mask.field_paths.is_empty() {
+        return Ok(None);
     }
-    Ok(field_paths.to_vec())
+    mask.field_paths
+        .iter()
+        .map(|path| query::FieldPath::parse(path))
+        .collect::<Result<Vec<_>, Status>>()
+        .map(Some)
+}
+
+/// Apply an already-parsed mask.
+fn apply_parsed_mask(document: &mut Document, mask: &Option<Vec<query::FieldPath>>) {
+    if let Some(paths) = mask {
+        query::retain_field_paths(&mut document.fields, paths);
+    }
 }
 
 /// The fields an update mask selects, in mask order.
@@ -180,18 +193,31 @@ fn simple_field_paths(field_paths: &[String]) -> Result<Vec<String>, Status> {
 /// A masked field the document does not carry is dropped rather than written as
 /// null: Firestore treats that as "delete this field", and Phase 1 has no field
 /// deletion, so writing a null would be worse than leaving it alone.
+///
+/// Unlike a read mask, this one is still restricted to top-level fields. A
+/// nested update mask has to merge *into* a stored map, which is a change to
+/// the store's write contract rather than to the query engine, so it stays an
+/// explicit refusal instead of overwriting the whole parent map.
 fn masked_fields(
     field_paths: &[String],
     document: &Document,
 ) -> Result<Vec<(String, Value)>, Status> {
-    Ok(simple_field_paths(field_paths)?
-        .into_iter()
+    for path in field_paths {
+        if path.contains('.') || path.contains('`') {
+            return Err(unimplemented(
+                &format!("the nested update_mask path {path:?}"),
+                "an update mask writes whole top-level fields",
+            ));
+        }
+    }
+    Ok(field_paths
+        .iter()
         .filter_map(|field| {
             document
                 .fields
-                .get(&field)
+                .get(field)
                 .cloned()
-                .map(|value| (field, value))
+                .map(|value| (field.clone(), value))
         })
         .collect())
 }
@@ -216,24 +242,19 @@ fn precondition(request: &Option<Precondition>) -> Result<Option<store::Precondi
 /// Translate one `Write` from a commit batch into a store write.
 ///
 /// Pure, so a batch is fully translated — and fully rejected if any write in it
-/// is unsupported — before the store is touched at all.
+/// is unsupported — before the store is touched at all. The transforms travel
+/// with the mutation and are computed by the store inside the write's own
+/// transaction; see [`transforms`](crate::local::transforms).
 fn pending_write(write: &crate::protos::google::firestore::v1::Write) -> Result<PendingWrite, Status> {
-    if !write.update_transforms.is_empty() {
-        return Err(unimplemented(
-            "field transforms (serverTimestamp, increment, array union)",
-            "a transform computes the value server-side, which needs the write pipeline",
-        ));
-    }
-
     let operation = write
         .operation
         .as_ref()
         .ok_or_else(|| Status::invalid_argument("write has no operation"))?;
 
-    let mutation = match operation {
+    let (mutation, transforms) = match operation {
         Operation::Update(document) => {
             let name = parse_document_name(&document.name)?.full();
-            match &write.update_mask {
+            let mutation = match &write.update_mask {
                 // No mask: full replace, the `set()` path.
                 None => Mutation::Put(Document {
                     name,
@@ -245,31 +266,62 @@ fn pending_write(write: &crate::protos::google::firestore::v1::Write) -> Result<
                     name,
                     fields: masked_fields(&mask.field_paths, document)?,
                 },
-            }
+            };
+            (mutation, transforms::compile(&write.update_transforms)?)
         }
-        Operation::Delete(name) => Mutation::Delete {
-            name: parse_document_name(name)?.full(),
-        },
-        Operation::Transform(_) => {
-            return Err(unimplemented(
-                "DocumentTransform writes",
-                "a transform computes the value server-side, which needs the write pipeline",
-            ))
+        Operation::Delete(name) => {
+            if !write.update_transforms.is_empty() {
+                return Err(Status::invalid_argument(
+                    "update_transforms may only be set on an `update` write",
+                ));
+            }
+            (
+                Mutation::Delete {
+                    name: parse_document_name(name)?.full(),
+                },
+                Vec::new(),
+            )
+        }
+        // A transform-only write: no field data, just the transforms. An empty
+        // merge is the right base for it — the contract creates the document if
+        // it is absent, and otherwise leaves every untransformed field alone.
+        Operation::Transform(transform) => {
+            if !write.update_transforms.is_empty() {
+                return Err(Status::invalid_argument(
+                    "update_transforms may only be set on an `update` write",
+                ));
+            }
+            if transform.field_transforms.is_empty() {
+                return Err(Status::invalid_argument(
+                    "a transform write needs at least one field transform",
+                ));
+            }
+            (
+                Mutation::Merge {
+                    name: parse_document_name(&transform.document)?.full(),
+                    fields: Vec::new(),
+                },
+                transforms::compile(&transform.field_transforms)?,
+            )
         }
     };
 
-    Ok(PendingWrite::guarded(
+    Ok(PendingWrite::transformed(
         mutation,
         precondition(&write.current_document)?,
+        transforms,
     ))
 }
 
-/// One `WriteResult` per applied write.
-fn write_results(count: usize, now: &Timestamp) -> Vec<WriteResult> {
-    (0..count)
-        .map(|_| WriteResult {
+/// One `WriteResult` per applied write, carrying that write's transform
+/// results — the values `increment` and `serverTimestamp` resolved to, which an
+/// SDK reads back off the commit rather than with another round trip.
+fn write_results(effects: &[WriteEffect], now: &Timestamp) -> Vec<WriteResult> {
+    effects
+        .iter()
+        .map(|effect| WriteResult {
             update_time: Some(now.clone()),
-            transform_results: Vec::new(),
+            transform_results: effect.transform_results.clone(),
         })
         .collect()
 }
@@ -299,15 +351,20 @@ impl FirestoreApi {
         &self.transactions
     }
 
-    /// Apply one write and return the document it left behind.
+    /// Apply one write and report the time it landed and what its transforms
+    /// resolved to.
     ///
     /// The single-document RPCs all go through the batch commit path, so there
     /// is one implementation of precondition handling and `create_time`
     /// preservation rather than one per RPC.
-    async fn apply_one(&self, write: PendingWrite) -> Result<Timestamp, Status> {
+    async fn apply_one(&self, write: PendingWrite) -> Result<(Timestamp, WriteEffect), Status> {
         let now = now_timestamp();
-        self.store.commit(vec![write], now.clone()).await?;
-        Ok(now)
+        let effects = self.store.commit(vec![write], now.clone()).await?;
+        let effect = effects
+            .into_iter()
+            .next()
+            .ok_or_else(|| Status::internal("a one-write commit returned no write effect"))?;
+        Ok((now, effect))
     }
 
     /// Read a document back after writing it, for an RPC that returns one.
@@ -350,6 +407,9 @@ impl Firestore for FirestoreApi {
         }
 
         let name = parse_document_name(&request.name)?.full();
+        // Parsed before the read, so a malformed field path is reported as the
+        // bad request it is rather than as a missing document.
+        let mask = parse_mask(&request.mask)?;
         let found = self.store.get(&name).await?;
         if let Some(token) = &transaction {
             // Recorded whether or not the document exists: "it is not there"
@@ -367,7 +427,7 @@ impl Firestore for FirestoreApi {
 
         let mut document =
             found.ok_or_else(|| Status::not_found(format!("no document at {name}")))?;
-        apply_mask(&mut document, &request.mask)?;
+        apply_parsed_mask(&mut document, &mask);
         Ok(Response::new(document))
     }
 
@@ -587,10 +647,15 @@ impl Firestore for FirestoreApi {
         batch.extend(writes);
 
         let now = now_timestamp();
-        self.store.commit(batch, now.clone()).await?;
+        let mut effects = self.store.commit(batch, now.clone()).await?;
+
+        // The read set's verifications were prepended to the batch, so the
+        // caller's own writes — and their transform results — are the tail.
+        let verified = effects.len().saturating_sub(applied);
+        effects.drain(..verified);
 
         Ok(Response::new(CommitResponse {
-            write_results: write_results(applied, &now),
+            write_results: write_results(&effects, &now),
             commit_time: Some(now),
         }))
     }
@@ -761,10 +826,18 @@ impl Firestore for FirestoreApi {
         // Compiled before anything is read, so an unsupported query shape fails
         // immediately instead of after a collection scan.
         let query = Query::compile(structured)?;
-        let documents = self
-            .store
-            .scan_collection(&parent.full(), query.collection_id())
-            .await?;
+        let documents = if query.all_descendants() {
+            // A collection group query reads every collection with this id
+            // anywhere beneath the parent, which is the scan the Datastore
+            // kind queries already needed.
+            self.store
+                .scan_kind(&parent.full(), query.collection_id())
+                .await?
+        } else {
+            self.store
+                .scan_collection(&parent.full(), query.collection_id())
+                .await?
+        };
         let results = query.evaluate(documents);
 
         if let Some(token) = &transaction {
@@ -896,10 +969,10 @@ impl Firestore for FirestoreApi {
                 Ok(pending) => self.apply_one(pending).await,
             };
             match outcome {
-                Ok(now) => {
+                Ok((now, effect)) => {
                     write_results.push(WriteResult {
                         update_time: Some(now),
-                        transform_results: Vec::new(),
+                        transform_results: effect.transform_results,
                     });
                     statuses.push(RpcStatus::default());
                 }
@@ -935,9 +1008,141 @@ mod tests {
         assert_ne!(id, auto_id(), "ids must not repeat");
     }
 
+    /// `{ address: { city: "Tokyo", zip: "100-0001" }, name: "alice" }`
+    fn nested_document() -> Document {
+        use crate::protos::google::firestore::v1::value::ValueType;
+        use crate::protos::google::firestore::v1::MapValue;
+
+        let text = |value: &str| Value {
+            value_type: Some(ValueType::StringValue(value.to_string())),
+        };
+        Document {
+            name: "projects/demo/databases/(default)/documents/users/alice".to_string(),
+            fields: [
+                (
+                    "address".to_string(),
+                    Value {
+                        value_type: Some(ValueType::MapValue(MapValue {
+                            fields: [
+                                ("city".to_string(), text("Tokyo")),
+                                ("zip".to_string(), text("100-0001")),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        })),
+                    },
+                ),
+                ("name".to_string(), text("alice")),
+            ]
+            .into_iter()
+            .collect(),
+            create_time: None,
+            update_time: None,
+        }
+    }
+
+    /// The value at `path` in `document`, as a debug string.
+    fn at(document: &Document, path: &str) -> Option<String> {
+        use crate::protos::google::firestore::v1::value::ValueType;
+
+        let mut segments = path.split('.');
+        let mut value = document.fields.get(segments.next()?)?;
+        for segment in segments {
+            match &value.value_type {
+                Some(ValueType::MapValue(map)) => value = map.fields.get(segment)?,
+                _ => return None,
+            }
+        }
+        Some(format!("{:?}", value.value_type))
+    }
+
     #[test]
-    fn nested_field_paths_are_rejected_rather_than_mishandled() {
-        let err = simple_field_paths(&["a.b".to_string()]).expect_err("nested path");
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
+    fn a_read_mask_selects_a_nested_field_without_flattening_it() {
+        let mut document = nested_document();
+        apply_mask(
+            &mut document,
+            &Some(DocumentMask {
+                field_paths: vec!["address.city".to_string()],
+            }),
+        )
+        .expect("a nested read mask is served");
+
+        assert!(
+            at(&document, "address.city").is_some(),
+            "the selected leaf stays where it was: {:?}",
+            document.fields
+        );
+        assert_eq!(
+            at(&document, "address.zip"),
+            None,
+            "an unselected sibling inside the map is dropped"
+        );
+        assert_eq!(at(&document, "name"), None, "name was not selected");
+        assert!(
+            !document.fields.contains_key("address.city"),
+            "the mask must not flatten the path into a field name"
+        );
+    }
+
+    #[test]
+    fn a_read_mask_selecting_a_whole_map_keeps_all_of_it() {
+        let mut document = nested_document();
+        apply_mask(
+            &mut document,
+            &Some(DocumentMask {
+                field_paths: vec!["address".to_string()],
+            }),
+        )
+        .expect("a top-level read mask is served");
+
+        assert!(at(&document, "address.city").is_some());
+        assert!(at(&document, "address.zip").is_some());
+        assert_eq!(at(&document, "name"), None);
+    }
+
+    #[test]
+    fn a_read_mask_path_that_is_not_there_selects_nothing() {
+        let mut document = nested_document();
+        apply_mask(
+            &mut document,
+            &Some(DocumentMask {
+                // `name` is a string, so it has no `first` inside it.
+                field_paths: vec!["address.country".to_string(), "name.first".to_string()],
+            }),
+        )
+        .expect("an absent path is not an error");
+
+        assert!(document.fields.is_empty(), "{:?}", document.fields);
+    }
+
+    #[test]
+    fn a_malformed_mask_path_is_an_invalid_argument() {
+        let err = apply_mask(
+            &mut nested_document(),
+            &Some(DocumentMask {
+                field_paths: vec!["address..city".to_string()],
+            }),
+        )
+        .expect_err("a malformed path is rejected");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn a_nested_update_mask_is_still_refused() {
+        let err = masked_fields(&["address.city".to_string()], &nested_document())
+            .expect_err("a nested update mask is not served");
+        assert_eq!(
+            err.code(),
+            tonic::Code::Unimplemented,
+            "writing into a stored map is a write-path change, not a query one"
+        );
+    }
+
+    #[test]
+    fn a_top_level_update_mask_selects_the_whole_field() {
+        let fields = masked_fields(&["address".to_string()], &nested_document())
+            .expect("a top-level update mask is served");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].0, "address");
     }
 }

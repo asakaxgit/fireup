@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fireup — move Firestore data to PostgreSQL, and run the APIs locally</title>
+<meta name="description" content="Fireup imports a managed Firestore or Datastore export into a normalised PostgreSQL schema, and serves the Firestore, Datastore and Firebase Auth APIs on one local port for development.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="icon" href="assets/favicon-16.png" sizes="16x16" type="image/png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon-180.png">
+<link rel="manifest" href="site.webmanifest">
+<meta property="og:title" content="Fireup">
+<meta property="og:description" content="Move Firestore data to PostgreSQL. Run the Firestore, Datastore and Firebase Auth APIs on one local port.">
+<meta property="og:image" content="assets/og-card.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="bar">
+  <div class="shell bar-inner">
+    <a class="brand" href="#top" aria-label="Fireup, home">
+      <img src="assets/fireup-lockup-dark.svg" alt="FireUp" width="129" height="64">
+    </a>
+    <nav aria-label="Primary">
+      <ul class="nav">
+        <li><a href="#migrate">Migrate</a></li>
+        <li><a href="#local">Run locally</a></li>
+        <li><a href="#fidelity">Fidelity</a></li>
+        <li><a href="#status">Status</a></li>
+        <li><a class="nav-cta" href="https://github.com/asakaxgit/fireup">Source</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="hero" id="top">
+    <div class="shell">
+      <p class="eyebrow"><span class="dot" aria-hidden="true"></span>v0.1.0 · pre-release · not production ready</p>
+      <h1>Take your data out of Firestore — without taking your app offline.</h1>
+      <p class="lede">
+        Fireup reads a managed Firestore or Datastore export and imports it into a normalised
+        PostgreSQL schema. It also serves the Firestore, Datastore and Firebase&nbsp;Auth APIs on
+        one local port, so the code you are migrating keeps running against the SDKs it already
+        uses.
+      </p>
+      <p class="actions">
+        <a class="btn btn-primary" href="https://github.com/asakaxgit/fireup#readme">Read the docs</a>
+        <a class="btn btn-ghost" href="https://github.com/asakaxgit/fireup">View the source</a>
+      </p>
+      <pre class="term" aria-label="Example terminal session"><code><span class="c">$</span> fireup validate --backup-file ./export
+<span class="o">read 2 input files · 13 records · 12/12 entities · 0 errors</span>
+
+<span class="c">$</span> fireup analyze --backup-file ./export --out ./schema
+<span class="c">$</span> fireup import  --backup-file ./export --postgres-url $PG
+
+<span class="c">$</span> fireup local --postgres-url $PG
+<span class="o">firestore · datastore · auth  →  127.0.0.1:4589</span></code></pre>
+    </div>
+  </section>
+
+  <section class="band" id="migrate">
+    <div class="shell">
+      <h2>One tool, two jobs</h2>
+      <div class="cards">
+        <article class="card">
+          <h3>Import an export</h3>
+          <p>
+            Fireup parses a managed export the way the format is actually written — 32&nbsp;KiB
+            LevelDB blocks, masked CRC32C record checksums, fragment reassembly, and the legacy
+            <code>EntityProto</code> payload with its proto2 groups — across every
+            <code>kind_*/output-N</code> shard of the tree.
+          </p>
+          <p>
+            It then analyses the documents, normalises to 3NF, emits DDL for review, and imports
+            the rows. Documents are keyed on their Datastore <code>key_path</code>, so a re-import
+            updates rows instead of duplicating them.
+          </p>
+        </article>
+        <article class="card" id="local">
+          <h3>Run the APIs locally</h3>
+          <p>
+            <code>fireup local</code> serves <code>google.firestore.v1</code> and
+            <code>google.datastore.v1</code> over gRPC plus a subset of Identity Toolkit over REST —
+            all on <strong>one port</strong>, which it demultiplexes by the HTTP/2 preface.
+          </p>
+          <p>
+            Documents live in memory or in PostgreSQL, behind one <code>Store</code> trait held to a
+            single conformance suite, so both answer a query identically. An unreachable
+            <code>--postgres-url</code> is a hard error, never a silent fall back to an empty store.
+          </p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="band band-sunk">
+    <div class="shell split">
+      <div>
+        <h2>It talks to the SDKs you already have</h2>
+        <p>
+          Official Google and Firebase clients honour the emulator environment variables. Point
+          them at Fireup and they speak to it instead of production — no shim, no fork, no patched
+          client library.
+        </p>
+        <p class="muted small">
+          Verified with Google's <code>@google-cloud/firestore</code>, <code>firebase-admin</code> 13
+          and the <code>firebase</code> client SDK 11 against both the in-memory and the PostgreSQL
+          store.
+        </p>
+      </div>
+      <pre class="term term-light" aria-label="Environment variables for pointing SDKs at Fireup"><code><span class="c">export</span> FIRESTORE_EMULATOR_HOST=127.0.0.1:4589
+<span class="c">export</span> DATASTORE_EMULATOR_HOST=127.0.0.1:4589
+<span class="c">export</span> FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:4589</code></pre>
+    </div>
+  </section>
+
+  <section class="band" id="fidelity">
+    <div class="shell">
+      <h2>Fidelity, stated up front</h2>
+      <p class="lede lede-light">
+        An unsupported feature is an explicit error, never a wrong answer. Every refusal names the
+        missing piece, so an SDK failure reads as a clear gap instead of a plausible-looking wrong
+        result.
+      </p>
+
+      <!-- Scrollable on narrow screens, and focusable so it can be scrolled from
+           the keyboard rather than only by touch. -->
+      <div class="scroll-x" tabindex="0" role="region" aria-label="Fidelity matrix">
+      <table class="matrix">
+        <caption class="sr-only">What Fireup serves and what it refuses</caption>
+        <thead>
+          <tr><th scope="col">Surface</th><th scope="col">State</th><th scope="col">Detail</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Firestore v1 — documents, queries, transactions</th>
+            <td><span class="pill pill-ok">Served</span></td>
+            <td>12 of the 17 RPCs: reads, writes, <code>RunQuery</code>, atomic <code>Commit</code> with optimistic concurrency, <code>BatchWrite</code>, listings paged by resume token.</td>
+          </tr>
+          <tr>
+            <th scope="row">Datastore v1</th>
+            <td><span class="pill pill-ok">Served</span></td>
+            <td><code>Lookup</code>, <code>RunQuery</code>, <code>Commit</code>, transactions, <code>AllocateIds</code>, <code>ReserveIds</code>. Kinds share the store with Firestore collections.</td>
+          </tr>
+          <tr>
+            <th scope="row">Firebase Auth / Identity Toolkit</th>
+            <td><span class="pill pill-part">Subset</span></td>
+            <td>Email+password, anonymous, custom token, refresh, lookup, update, delete and the project-scoped admin endpoints. Tokens are unsigned, as emulator-mode SDKs expect.</td>
+          </tr>
+          <tr>
+            <th scope="row">Realtime listeners, aggregations, <code>PartitionQuery</code></th>
+            <td><span class="pill pill-no">Refused</span></td>
+            <td>Answered <code>UNIMPLEMENTED</code> with a message naming the gap.</td>
+          </tr>
+          <tr>
+            <th scope="row">Field transforms, cursors, collection-group queries</th>
+            <td><span class="pill pill-no">Refused</span></td>
+            <td><code>serverTimestamp()</code> and <code>increment()</code> fail loudly rather than writing a wrong value.</td>
+          </tr>
+          <tr>
+            <th scope="row">Phone auth, MFA, federated providers, email link flows</th>
+            <td><span class="pill pill-no">Refused</span></td>
+            <td>Answered <code>501</code>. Production key material is a non-goal.</td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p class="note">
+        <strong>Local development only.</strong> There is no auth on the data plane, tokens are
+        unsigned, and passwords are hashed without a work factor. Anything that can reach the port
+        can act as any account — which is why it binds to loopback and says so at startup.
+      </p>
+    </div>
+  </section>
+
+  <section class="band band-dark" id="status">
+    <div class="shell">
+      <h2>Where the project actually stands</h2>
+      <p class="lede">
+        Fireup is pre-release. These are the numbers from the last verification run, including the
+        parts that are not proven yet.
+      </p>
+      <div class="facts">
+        <div class="fact">
+          <p class="fact-k">12 / 12</p>
+          <p class="fact-v">entities recovered from the export fixture tree, across both kinds and every shard.</p>
+        </div>
+        <div class="fact">
+          <p class="fact-k">27 / 27</p>
+          <p class="fact-v">Firestore smoke checks pass against Google's official client, on both stores.</p>
+        </div>
+        <div class="fact">
+          <p class="fact-k">31 / 31</p>
+          <p class="fact-v">Auth smoke checks pass with <code>firebase-admin</code> and the Firebase client SDK.</p>
+        </div>
+        <div class="fact fact-open">
+          <p class="fact-k">Not yet</p>
+          <p class="fact-v">A round trip from a <strong>live GCP-captured</strong> export, and any benchmark at scale. The fixtures are format-correct but not project-captured.</p>
+        </div>
+      </div>
+      <p class="actions">
+        <a class="btn btn-primary" href="https://github.com/asakaxgit/fireup/blob/main/PROJECT_STATUS.md">Read the full status</a>
+      </p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <div class="shell foot-inner">
+    <img src="assets/fireup-mark-dark.svg" alt="" width="36" height="36" aria-hidden="true">
+    <div class="foot-cols">
+      <p class="small muted">
+        Fireup is an independent implementation of Google's <strong>published</strong> API
+        contracts. It is not the Firebase Emulator Suite, is not affiliated with or endorsed by
+        Google, and contains no code derived from proprietary Google binaries. Firebase, Firestore,
+        Datastore and Google Cloud are trademarks of Google LLC.
+      </p>
+      <ul class="foot-links">
+        <li><a href="https://github.com/asakaxgit/fireup">Source</a></li>
+        <li><a href="https://github.com/asakaxgit/fireup/blob/main/docs/local/README.md">Local cloud docs</a></li>
+        <li><a href="https://github.com/asakaxgit/fireup/blob/main/PROJECT_STATUS.md">Status</a></li>
+        <li><a href="https://github.com/asakaxgit/fireup/issues">Issues</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

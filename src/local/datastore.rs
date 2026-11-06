@@ -315,7 +315,7 @@ impl DatastoreApi {
         {
             return Err(unimplemented(
                 "Datastore property transforms",
-                "transforms land with a later write pass",
+                "the Firestore field transforms are served; the Datastore spelling of them is not yet mapped onto the entity encoding",
             ));
         }
         if mutation.property_mask.is_some() {
@@ -587,13 +587,13 @@ impl Datastore for DatastoreApi {
         // Outcomes include any read-set verifies first.
         let verify_count = outcomes
             .iter()
-            .take_while(|outcome| matches!(outcome, WriteOutcome::Verified))
+            .take_while(|effect| matches!(effect.outcome, WriteOutcome::Verified))
             .count();
         let mutation_outcomes = &outcomes[verify_count..];
 
         let mut mutation_results = Vec::with_capacity(request.mutations.len());
         for (index, _mutation) in request.mutations.iter().enumerate() {
-            let outcome = mutation_outcomes.get(index);
+            let outcome = mutation_outcomes.get(index).map(|effect| &effect.outcome);
             let key = allocated_keys[index].clone();
             let (create_time, update_time) = match outcome {
                 Some(WriteOutcome::Deleted { .. }) | None => (None, None),
