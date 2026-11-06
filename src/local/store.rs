@@ -134,9 +134,17 @@ pub enum Mutation {
     Put(Document),
     /// Replace only the named fields, creating the document if absent — the
     /// `update()` / `set(…, {merge: true})` path.
+    ///
+    /// A `None` value **deletes** that field rather than writing it. This is
+    /// what a mask path the request does not carry means on both surfaces:
+    /// Firestore's `update_mask` and Datastore's `property_mask` each say a
+    /// masked field missing from the submitted document is deleted. Keeping the
+    /// decision per-path (instead of a separate delete list) preserves mask
+    /// order, so a mask naming the same field twice resolves the same way the
+    /// request spelled it.
     Merge {
         name: String,
-        fields: Vec<(String, Value)>,
+        fields: Vec<(String, Option<Value>)>,
     },
     /// Remove the document. Idempotent: deleting a missing document succeeds.
     Delete { name: String },
@@ -290,7 +298,11 @@ pub(crate) fn mutate(
                 update_time: None,
             });
             for (field, value) in fields {
-                document.fields.insert(field, value);
+                match value {
+                    Some(value) => document.fields.insert(field, value),
+                    // A masked field the request did not carry: delete it.
+                    None => document.fields.remove(&field),
+                };
             }
             document
         }
@@ -458,11 +470,11 @@ pub trait Store: Send + Sync + 'static {
     }
 
     /// Merge `fields` into an existing document, creating it if absent. Only
-    /// the supplied field names are touched.
+    /// the supplied field names are touched; a `None` value deletes its field.
     async fn merge(
         &self,
         name: &str,
-        fields: Vec<(String, Value)>,
+        fields: Vec<(String, Option<Value>)>,
         now: Timestamp,
     ) -> StoreResult<WriteOutcome> {
         let mutation = Mutation::Merge {
@@ -783,7 +795,7 @@ pub mod conformance {
         store.put(doc(name, "keep", "v"), ts(10)).await.expect("put");
         assert_eq!(
             store
-                .merge(name, vec![("added".to_string(), string_value("x"))], ts(20))
+                .merge(name, vec![("added".to_string(), Some(string_value("x")))], ts(20))
                 .await
                 .expect("merge"),
             WriteOutcome::Updated
@@ -798,7 +810,11 @@ pub mod conformance {
 
     async fn merge_creates_a_missing_document(store: &dyn Store, name: &str) {
         let outcome = store
-            .merge(name, vec![("k".to_string(), string_value("v"))], ts(10))
+            .merge(
+                name,
+                vec![("k".to_string(), Some(string_value("v")))],
+                ts(10),
+            )
             .await
             .expect("merge");
 
@@ -936,7 +952,7 @@ pub mod conformance {
                     PendingWrite::guarded(
                         Mutation::Merge {
                             name: name.to_string(),
-                            fields: vec![("second".to_string(), string_value("v"))],
+                            fields: vec![("second".to_string(), Some(string_value("v")))],
                         },
                         // Only holds if the put above is already visible.
                         Some(Precondition::Exists(true)),

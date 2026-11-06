@@ -31,7 +31,8 @@ use tracing::debug;
 use crate::local::entity_map::{
     ancestor_collection, apply_property_mask, check_project_database, compile_property_transforms,
     complete_key, document_to_entity, documents_root, entity_to_document, key_is_incomplete,
-    key_to_document_name, normalize_database_id, transform_results_to_properties,
+    key_to_document_name, masked_entity_fields, normalize_database_id,
+    transform_results_to_properties,
 };
 use crate::local::store::{
     Mutation as StoreMutation, PendingWrite, Precondition, SharedStore, WriteOutcome,
@@ -52,10 +53,10 @@ use crate::protos::google::datastore::v1::value::ValueType as DsValueType;
 use crate::protos::google::datastore::v1::{
     filter::FilterType, AllocateIdsRequest, AllocateIdsResponse, BeginTransactionRequest,
     BeginTransactionResponse, CommitRequest, CommitResponse, Entity, EntityResult, Filter,
-    Key, LookupRequest, LookupResponse, Mutation, MutationResult, PropertyFilter, PropertyOrder,
-    PropertyReference, Query, QueryResultBatch, ReadOptions, ReserveIdsRequest, ReserveIdsResponse,
-    RollbackRequest, RollbackResponse, RunAggregationQueryRequest, RunAggregationQueryResponse,
-    RunQueryRequest, RunQueryResponse, Value as DsValue,
+    Key, LookupRequest, LookupResponse, Mutation, MutationResult, PropertyFilter, PropertyMask,
+    PropertyOrder, PropertyReference, Query, QueryResultBatch, ReadOptions, ReserveIdsRequest,
+    ReserveIdsResponse, RollbackRequest, RollbackResponse, RunAggregationQueryRequest,
+    RunAggregationQueryResponse, RunQueryRequest, RunQueryResponse, Value as DsValue,
 };
 use crate::protos::google::firestore::v1::Document;
 
@@ -306,6 +307,37 @@ impl DatastoreApi {
         })
     }
 
+    /// The store mutation that writes `entity`, masked by `property_mask` if the
+    /// request carried one.
+    ///
+    /// Without a mask the entity replaces whatever is stored, which is what
+    /// Datastore means by `update`/`upsert`: an unmasked write is the whole
+    /// entity. With a mask only the named properties are touched, which is the
+    /// shape that makes `property_transforms` useful — the transforms run after
+    /// the operation, so a mask that leaves a counter out of the write lets the
+    /// transform read the stored value instead of the one the client happened to
+    /// submit. That is the same pairing as Firestore's `update_mask` plus
+    /// `update_transforms`, and it goes through the same store primitive.
+    fn entity_write(
+        &self,
+        entity: &Entity,
+        property_mask: Option<&PropertyMask>,
+    ) -> Result<StoreMutation, Status> {
+        let document = entity_to_document(entity, &self.project_id, &self.database_id)?;
+        match property_mask {
+            None => Ok(StoreMutation::Put(document)),
+            Some(mask) => Ok(StoreMutation::Merge {
+                name: document.name,
+                fields: masked_entity_fields(
+                    entity,
+                    &mask.paths,
+                    &self.project_id,
+                    &self.database_id,
+                )?,
+            }),
+        }
+    }
+
     async fn mutation_to_write(
         &self,
         mutation: &Mutation,
@@ -317,13 +349,6 @@ impl DatastoreApi {
             &self.project_id,
             &self.database_id,
         )?;
-        if mutation.property_mask.is_some() {
-            return Err(unimplemented(
-                "Datastore property_mask on mutations",
-                "masked updates land with a later write pass",
-            ));
-        }
-
         let conflict_precondition = match mutation.conflict_detection_strategy.as_ref() {
             None => None,
             Some(
@@ -362,17 +387,13 @@ impl DatastoreApi {
                 } else {
                     None
                 };
-                let document = entity_to_document(&entity, &self.project_id, &self.database_id)?;
+                let store_mutation = self.entity_write(&entity, mutation.property_mask.as_ref())?;
                 let precondition = match (operation, conflict_precondition) {
                     (MutationOp::Insert(_), None) => Some(Precondition::Exists(false)),
                     (_, precondition) => precondition,
                 };
                 Ok((
-                    PendingWrite::transformed(
-                        StoreMutation::Put(document),
-                        precondition,
-                        transforms,
-                    ),
+                    PendingWrite::transformed(store_mutation, precondition, transforms),
                     allocated,
                 ))
             }
@@ -382,14 +403,10 @@ impl DatastoreApi {
                         "update mutations require a complete key",
                     ));
                 }
-                let document = entity_to_document(entity, &self.project_id, &self.database_id)?;
+                let store_mutation = self.entity_write(entity, mutation.property_mask.as_ref())?;
                 let precondition = conflict_precondition.or(Some(Precondition::Exists(true)));
                 Ok((
-                    PendingWrite::transformed(
-                        StoreMutation::Put(document),
-                        precondition,
-                        transforms,
-                    ),
+                    PendingWrite::transformed(store_mutation, precondition, transforms),
                     None,
                 ))
             }
@@ -406,6 +423,10 @@ impl DatastoreApi {
                         "property_transforms may not be set on a delete mutation",
                     ));
                 }
+                // `property_mask` is deliberately not consulted here: the proto
+                // says the field "is ignored for `delete`", so a client that
+                // sets one still gets the whole entity removed rather than an
+                // error or a partial delete.
                 let name = key_to_document_name(key, &self.project_id, &self.database_id)?;
                 Ok((
                     PendingWrite::guarded(

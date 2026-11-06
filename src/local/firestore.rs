@@ -192,9 +192,10 @@ fn apply_parsed_mask(document: &mut Document, mask: &Option<Vec<query::FieldPath
 
 /// The fields an update mask selects, in mask order.
 ///
-/// A masked field the document does not carry is dropped rather than written as
-/// null: Firestore treats that as "delete this field", and Phase 1 has no field
-/// deletion, so writing a null would be worse than leaving it alone.
+/// A masked field the document does not carry becomes a `None`, which
+/// [`Mutation::Merge`] applies as a **deletion** — the documented Firestore
+/// behaviour, and the reason the store grew a per-path `Option` rather than
+/// leaving such a field alone as it did before.
 ///
 /// Unlike a read mask, this one is still restricted to top-level fields. A
 /// nested update mask has to merge *into* a stored map, which is a change to
@@ -203,7 +204,7 @@ fn apply_parsed_mask(document: &mut Document, mask: &Option<Vec<query::FieldPath
 fn masked_fields(
     field_paths: &[String],
     document: &Document,
-) -> Result<Vec<(String, Value)>, Status> {
+) -> Result<Vec<(String, Option<Value>)>, Status> {
     for path in field_paths {
         if path.contains('.') || path.contains('`') {
             return Err(unimplemented(
@@ -214,13 +215,7 @@ fn masked_fields(
     }
     Ok(field_paths
         .iter()
-        .filter_map(|field| {
-            document
-                .fields
-                .get(field)
-                .cloned()
-                .map(|value| (field.clone(), value))
-        })
+        .map(|field| (field.clone(), document.fields.get(field).cloned()))
         .collect())
 }
 
@@ -1176,5 +1171,30 @@ mod tests {
             .expect("a top-level update mask is served");
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].0, "address");
+        assert!(
+            fields[0].1.is_some(),
+            "the document carries the field, so it is written rather than deleted"
+        );
+    }
+
+    #[test]
+    fn a_masked_path_the_document_lacks_becomes_a_deletion() {
+        let fields = masked_fields(
+            &["address".to_string(), "nickname".to_string()],
+            &nested_document(),
+        )
+        .expect("a top-level update mask is served");
+        assert_eq!(
+            fields
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["address", "nickname"],
+            "the result keeps mask order"
+        );
+        assert!(
+            fields[1].1.is_none(),
+            "an absent masked field is a deletion"
+        );
     }
 }
