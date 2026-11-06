@@ -150,24 +150,34 @@ fn auto_id() -> String {
 /// select exactly the same thing: masking `a.b` returns an `a` holding only
 /// `b`, not a flattened `a.b` and not the whole of `a`.
 fn apply_mask(document: &mut Document, mask: &Option<DocumentMask>) -> Result<(), Status> {
-    let Some(mask) = mask else {
-        return Ok(());
-    };
-    if mask.field_paths.is_empty() {
-        return Ok(());
-    }
-
-    let wanted = field_paths(&mask.field_paths)?;
-    query::retain_field_paths(&mut document.fields, &wanted);
+    apply_parsed_mask(document, &parse_mask(mask)?);
     Ok(())
 }
 
-/// Parse every path in a mask.
-fn field_paths(field_paths: &[String]) -> Result<Vec<query::FieldPath>, Status> {
-    field_paths
+/// Parse a response `DocumentMask`, or `None` when it selects everything.
+///
+/// Separate from applying it so a caller can reject a malformed mask *before*
+/// reading: a bad request should be reported as one even when the document it
+/// names is also missing.
+fn parse_mask(mask: &Option<DocumentMask>) -> Result<Option<Vec<query::FieldPath>>, Status> {
+    let Some(mask) = mask else {
+        return Ok(None);
+    };
+    if mask.field_paths.is_empty() {
+        return Ok(None);
+    }
+    mask.field_paths
         .iter()
         .map(|path| query::FieldPath::parse(path))
-        .collect()
+        .collect::<Result<Vec<_>, Status>>()
+        .map(Some)
+}
+
+/// Apply an already-parsed mask.
+fn apply_parsed_mask(document: &mut Document, mask: &Option<Vec<query::FieldPath>>) {
+    if let Some(paths) = mask {
+        query::retain_field_paths(&mut document.fields, paths);
+    }
 }
 
 /// The fields an update mask selects, in mask order.
@@ -358,6 +368,9 @@ impl Firestore for FirestoreApi {
         }
 
         let name = parse_document_name(&request.name)?.full();
+        // Parsed before the read, so a malformed field path is reported as the
+        // bad request it is rather than as a missing document.
+        let mask = parse_mask(&request.mask)?;
         let found = self.store.get(&name).await?;
         if let Some(token) = &transaction {
             // Recorded whether or not the document exists: "it is not there"
@@ -375,7 +388,7 @@ impl Firestore for FirestoreApi {
 
         let mut document =
             found.ok_or_else(|| Status::not_found(format!("no document at {name}")))?;
-        apply_mask(&mut document, &request.mask)?;
+        apply_parsed_mask(&mut document, &mask);
         Ok(Response::new(document))
     }
 
