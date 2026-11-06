@@ -1,0 +1,119 @@
+# cargo-deny configuration — the supply-chain gate for Fireup's Rust tree.
+#
+# Run it the way CI does:
+#
+#     cargo deny --locked check -D advisory-not-detected advisories licenses bans sources
+#
+# `-D advisory-not-detected` is not decoration. By default an `ignore` entry
+# below that no longer matches anything in the tree is only a warning, so an
+# accepted vulnerability can outlive its fix without anyone noticing. Promoted
+# to an error, the list cannot rot: the moment the `h2` entry stops being
+# needed, CI fails until it is deleted.
+#
+# Why cargo-deny and not cargo-audit: `cargo deny check advisories` reads the
+# same RustSec advisory database that `cargo audit` does, so running both would
+# report the same vulnerabilities twice. cargo-deny additionally covers licences,
+# duplicate crates, and registry provenance in one binary, so it is the one we
+# keep. cargo-audit is deliberately *not* added to CI and is not installed in
+# this workspace.
+
+[graph]
+# No `targets` list on purpose. Restricting the graph to Linux would hide
+# advisories and licences on the Windows/macOS/wasi crates that are in
+# `Cargo.lock` and that anyone building Fireup on those platforms would pull.
+# Checking every target is the stricter reading and needs no maintenance.
+all-features = true
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# A yanked crate in the lock file is an error, not a warning: it means the
+# version we pinned was withdrawn from crates.io after we pinned it.
+yanked = "deny"
+# Unmaintained-crate advisories are scoped to crates we depend on directly.
+# "all" would make this job red for an abandoned crate buried four levels down
+# that we have no way to replace.
+unmaintained = "workspace"
+
+ignore = [
+  # RUSTSEC-2026-0258 — h2 "unbounded empty DATA frames" (low severity).
+  #
+  # Path: fireup -> tonic 0.11 -> axum 0.6 -> hyper 0.14 -> h2 0.3.27.
+  #
+  # Not fixable by configuration or by `cargo update`. The fix is h2 >= 0.4.16,
+  # which requires hyper 1.x, which requires tonic >= 0.12 and prost 0.13.
+  # `Cargo.toml` pins tonic 0.11 on purpose so that the local data plane and the
+  # managed-export parser share a single prost version; moving off it is a real
+  # migration, tracked as its own ticket (SAK-220).
+  #
+  # Accepted because: the only thing in Fireup that serves h2 traffic is the
+  # `fireup local` gRPC surface, a local development emulator that binds a
+  # loopback port and is not intended to be exposed to the public internet. An
+  # attacker who can open streams against it already has local access.
+  #
+  # Reconsider by 2027-02-06 (three months). If the tonic/prost migration has
+  # not landed by then, the acceptance needs re-arguing on SAK-220, not a silent
+  # renewal.
+  #
+  # Be clear about what is and is not enforced here. cargo-deny has no expiry
+  # feature for `ignore` entries, and an ignored advisory prints nothing at all,
+  # so the date below is a promise to ourselves, not a gate. What *is* machine
+  # enforced: any advisory other than this one fails the build, and
+  # `-D advisory-not-detected` fails the build once this entry is obsolete. The
+  # CI job greps these reason strings into its log so the exception is at least
+  # visible on every run rather than buried in a config file.
+  { id = "RUSTSEC-2026-0258", reason = "h2 0.3.27 via pinned tonic 0.11; local-only gRPC surface. Fix needs the tonic 0.12/prost 0.13 migration (SAK-220). Reconsider by 2027-02-06." },
+]
+
+[licenses]
+# This list is the machine-enforced form of the decision already recorded in
+# `docs/licenses/CARGO_LICENSE_AUDIT.md` (SAK-196): Fireup ships under
+# Apache-2.0 and accepts only permissive dependencies. Every identifier below
+# actually appears in the current `Cargo.lock`; nothing is here speculatively,
+# so adding one is a deliberate policy step with a diff to point at.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause", # `matchit` is "BSD-3-Clause AND MIT" — both halves required.
+  "BSL-1.0",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+
+# Deliberately absent: LGPL-2.1-or-later. It appears once, as one arm of
+# `r-efi`'s "Apache-2.0 OR LGPL-2.1-or-later OR MIT". Because the expression is
+# a disjunction, allowing MIT satisfies it and cargo-deny resolves r-efi to MIT,
+# so no copyleft obligation enters the tree. Leaving LGPL out of `allow` keeps
+# that true: a future crate that is *only* LGPL would fail this check.
+#
+# Also absent: ISC. `CARGO_LICENSE_AUDIT.md` mentions it in prose, but no crate
+# in the current lock file carries it.
+
+# Fireup itself is Apache-2.0 (root `LICENSE`), which is in the allow list, so
+# the crate needs no `private` exemption and is checked like any other.
+confidence-threshold = 0.93
+
+[bans]
+# "warn", not "deny". The tree legitimately carries duplicate major versions of
+# half a dozen crates (base64, bitflags, getrandom, hashbrown, indexmap, rand,
+# socket2, syn, windows-sys) because different transitive dependencies pin
+# different lines. Denying that today would make this job red on the first
+# commit for something no Fireup change caused, which is the failure mode
+# SAK-206 called out when it left `fmt`/`clippy` out of CI. Promote to "deny"
+# once the duplicates are actually down to zero.
+multiple-versions = "warn"
+wildcards = "deny"
+# Nothing is banned outright yet. Entries go here when a specific crate is
+# ruled out (an unmaintained fork, a crate with a licence we reject), with the
+# reason inline.
+deny = []
+
+[sources]
+# Everything must come from crates.io. An unknown registry or a git dependency
+# is how an unreviewed, unpinned third party gets into the build, so both are
+# errors with no allow-list entries.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
