@@ -19,17 +19,41 @@
 //! last version GitHub could parse — so the maintainer dispatching it by hand
 //! sees green while every push sees red.
 //!
-//! Nothing in the Rust suite looked at these files, and the repository's CI is
-//! manual-only, so no automatic check looked at them either. This test closes
-//! that: it reads the workflow directory from disk, needs no server, no network
-//! and no `gh`, and fails in `cargo test` in milliseconds.
+//! Nothing in the Rust suite looked at these files when this was written, so
+//! nothing caught it. This test closes that: it reads the workflow directory
+//! from disk, needs no server, no network and no `gh`, and fails in
+//! `cargo test` in milliseconds.
 //!
 //! `actionlint` is the richer tool for this job — it validates against GitHub's
-//! real schema, checks action references and expression syntax — and belongs in
-//! CI once the repository has a workflow that runs automatically. This test is
-//! the floor, not the ceiling: it catches the class of breakage that has
-//! actually happened here, with no new tooling to install.
+//! real schema, checks action references and expression syntax — and SAK-219
+//! now runs it from `actionlint.yml`, the one workflow in this repository that
+//! triggers automatically. This test remains the floor under it: it runs
+//! locally before the push, with no network and no third-party binary, and it
+//! keeps a permanent negative control for the exact breakage that happened
+//! here.
+//!
+//! # Why `saphyr` and not `serde_yaml`
+//!
+//! `serde_yaml` is deprecated (`0.9.34+deprecated` is its last release) and
+//! reaches `unsafe-libyaml` — libyaml's C machine-translated through c2rust —
+//! whose repository was archived read-only in March 2024. That is
+//! RUSTSEC-2024-0449, an unmaintained advisory with no patched version, and a
+//! bug found in machine-translated `unsafe` Rust has no upstream to fix it.
+//!
+//! Depending on it for a *test* also had a second cost the first version of
+//! this file did not anticipate: it put the one advisory in the tree that
+//! `deny.toml` was configured not to report (SAK-225), because the crate
+//! arrives transitively. `saphyr` is the maintained YAML 1.2 parser, pure safe
+//! Rust, and it rejects the trailing-`::` document exactly the way libyaml did
+//! — which the negative control at the bottom of this file asserts rather than
+//! assumes.
+//!
+//! One deliberate consequence of the parser swap: `saphyr` applies the YAML 1.2
+//! core schema, where a bare `on` is the string `"on"`. GitHub's parser applies
+//! YAML 1.1, where it is the boolean `true`. `get` below accepts both spellings
+//! so the suite does not depend on which rules the parser underneath it uses.
 
+use saphyr::{LoadableYamlNode, Mapping, Scalar, Yaml};
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
@@ -74,19 +98,24 @@ fn label(path: &Path) -> String {
 /// Look a key up in a workflow mapping.
 ///
 /// `on` is the awkward one: under the YAML 1.1 resolution rules that GitHub's
-/// own parser and PyYAML both use, a bare `on` is the boolean `true`, so the
-/// key can arrive either spelling depending on the parser. Accept both rather
-/// than depend on which one `serde_yaml` happens to apply.
-fn get<'a>(map: &'a serde_yaml::Mapping, key: &str) -> Option<&'a serde_yaml::Value> {
-    map.get(serde_yaml::Value::String(key.to_string()))
-        .or_else(|| match key {
-            "on" => map.get(serde_yaml::Value::Bool(true)),
-            _ => None,
-        })
+/// own parser and PyYAML both use, a bare `on` is the boolean `true`, while
+/// `saphyr` follows the YAML 1.2 core schema and keeps it the string `"on"`.
+/// Accept both rather than depend on which rules the parser applies.
+fn get<'a, 'text>(map: &'a Mapping<'text>, key: &'text str) -> Option<&'a Yaml<'text>> {
+    map.get(&Yaml::value_from_str(key)).or_else(|| match key {
+        "on" => map.get(&Yaml::Value(Scalar::Boolean(true))),
+        _ => None,
+    })
 }
 
-fn parse(path: &Path) -> serde_yaml::Mapping {
-    let document: serde_yaml::Value = serde_yaml::from_str(&read(path)).unwrap_or_else(|error| {
+/// The workflow's top-level mapping, borrowed from `text`.
+///
+/// `saphyr` nodes borrow their scalars out of the input, so the caller holds
+/// the file contents for as long as it reads the parsed document. That is also
+/// why this takes the text rather than the path: there is nowhere for a
+/// self-contained `parse(&path)` to keep the string.
+fn parse<'text>(text: &'text str, path: &Path) -> Mapping<'text> {
+    let documents = Yaml::load_from_str(text).unwrap_or_else(|error| {
         panic!(
             "{} is not valid YAML, so GitHub will reject it and fail every push \
              with a zero-job run named by path: {error}",
@@ -94,10 +123,22 @@ fn parse(path: &Path) -> serde_yaml::Mapping {
         )
     });
 
-    document
-        .as_mapping()
-        .unwrap_or_else(|| panic!("{} must be a YAML mapping at the top level", label(path)))
-        .clone()
+    // GitHub reads one workflow per file. A stream of several documents parses
+    // cleanly here but is not a workflow, and an empty file parses to no
+    // documents at all — the old `serde_yaml::from_str` rejected both for us,
+    // so say so explicitly now that the loader returns every document.
+    assert_eq!(
+        documents.len(),
+        1,
+        "{} holds {} YAML documents; GitHub reads exactly one workflow per file",
+        label(path),
+        documents.len()
+    );
+
+    match documents.into_iter().next() {
+        Some(Yaml::Mapping(map)) => map,
+        _ => panic!("{} must be a YAML mapping at the top level", label(path)),
+    }
 }
 
 #[test]
@@ -115,7 +156,8 @@ fn the_workflow_directory_is_not_empty() {
 #[test]
 fn every_workflow_file_is_valid_yaml() {
     for path in workflow_files() {
-        parse(&path);
+        let text = read(&path);
+        parse(&text, &path);
     }
 }
 
@@ -125,7 +167,8 @@ fn every_workflow_file_is_valid_yaml() {
 #[test]
 fn every_workflow_has_a_name() {
     for path in workflow_files() {
-        let workflow = parse(&path);
+        let text = read(&path);
+        let workflow = parse(&text, &path);
         let name = get(&workflow, "name")
             .and_then(|value| value.as_str())
             .unwrap_or_else(|| {
@@ -148,7 +191,8 @@ fn every_workflow_has_a_name() {
 #[test]
 fn every_workflow_declares_triggers_and_jobs() {
     for path in workflow_files() {
-        let workflow = parse(&path);
+        let text = read(&path);
+        let workflow = parse(&text, &path);
         let name = label(&path);
 
         let triggers = get(&workflow, "on")
@@ -163,7 +207,7 @@ fn every_workflow_declares_triggers_and_jobs() {
             .unwrap_or_else(|| panic!("{name} has no `jobs:` mapping"));
         assert!(!jobs.is_empty(), "{name} declares no jobs");
 
-        for (id, job) in jobs {
+        for (id, job) in jobs.iter() {
             let id = id.as_str().unwrap_or("<non-string job id>");
             let job = job
                 .as_mapping()
@@ -190,10 +234,14 @@ fn every_workflow_declares_triggers_and_jobs() {
 
 /// The negative control, kept permanently rather than run once by hand.
 ///
-/// This is the exact step that broke `local_firestore.yml`, verbatim. If a
-/// future YAML parser accepts it, the tests above stop protecting anything and
-/// this one fails to say so — which is the only way to notice, because the
-/// workflow files on disk are (correctly) all parseable.
+/// This is the exact step that broke `local_firestore.yml`, verbatim. If the
+/// YAML parser underneath this suite ever accepts it, the tests above stop
+/// protecting anything and this one fails to say so — which is the only way to
+/// notice, because the workflow files on disk are (correctly) all parseable.
+///
+/// It is also what made the `serde_yaml` → `saphyr` swap checkable rather than
+/// hopeful: a replacement parser that shrugged at this document would have been
+/// the wrong replacement, however well maintained.
 #[test]
 fn an_unquoted_trailing_double_colon_still_fails_to_parse() {
     const BROKEN: &str = "\
@@ -205,7 +253,7 @@ jobs:
         run: cargo test --lib local::
 ";
 
-    let result = serde_yaml::from_str::<serde_yaml::Value>(BROKEN);
+    let result = Yaml::load_from_str(BROKEN);
     assert!(
         result.is_err(),
         "`run: cargo test --lib local::` parsed cleanly — the trailing-colon \
@@ -223,5 +271,29 @@ jobs:
       - name: Data plane unit tests
         run: \"cargo test --lib local::\"
 ";
-    serde_yaml::from_str::<serde_yaml::Value>(FIXED).expect("the quoted form must parse");
+    Yaml::load_from_str(FIXED).expect("the quoted form must parse");
+}
+
+/// `on` arriving as a string under YAML 1.2 and as a boolean under YAML 1.1 is
+/// a real divergence between this suite's parser and GitHub's, so `get` handles
+/// both spellings. Without this, the day a parser bump changes which one it
+/// resolves to, `every_workflow_declares_triggers_and_jobs` would stop finding
+/// `on:` at all — and would fail with "nothing can trigger it" on a workflow
+/// that is perfectly fine.
+#[test]
+fn the_trigger_key_is_found_under_either_yaml_version_spelling() {
+    const BARE: &str = "on:\n  push:\n    branches: [main]\n";
+    let bare = Yaml::load_from_str(BARE).expect("parses");
+    let bare = bare[0].as_mapping().expect("mapping");
+    assert!(
+        get(bare, "on").is_some(),
+        "bare `on:` not found; saphyr resolved it to something `get` does not try"
+    );
+
+    // Quoting it is the other legal spelling, and some repositories write it
+    // that way precisely because of the 1.1 boolean rule.
+    const QUOTED: &str = "\"on\":\n  push:\n    branches: [main]\n";
+    let quoted = Yaml::load_from_str(QUOTED).expect("parses");
+    let quoted = quoted[0].as_mapping().expect("mapping");
+    assert!(get(quoted, "on").is_some(), "quoted `\"on\":` not found");
 }
