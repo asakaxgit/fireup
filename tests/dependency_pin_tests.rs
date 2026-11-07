@@ -329,6 +329,49 @@ fn check_db_staleness_is_bounded(deny: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `Err` unless `[advisories] unused-ignored-advisory` is set to `"deny"`.
+///
+/// This setting is the config-side form of the `-D advisory-not-detected` flag
+/// in the `deny` job, and the reason it is duplicated here is the reason this
+/// check exists: until SAK-229 that flag was the *only* thing making the
+/// `ignore` list unable to rot, it lives in exactly one line of
+/// `.github/workflows/ci.yml`, and no test in this repository reads that file.
+/// Deleting it there left a stale `ignore` entry printing
+/// `warning[advisory-not-detected]` and the step exiting 0.
+///
+/// Comments are stripped before matching, for the same reason as
+/// `check_unmaintained_scope_is_all`: the prose in `deny.toml` quotes the
+/// setting while explaining it.
+fn check_unused_ignored_advisory_is_deny(deny: &str) -> Result<(), String> {
+    let mut found = None;
+    for line in deny.lines() {
+        let code = line.split('#').next().unwrap_or("");
+        let Some((key, value)) = code.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "unused-ignored-advisory" {
+            found = Some(value.trim().trim_matches('"').to_string());
+        }
+    }
+
+    match found.as_deref() {
+        Some("deny") => Ok(()),
+        Some(level) => Err(format!(
+            "deny.toml sets `unused-ignored-advisory = \"{level}\"`, not \"deny\". At \
+             anything but \"deny\", an `ignore` entry that no longer matches an advisory \
+             is a warning and `cargo deny check` exits 0, so an accepted vulnerability \
+             outlives its fix with nothing going red — see SAK-229."
+        )),
+        None => Err(
+            "deny.toml has no `[advisories] unused-ignored-advisory`. Without it \
+                     cargo-deny only warns about an `ignore` entry that matches nothing, \
+                     and the `-D advisory-not-detected` flag in ci.yml is then the only \
+                     enforcement of it — in a file no test here reads. Set it to \"deny\"."
+                .into(),
+        ),
+    }
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -381,10 +424,17 @@ fn deny_toml_refuses_an_advisory_database_older_than_a_week() {
     }
 }
 
+#[test]
+fn deny_toml_fails_on_an_ignore_entry_that_matches_no_advisory() {
+    if let Err(reason) = check_unused_ignored_advisory_is_deny(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
 /// The mutations, committed rather than run once by hand.
 ///
 /// Each one is the regression this file exists to catch, fed to the same
-/// function the three tests above call. Without these, a refactor that made
+/// function the tests above call. Without these, a refactor that made
 /// `check_*` return `Ok(())` unconditionally would leave every test above green.
 mod negative_controls {
     use super::*;
@@ -651,5 +701,60 @@ maximum-db-staleness = \"P90D\"
         assert!(staleness_seconds("7D").is_err());
         assert!(staleness_seconds("P1M").is_err());
         assert!(staleness_seconds("P7").is_err());
+    }
+
+    #[test]
+    fn the_unused_ignored_advisory_level_the_repository_ships_passes() {
+        assert!(
+            check_unused_ignored_advisory_is_deny("unused-ignored-advisory = \"deny\"\n").is_ok()
+        );
+    }
+
+    /// The regression itself, and the quiet one: `"warn"` is the cargo-deny
+    /// default, so this is what the file said before SAK-229 and what deleting
+    /// the line goes back to. Measured on the stack tip: with a stale `ignore`
+    /// entry and the `ci.yml` flag removed, `cargo deny check` printed
+    /// `warning[advisory-not-detected]` and the step exited 0.
+    #[test]
+    fn warning_on_an_unused_ignore_entry_fails() {
+        let error = check_unused_ignored_advisory_is_deny("unused-ignored-advisory = \"warn\"\n")
+            .expect_err("\"warn\" must fail");
+        assert!(error.contains("exits 0"), "{error}");
+    }
+
+    /// `"allow"` is the other level cargo-deny accepts, and the one that drops
+    /// the diagnostic entirely.
+    #[test]
+    fn allowing_an_unused_ignore_entry_fails() {
+        assert!(
+            check_unused_ignored_advisory_is_deny("unused-ignored-advisory = \"allow\"\n").is_err()
+        );
+    }
+
+    #[test]
+    fn omitting_the_unused_ignored_advisory_level_fails() {
+        let deny = "[advisories]\nyanked = \"deny\"\nmaximum-db-staleness = \"P7D\"\n";
+        let error =
+            check_unused_ignored_advisory_is_deny(deny).expect_err("a missing level must fail");
+        assert!(error.contains("only warns"), "{error}");
+    }
+
+    /// The prose in `deny.toml` quotes this setting while explaining it, in the
+    /// header as well as above the line itself. None of that may be read as the
+    /// setting — otherwise deleting the live line would still pass.
+    #[test]
+    fn the_comment_about_the_level_is_not_read_as_the_level() {
+        let deny = "\
+# The same enforcement is set below as `unused-ignored-advisory = \"deny\"`.
+yanked = \"deny\"
+";
+        assert!(check_unused_ignored_advisory_is_deny(deny).is_err());
+
+        // And a commented-out good value must not rescue a live weakened one.
+        let deny = "\
+# unused-ignored-advisory = \"deny\"
+unused-ignored-advisory = \"warn\"
+";
+        assert!(check_unused_ignored_advisory_is_deny(deny).is_err());
     }
 }
