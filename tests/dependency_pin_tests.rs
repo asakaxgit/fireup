@@ -4213,18 +4213,35 @@ include-build = false
     /// `permissions_keys` found nothing in any input, most of the failing arms
     /// would still fail — for the wrong reason — and the passing ones would be
     /// the only thing left telling the difference.
+    ///
+    /// Note how little is asked of the real file: only that the reader can see
+    /// its top-level key. That is deliberate, and re-tightening it would be a
+    /// regression (SAK-241). `check_workflow_token_is_read_only` requires that
+    /// nothing grants more than `read`, which means it *passes* declarations
+    /// stricter than the one shipped today — `permissions: read-all`,
+    /// `permissions: {}`, an extra `packages: none`, and a narrowing job-level
+    /// block on `deny` are all fine by the policy. An assertion here that fixed
+    /// the live block to its exact current text failed every one of those, so
+    /// tightening a workflow turned CI red with a message that said nothing
+    /// about tokens (`left: "read-all" right: ""`), and the cheapest way back to
+    /// green was to undo the tightening — which is the thing
+    /// `a_job_level_block_that_widens_the_token_fails` warns about in so many
+    /// words where it checks the narrowing case: "a guard that failed it would
+    /// be teaching people to delete it."
+    ///
+    /// Nothing is lost by asking less, because the grammar this reader
+    /// implements — indentation, comments, prefix matching, where a block ends —
+    /// is pinned exactly by the synthetic inputs below, where the expected text
+    /// is fixed because the input is. Only the live-file arm has to tolerate a
+    /// file that is allowed to change.
     #[test]
     fn the_permissions_reader_finds_exactly_the_live_keys() {
         let ci = repo_file(".github/workflows/ci.yml");
         let keys = permissions_keys(&ci);
-        assert_eq!(
-            keys.len(),
-            1,
-            "ci.yml must carry exactly one `permissions:` key, found {keys:?}"
+        assert!(
+            keys.iter().any(|key| key.indent == 0),
+            "the reader must find ci.yml's top-level `permissions:` key, found {keys:?}"
         );
-        assert_eq!(keys[0].indent, 0);
-        assert_eq!(keys[0].inline, "");
-        assert_eq!(keys[0].entries, vec!["contents: read".to_string()]);
 
         // Depth is what separates a workflow-wide key from a job's own.
         let keys = permissions_keys(
