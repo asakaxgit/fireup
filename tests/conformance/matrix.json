@@ -144,10 +144,10 @@
       "id": "firestore.Listen",
       "docTable": "firestore-rpcs",
       "label": "Listen",
-      "status": "unimplemented",
+      "status": "served",
       "driver": "node-grpc",
       "python": false,
-      "note": "Probed on the wire: the SDK loses the refusal in a retry loop (see limits.listen-sdk-retry-loop). SAK-189 may flip this to served; the probe has both branches."
+      "note": "Probed on the wire and through the SDK: document and query watches, with create/update/delete reaching the watcher. Served as of SAK-189; the feed is in-process only."
     },
     {
       "id": "firestore.Write",
@@ -842,15 +842,6 @@
       "status": "unimplemented",
       "driver": "node-grpc",
       "python": false
-    },
-    {
-      "id": "limits.listen-sdk-retry-loop",
-      "docTable": null,
-      "label": "onSnapshot() retries the refused Listen instead of surfacing it",
-      "status": "documented-divergence",
-      "driver": "node-sdk",
-      "python": false,
-      "note": "The one place the matrix's 'a gap is never a hang' promise does not hold through the Node SDK. The server's refusal is clear on the wire (firestore.Listen); @google-cloud/firestore loses it in a race and reopens forever. Delete this row with the README footnote when SAK-189 lands."
     },
     {
       "id": "limits.masked-field-deletion",

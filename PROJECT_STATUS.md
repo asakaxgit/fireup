@@ -357,13 +357,52 @@ and `proto/`, without which the image could not have compiled the generated
 stubs at all.
 
 **Still unserved** (answer `UNIMPLEMENTED` with a message naming the gap):
-realtime listeners (`Listen`, streaming `Write`), aggregation queries,
-`PartitionQuery`, field transforms, nested paths in an `update_mask`,
+the streaming `Write` RPC, aggregation queries, `PartitionQuery`,
 point-in-time reads, and security rules. The fidelity matrix in
 `docs/local/README.md` is the authoritative list.
 
 Collection group queries, query cursors, and nested field paths in filters,
-orders, projections, and read masks are served as of SAK-191.
+orders, projections, and read masks are served as of SAK-191; field transforms
+as of SAK-190; realtime listeners as of SAK-189, below.
+
+**Phase 2.1 (SAK-189, November 6 2026)** — realtime listeners:
+
+- `Listen` is served for document watches (`DocumentsTarget`) and query watches
+  (`QueryTarget`, every query shape the matrix already covers, collection group
+  queries included), which is what `onSnapshot()` in the official SDKs uses.
+- The change feed is a `Store` decorator, so it sits *below* the data plane:
+  every Firestore write RPC, a Datastore `Commit`, and `fireup local seed` all
+  reach a Firestore listener without knowing a listener exists.
+- A query target is re-evaluated per change to its collection, which is what
+  keeps `limit`/`offset`/`orderBy` honest — a write that cannot affect a limited
+  result set reports nothing.
+- An unsupported target is refused as a `TargetChange::REMOVE` carrying the
+  cause, not by failing the call, so one bad target does not take down the other
+  listeners on the same stream. `read_time` resumes are refused; resume tokens
+  are never issued, so a reconnect re-snapshots.
+- **Known limit:** the feed is in-process. With `--postgres-url`, a write by a
+  *different* process does not wake these listeners — nothing polls the table.
+
+**Verified on 2026-11-06**, rebased onto `main` at the SAK-194 merge
+(`0f54f83`) and re-run after that rebase: `cargo test --lib` (474), `--test
+local_firestore_listen_tests` (15, over the real bidirectional gRPC stream),
+`--test fidelity_matrix_tests` (5), `--test local_firestore_tests` (46),
+`--test local_datastore_tests` (11), `--test local_auth_tests` (18), `--test
+local_auth_postgres_tests` (10), `--test local_postgres_store_tests` (7),
+`--test export_fidelity_tests` (21), `--test integration_tests` (55), `--test
+postgres_import_tests` (7), `--test ddl_postgres_load_tests` (9), `--test
+cli_exit_code_tests` (9), `--test real_export_validation` (7), `--test
+deployment_tests` (5) and `--test library_api_tests` (1) — the PostgreSQL ones
+against a throwaway cluster.
+
+With the official SDKs: `scripts/conformance-local.sh` **79/79 matrix features**
+(`firestore.Listen [served]` among them) plus its auth layer 36/36;
+`scripts/smoke-local-firestore.sh` **50/50 against both stores**, including
+`onSnapshot()` on a document, on a missing document, and on a query, with
+`docChanges()` reporting `added`/`removed` as documents enter and leave the
+result set; and `scripts/smoke-local-datastore.sh` green. The Python
+conformance layer skipped — its libraries are not installed in this
+environment.
 
 **Phase L (SAK-168, November 4 2026)** — Firebase Auth / Identity Platform, in
 parallel with Phase 2 and without waiting for a Phase 2 exit:
