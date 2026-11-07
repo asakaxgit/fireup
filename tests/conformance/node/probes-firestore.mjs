@@ -546,25 +546,26 @@ export const firestoreProbes = [
   },
 
   {
-    id: 'limits.masked-field-deletion',
-    'documented-divergence': async ({ freshCollection }) => {
+    id: 'query.masked-field-deletion',
+    served: async ({ freshCollection }) => {
       const docs = freshCollection('maskdelete')
       const ref = docs.doc('d1')
       await ref.set({ keep: 1, gone: 2 })
 
-      // FieldValue.delete() is sent as a masked field with no value in the
-      // document. Production Firestore deletes it; fireup leaves it alone. The
-      // divergence is documented, so pin it: if it ever changes, that is a
-      // behaviour change the README has to be updated for.
+      // FieldValue.delete() reaches the wire as an update_mask path the write
+      // carries no value for, which is what "deleted" means for a mask on both
+      // surfaces. This was a documented divergence — the field was left in
+      // place — until the shared store grew field deletion in SAK-203.
       await ref.update({ gone: FieldValue.delete() })
 
       const snapshot = await ref.get()
-      assert.equal(snapshot.get('keep'), 1)
+      assert.equal(snapshot.get('keep'), 1, 'an unmasked field is untouched')
       assert.equal(
         snapshot.get('gone'),
-        2,
-        'docs/local/README.md: a masked field the request does not carry is left alone',
+        undefined,
+        'docs/local/README.md: a masked path the write does not carry deletes the field',
       )
+      assert.deepEqual(Object.keys(snapshot.data()), ['keep'])
     },
   },
 ]

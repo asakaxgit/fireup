@@ -1,0 +1,108 @@
+name: CI
+
+# The workflow the README's CI badge reports on, and the only one in this
+# directory that runs on every commit.
+#
+# Scope is chosen so that red means "the code is broken", never "a service did
+# not come up": everything here runs with nothing but a Rust toolchain — no
+# PostgreSQL, no Node, no Docker, no network. The suites that need those live in
+# `local_firestore.yml` (the official-SDK conformance layer) and
+# `integration_tests.yml`, which stay manual for now.
+#
+# Deliberately not here yet: `cargo fmt --check` and `cargo clippy -D warnings`.
+# Both are currently failing on `main` for reasons that predate this workflow,
+# so adding them would ship a permanently red badge and teach everyone to
+# ignore it. Cleaning them up and adding them as a job is its own task.
+on:
+  push:
+    branches: [main]
+  # No branch filter on pull requests, on purpose. Overlapping work in this
+  # repository is stacked (one PR based on another, not on `main`), so a
+  # `branches: [main]` filter would skip exactly the PRs that most need
+  # checking — every layer of a stack but the bottom one.
+  #
+  # Removing the filter is necessary but not sufficient: GitHub only schedules a
+  # `pull_request` run for a workflow that already exists on the PR's **base**
+  # branch. Measured on this very PR — the layer above it (base
+  # `sak-206/badges-matrix`, which carries this file) got automatic CI, while
+  # this PR (base `sak-203/...`, which predates the file) got none and had to be
+  # checked by `workflow_dispatch`. That resolves itself the moment this lands on
+  # `main`; until then, dispatch manually and say so in the PR.
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: build and test (no external services)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          cargo --version && rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # Keyed on Cargo.toml, not Cargo.lock: see the note on `--locked` below.
+          key: ${{ runner.os }}-ci-${{ hashFiles('Cargo.toml') }}
+
+      # No `--locked`: `Cargo.lock` is in `.gitignore` in this repository, so
+      # there is no committed lock file to verify against and `--locked` fails
+      # before it compiles anything. Committing the lock file — which Cargo
+      # recommends for a binary crate — would make these builds reproducible
+      # and is worth doing, but it is a repo-wide decision, not a CI tweak.
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      # The static checks that keep the documented promises honest: the fidelity
+      # matrix, the comparison document, and the README badges all have to agree
+      # with tests/conformance/matrix.json, and the workflow files in this
+      # directory have to stay parseable.
+      - name: Docs and matrix are in sync
+        run: |
+          cargo test --test fidelity_matrix_tests
+          cargo test --test workflow_yaml_tests
+
+      # Guards that assert *how* a request is served rather than what comes
+      # back, so no other suite can see them fail. `local_pushdown_boundary_tests`
+      # is the one that catches a `Store` decorator which forwards
+      # `scan_collection` but not `scan_collection_filtered` — correct answers,
+      # pushdown silently gone. Needs no database: it records the calls a
+      # `MemoryStore` stack receives.
+      # `local_listen_pushdown_tests` is the same assertion for the other read
+      # path: a `Listen` query target is re-evaluated once per change, so losing
+      # the pushdown there costs a full collection scan per write per listener.
+      - name: Data-plane boundary guards
+        run: |
+          cargo test --test local_pushdown_boundary_tests
+          cargo test --test local_listen_pushdown_tests
+
+      # Each of these starts what it needs in-process and talks to it over real
+      # gRPC or real HTTP/1.1.
+      - name: Local data plane
+        run: |
+          cargo test --test local_firestore_tests
+          cargo test --test local_firestore_listen_tests
+          cargo test --test local_datastore_tests
+          cargo test --test local_auth_tests
+
+      - name: Export parsing and the library/CLI surface
+        run: |
+          cargo test --test real_export_validation
+          cargo test --test export_fidelity_tests
+          cargo test --test library_api_tests
+          cargo test --test cli_exit_code_tests

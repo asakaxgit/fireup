@@ -32,6 +32,10 @@
       "labelColumn": "PropertyTransform",
       "statusColumn": 1
     },
+    "datastore-property-mask": {
+      "heading": "#### Datastore `property_mask` on a mutation",
+      "statusColumn": null
+    },
     "auth-email-flows": {
       "heading": "### Email flows: no mail is sent, and the link is readable",
       "labelColumn": "requestType",
@@ -181,7 +185,6 @@
       "driver": "node-grpc",
       "python": false
     },
-
     {
       "id": "query.comparison-operators",
       "docTable": "queries",
@@ -312,7 +315,6 @@
       "driver": "node-sdk",
       "python": true
     },
-
     {
       "id": "transform.server-timestamp",
       "docTable": "field-transforms",
@@ -362,7 +364,6 @@
       "driver": "node-sdk",
       "python": false
     },
-
     {
       "id": "datastore.Lookup",
       "docTable": "datastore-rpcs",
@@ -420,7 +421,6 @@
       "driver": "node-sdk",
       "python": false
     },
-
     {
       "id": "auth.signUp",
       "docTable": "auth-endpoints",
@@ -621,7 +621,6 @@
       "driver": "auth-smoke",
       "python": false
     },
-
     {
       "id": "semantics.missing-field-never-matches",
       "docTable": null,
@@ -825,7 +824,7 @@
       "status": "documented-divergence",
       "driver": "node-grpc",
       "python": false,
-      "note": "Faithful to the proto and surprising in practice: an increment accumulates only when the submitted entity carries the current value. SAK-203 (masked mutations) is what makes it ergonomic."
+      "note": "Faithful to the proto and surprising in practice: an unmasked increment accumulates only when the submitted entity carries the current value. The masked form that does accumulate is datastore.property-mask.transform-accumulates."
     },
     {
       "id": "datastore.transform.on-delete",
@@ -844,13 +843,13 @@
       "python": false
     },
     {
-      "id": "limits.masked-field-deletion",
-      "docTable": null,
-      "label": "A masked field the request does not carry is left alone, not deleted",
-      "status": "documented-divergence",
+      "id": "query.masked-field-deletion",
+      "docTable": "queries",
+      "label": "A top-level update_mask path the write does not carry",
+      "status": "served",
       "driver": "node-sdk",
       "python": false,
-      "note": "Not an error path: production Firestore deletes the field. Pinned so the divergence cannot change silently."
+      "note": "A documented divergence until SAK-203: the field was left in place. It is how FieldValue.delete() reaches the wire, so it is an SDK-visible row."
     },
     {
       "id": "datastore.namespaces",
@@ -939,6 +938,85 @@
       "label": "Session cookies: createSessionCookie, verifySessionCookie",
       "status": "unimplemented",
       "driver": "auth-smoke",
+      "python": false
+    },
+    {
+      "id": "datastore.property-mask.writes-a-carried-path",
+      "docTable": "datastore-property-mask",
+      "label": "A path the entity carries",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "@google-cloud/datastore has no handwritten surface for property_mask, so every row here is driven on the wire."
+    },
+    {
+      "id": "datastore.property-mask.deletes-an-omitted-path",
+      "docTable": "datastore-property-mask",
+      "label": "A path the entity omits",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "@google-cloud/datastore has no handwritten surface for property_mask, so every row here is driven on the wire."
+    },
+    {
+      "id": "datastore.property-mask.leaves-unnamed-properties",
+      "docTable": "datastore-property-mask",
+      "label": "A property the mask does not name",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "@google-cloud/datastore has no handwritten surface for property_mask, so every row here is driven on the wire."
+    },
+    {
+      "id": "datastore.property-mask.key-is-accepted-and-ignored",
+      "docTable": "datastore-property-mask",
+      "label": "__key__",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "@google-cloud/datastore has no handwritten surface for property_mask, so every row here is driven on the wire."
+    },
+    {
+      "id": "datastore.property-mask.nested-path",
+      "docTable": "datastore-property-mask",
+      "label": "A property path (foo.bar) or an escaped name",
+      "status": "unimplemented",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "@google-cloud/datastore has no handwritten surface for property_mask, so every row here is driven on the wire."
+    },
+    {
+      "id": "datastore.property-mask.empty-path",
+      "docTable": "datastore-property-mask",
+      "label": "An empty path",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "@google-cloud/datastore has no handwritten surface for property_mask, so every row here is driven on the wire."
+    },
+    {
+      "id": "datastore.property-mask.reserved-path",
+      "docTable": "datastore-property-mask",
+      "label": "Any other reserved (__-wrapped) name",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false,
+      "note": "@google-cloud/datastore has no handwritten surface for property_mask, so every row here is driven on the wire."
+    },
+    {
+      "id": "datastore.property-mask.ignored-on-delete",
+      "docTable": null,
+      "label": "property_mask is ignored on a delete mutation",
+      "status": "served",
+      "driver": "node-grpc",
+      "python": false
+    },
+    {
+      "id": "datastore.property-mask.transform-accumulates",
+      "docTable": null,
+      "label": "A masked mutation lets a property transform accumulate across commits",
+      "status": "served",
+      "driver": "node-grpc",
       "python": false
     }
   ]

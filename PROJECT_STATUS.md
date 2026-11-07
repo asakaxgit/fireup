@@ -693,6 +693,46 @@ every collection scan that includes it. Unrelated to queries; surfaced while
 building the pushdown corpus. `MemoryStore` is unaffected, since it does not
 encode.
 
+**SAK-203 (November 6 2026)** — `Mutation.property_mask` is served on `Commit`,
+which is the half that makes SAK-198's transforms useful. A masked
+`insert`/`update`/`upsert` maps onto the store's masked-write primitive, so
+`property_mask: {paths: ["title"]}` plus `increment("hits", 1)` leaves `hits` for
+the transform to read and the counter climbs across commits — the Datastore
+spelling of Firestore's `update_mask` + `update_transforms`.
+
+- **The proto's other half needed a real store change.** "Properties referenced
+  in the mask but not in the entity are deleted", and the shared store had no
+  field deletion — the gap `docs/local/README.md` recorded as "no field deletion
+  through a mask". Rather than refuse that one case, `Mutation::Merge` now
+  carries an `Option<Value>` per path, where `None` deletes. One primitive, so
+  the Firestore `update_mask` side gets the same rule instead of a second
+  reading of the same sentence.
+- **That fixed a live Firestore bug.** `FieldValue.delete()` reaches the wire as
+  an `update_mask` path the write carries no value for, so it was silently
+  leaving the field in place. SAK-194 had pinned it as a deliberate
+  `documented-divergence` (`limits.masked-field-deletion`); it is now the served
+  row `query.masked-field-deletion`, asserted by the conformance probe and the
+  Firestore SDK smoke.
+- Refusals follow the proto line by line: a nested path (`foo.bar`) or an
+  escaped name is `UNIMPLEMENTED` as on the Firestore side; an empty path and a
+  reserved name other than `__key__` are `INVALID_ARGUMENT`; `__key__` itself is
+  accepted and ignored, since the key travels in the entity's key. A mask does
+  not weaken the operation's precondition, and on a `delete` it is ignored.
+- Verified by 5 new gRPC tests in `tests/local_datastore_tests.rs` (16 total), a
+  new masked-deletion case in the shared store contract — so **both** backends
+  assert it — and a new Firestore gRPC test plus unit test (47 and 475). New
+  steps in both SDK smokes, with Google's official client libraries: Datastore
+  10/10 **against both stores**, Firestore 51/51.
+- Nine new rows in SAK-194's conformance suite (`88/88 matrix features
+  verified`, in-memory **and** PostgreSQL), seven of them a new
+  `#### Datastore property_mask on a mutation` table in the fidelity matrix. The
+  `fidelity_matrix_tests` drift gate caught the new README rows before they had
+  probes, which is exactly what it is for.
+- Stacked on [SAK-189](/SAK/issues/SAK-189) (PR #67): both changes edit
+  `matrix.json` and `probes-firestore.mjs` in the same region, and SAK-189
+  removes the `limits.listen-sdk-retry-loop` row this layer sits next to. All
+  gates above were re-run after that rebase.
+
 ---
 
 ## Dependencies & Environment

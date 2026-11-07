@@ -527,6 +527,22 @@ const main = async () => {
     assert.deepEqual((await ref.get()).get('tags'), ['b'])
   })
 
+  await check('FieldValue.delete() removes the field and leaves the rest', async () => {
+    // The SDK sends this as an update_mask naming the field with no value for it
+    // in the document — the same wire shape a Datastore property_mask uses to
+    // delete a property. Until the shared store could delete a field, this
+    // silently left the field in place.
+    const ref = counters.doc('deletable')
+    await ref.set({ keep: 'yes', drop: 'no', count: 3 })
+    await ref.update({ drop: FieldValue.delete() })
+
+    const snapshot = await ref.get()
+    assert.equal(snapshot.get('drop'), undefined, 'the deleted field is gone')
+    assert.equal(snapshot.get('keep'), 'yes', 'an unnamed field is untouched')
+    assert.equal(snapshot.get('count'), 3)
+    assert.deepEqual(Object.keys(snapshot.data()).sort(), ['count', 'keep'])
+  })
+
   await check('increment() on a float field stays a float', async () => {
     const ref = counters.doc('ratio')
     await ref.set({ value: 1.5 })

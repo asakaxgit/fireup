@@ -36,6 +36,7 @@
 pub mod auth;
 pub mod config;
 pub mod datastore;
+mod datastore_filter;
 pub mod entity_map;
 pub mod firestore;
 pub mod http;
