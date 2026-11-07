@@ -158,6 +158,15 @@ emulator — its transaction locks mean a conflict probe can take tens of second
 so use `--timeout 90000` there or you will record a `timeout` where the answer
 was `serves`.
 
+**A refusal driven through the SDK costs about seven seconds.** The client
+retries a failed query with backoff before surrendering the error, against
+*any* host — so a probe asserting three refusals through
+`@google-cloud/firestore` overruns the 20s timeout on fireup itself, which
+reads as a hang and is not one (SAK-223). Assert one refusal through the SDK,
+where the point is that the SDK builds the shape, and send the rest with
+`serverStream`/`unary` from `grpc-client.mjs`: the raw clients do not retry and
+answer in milliseconds.
+
 **Always run the fireup control in the same session.** `observe.mjs` has no
 assertions about who is answering, so a harness bug looks exactly like a
 competitor divergence. Fireup scoring anything other than "every row as the

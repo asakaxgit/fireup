@@ -17,6 +17,7 @@ import {
   documentName,
   documentsRoot,
   duplexFirstOutcome,
+  expectCode,
   plainFields,
   serverStream,
   unary,
@@ -25,18 +26,6 @@ import {
 
 const require = createRequire(import.meta.url)
 const { FieldValue } = require('@google-cloud/firestore')
-
-const expectCode = async (expected, fn) => {
-  let error
-  try {
-    await fn()
-  } catch (caught) {
-    error = caught
-  }
-  assert.ok(error, `expected gRPC code ${expected}, but the call succeeded`)
-  assert.equal(error.code, expected, `expected gRPC code ${expected}, got ${error.code}: ${error.message}`)
-  return error
-}
 
 export const firestoreProbes = [
   {

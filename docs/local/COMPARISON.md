@@ -76,12 +76,12 @@ here.
 **Bugs this found in Fireup.** Pointing the suite at the reference
 implementation is the only reason these are known; each has a follow-up issue.
 
-| What Fireup does | What the emulator does | Why it matters |
-|---|---|---|
-| Accepts an `order_by` with a term *after* `__name__`, including a duplicate `__name__` | `INVALID_ARGUMENT: order by clause cannot contain more fields after the key` | A query that passes locally fails in production. The official Node SDK emits this shape for `.where(…, '!=', …).orderBy('__name__')` |
-| Serves a **descending `__name__` scan**, and `matrix.json` has a probe *asserting* it works | `FAILED_PRECONDITION: Firestore does not support descending key scans` | A matrix row claims parity that does not exist — the worst kind of row to have |
-| `accounts:batchCreate` answered `405 "INVALID_ARGUMENT : accounts:batchCreate takes POST, not POST"` | `200` | A self-contradictory refusal, from a catch-all arm that fired regardless of method. The matrix promises refusals that name the gap. **Fixed by SAK-224** — now `501 OPERATION_NOT_ALLOWED : batch account import (create accounts one at a time) is not served by fireup local` |
-| `projects:createSessionCookie` answered `404 PROJECT_NOT_FOUND … not "fireup-local:createSessionCookie"` | `400 INVALID_ID_TOKEN` | The `{project}:customMethod` colon syntax was parsed into the project id, so the row refused with the wrong error. **Fixed by SAK-224** — now `501 OPERATION_NOT_ALLOWED : session cookies is not served by fireup local` |
+| What Fireup did | What the emulator does | Why it matters | Status |
+|---|---|---|---|
+| Accepted an `order_by` with a term *after* `__name__`, including a duplicate `__name__` | `INVALID_ARGUMENT: order by clause cannot contain more fields after the key` | A query that passes locally fails in production. The official Node SDK emits this shape for `.where(…, '!=', …).orderBy('__name__')` | **fixed** — same status, same message |
+| Served a **descending `__name__` scan**, with a probe in `matrix.json` *asserting* it works | `FAILED_PRECONDITION: Firestore does not support descending key scans` | A matrix row claims parity that does not exist — the worst kind of row to have | **fixed** — and the probe now asserts the refusal |
+| `accounts:batchCreate` answered `405 "INVALID_ARGUMENT : accounts:batchCreate takes POST, not POST"` | `200` | A self-contradictory refusal, from a catch-all arm that fired regardless of method. The matrix promises refusals that name the gap. **Fixed by SAK-224** — now `501 OPERATION_NOT_ALLOWED : batch account import (create accounts one at a time) is not served by fireup local` | **fixed** |
+| `projects:createSessionCookie` answered `404 PROJECT_NOT_FOUND … not "fireup-local:createSessionCookie"` | `400 INVALID_ID_TOKEN` | The `{project}:customMethod` colon syntax was parsed into the project id, so the row refused with the wrong error. **Fixed by SAK-224** — now `501 OPERATION_NOT_ALLOWED : session cookies is not served by fireup local` | **fixed** |
 
 **What the harness still cannot measure**, said plainly so no cell pretends
 otherwise:
@@ -126,12 +126,18 @@ Functions triggers, which Fireup does not, and is the reference implementation
 for everything else.** They are complementary, and Fireup's default port is
 chosen so they can run side by side.
 
-Measured on the 73 rows that could be measured: Fireup answers 67 as its matrix
+Measured on the 74 rows that could be measured: Fireup answers 68 as its matrix
 says and refuses 6 that it says it refuses, with no divergences. The emulator
-answers 44 of the 73 in Firestore-native mode plus 20 of the 20 measurable
-Datastore rows in Datastore mode, with one divergence and four rows where it
-rejects a query Fireup accepts. It measures like the reference implementation,
-which is what it is.
+answers 49 of the 74 in Firestore-native mode plus 20 of the 20 measurable
+Datastore rows in Datastore mode, with one divergence. It measures like the
+reference implementation, which is what it is.
+
+The first measurement also found **four rows where the emulator rejected a
+query Fireup accepted**. There are none left: SAK-223 made Fireup
+refuse the two `order_by` shapes behind them, and the four probes that were
+building a shape production rejects now build one it accepts. That is the
+comparison doing its job — the rows moved because Fireup changed, not because
+a cell was reworded.
 
 ## Firestore RPCs
 
@@ -194,13 +200,13 @@ test is a single process, which is the case this is complete for.
 |---|---|---|---|
 | `where()` with `==`, `!=`, `<`, `<=`, `>`, `>=` | served | yes `[M]` | yes |
 | `where()` with `in`, `not-in`, `array-contains`, `array-contains-any` | served | yes `[M]` | yes |
-| `IS_NULL` / `IS_NOT_NULL` / `IS_NAN` / `IS_NOT_NAN` | served | yes `[D]` — our probe's `orderBy('__name__')` is rejected there; see the Fireup bug table | yes |
-| `AND` and `OR` composite filters, nested | served | yes `[D]` — same rejected probe shape | yes |
+| `IS_NULL` / `IS_NOT_NULL` / `IS_NAN` / `IS_NOT_NAN` | served | yes `[M]` | yes |
+| `AND` and `OR` composite filters, nested | served | yes `[M]` | yes |
 | `orderBy()`, ascending and descending, several terms | served | yes `[M]` | yes |
 | `limit()`, `offset()` | served | yes `[M]` | yes |
 | `select()` projection, including keys-only (`__name__`) | served | yes `[M]` | yes |
 | `limitToLast()` | served | yes `[M]` | yes |
-| Filtering and ordering on `__name__` | served | yes, ascending only `[M]` — a descending key scan is `FAILED_PRECONDITION` | yes, ascending only |
+| Filtering and ordering on `__name__` | served, ascending only — a lone descending key scan is `FAILED_PRECONDITION` | yes, ascending only `[M]` — a descending key scan is `FAILED_PRECONDITION` | yes, ascending only |
 | Collection group queries (`all_descendants`) | served | yes `[M]` | yes |
 | Cursors (`startAt`/`startAfter`/`endAt`/`endBefore`) | served | yes `[M]` | yes |
 | Nested field paths (`a.b`) in filters, orders, projections, and read masks | served | yes `[M]` | yes |
@@ -210,11 +216,15 @@ test is a single process, which is the case this is complete for.
 | Vector search (`find_nearest`) | `UNIMPLEMENTED` | not documented `[D]` | yes |
 | Aggregations (`count()`, `sum()`, `average()`) | `UNIMPLEMENTED` | yes `[M]` | yes |
 
-The `__name__` row is the one to read. Fireup serves a **descending** key scan;
-the emulator and production both refuse it (`FAILED_PRECONDITION: Firestore does
-not support descending key scans`), and `matrix.json` currently has a probe
-asserting Fireup's behaviour. That is a published parity claim that is not true,
-and it has a follow-up issue.
+The `__name__` row is the one to read, and it is the one this measurement
+changed. Fireup used to serve a **descending** key scan that the emulator and
+production both refuse (`FAILED_PRECONDITION: Firestore does not support
+descending key scans`) — with a `matrix.json` probe asserting Fireup's
+behaviour, so the false parity claim had a green check behind it the whole time.
+SAK-223 made Fireup refuse it, inverted the probe, and narrowed the row to
+"ascending only" in all three columns. A descending `__name__` *after* an
+explicit term is still served everywhere; that is what `orderBy(field, 'desc')`
+compiles to.
 
 ## Field transforms
 
@@ -249,8 +259,8 @@ GCP somewhere; what matters is whether the difference is written down.
 | Phantom reads abort a transaction | no — a query's read set is the documents it returned | `[D]` "does not currently implement all transaction behavior seen in production"; locks "may take up to 30 seconds to be released" — **measured: a Datastore-mode transaction conflict blocked past the client's 60s deadline** | yes — production conflicts on the scanned range |
 | Transaction lifetime | 60s, matching the documented limit | not documented `[D]` | documented server deadlines |
 | Point-in-time reads (any `read_time` consistency selector) | `UNIMPLEMENTED` | yes `[M]` — within its retention window; an older `read_time` is `FAILED_PRECONDITION: The requested 'read_time' is too old` | yes |
-| An `order_by` term after `__name__` | **accepted** — and nothing warns | `INVALID_ARGUMENT: order by clause cannot contain more fields after the key` `[M]` | rejected |
-| A descending `__name__` scan | **served** — and `matrix.json` asserts it | `FAILED_PRECONDITION: Firestore does not support descending key scans` `[M]` | rejected |
+| An `order_by` term after `__name__` | served — refused with `INVALID_ARGUMENT: order by clause cannot contain more fields after the key`, as production does (was accepted until SAK-223) | the same `INVALID_ARGUMENT` `[M]` | rejected |
+| A lone descending `__name__` scan | refused with `FAILED_PRECONDITION: Firestore does not support descending key scans`, as production does (was served until SAK-223) | the same `FAILED_PRECONDITION` `[M]` | rejected |
 
 Publishing its divergences is the thing to actually look for in a local
 emulator, and the thing to look for after that is what happens to them over
@@ -259,9 +269,10 @@ that silently changes fails CI.
 
 What measurement added is the last two rows, and they are the limit of that
 guarantee. A probe keeps a row from changing silently; it does not keep the row
-from having been **wrong when it was written**. Both of those divergences had
-passing probes the whole time, because the probe asserted what Fireup does.
-Nothing but the reference implementation was ever going to catch them.
+from having been **wrong when it was written**. Both of those rows were
+divergences with *passing* probes the whole time, because the probe asserted
+what Fireup does. Nothing but the reference implementation was ever going to
+catch them, and SAK-223 closed both — which is why they now read as parity.
 
 The emulator's documented lock behaviour is also now a measured number rather
 than a caveat: two transaction-conflict probes that Fireup answers in

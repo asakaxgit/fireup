@@ -9,7 +9,9 @@ import { strict as assert } from 'node:assert'
 import { createRequire } from 'node:module'
 
 import {
+  GRPC,
   documentsRoot,
+  expectCode,
   serverStream,
   unary,
   value,
@@ -19,6 +21,17 @@ const require = createRequire(import.meta.url)
 const { AggregateField, FieldPath, Filter } = require('@google-cloud/firestore')
 
 const ids = (snapshot) => snapshot.docs.map((doc) => doc.id)
+
+/**
+ * The ids a query matched, as a set rather than a sequence.
+ *
+ * For the probes whose claim is *which* documents come back and not in what
+ * order. They used to pin the order with `orderBy('__name__')`, which is a
+ * shape production refuses as soon as the query also carries an inequality:
+ * the SDK appends the implicit order on the inequality field *after* the
+ * explicit key. See `semantics.nothing-follows-the-key-in-an-order`.
+ */
+const idSet = (snapshot) => ids(snapshot).sort()
 
 /** The same four cities every shape-level query probe reads. */
 const seedCities = async (cities) => {
@@ -93,7 +106,7 @@ export const queryProbes = [
       // The SDK turns `== null` / `!= null` / `== NaN` into the unary filters.
       assert.deepEqual(ids(await values.where('v', '==', null).get()), ['a_null'], 'IS_NULL')
       assert.deepEqual(
-        ids(await values.where('v', '!=', null).orderBy('__name__').get()),
+        idSet(await values.where('v', '!=', null).get()),
         ['b_one', 'c_nan'],
         'IS_NOT_NULL matches any present non-null value, and never a missing field',
       )
@@ -117,11 +130,13 @@ export const queryProbes = [
         .get()
       assert.deepEqual(ids(and), ['tokyo', 'osaka'])
 
+      // No explicit order: both branches carry an inequality on `population`,
+      // so the SDK orders by it, and asking for `__name__` on top would build
+      // the order shape production refuses.
       const or = await cities
         .where(Filter.or(Filter.where('country', '==', 'KR'), Filter.where('population', '<', 16)))
-        .orderBy('__name__')
         .get()
-      assert.deepEqual(ids(or), ['kyoto', 'seoul'])
+      assert.deepEqual(idSet(or), ['kyoto', 'seoul'])
 
       // Nested: (JP AND >30) OR (KR)
       const nested = await cities
@@ -131,9 +146,8 @@ export const queryProbes = [
             Filter.where('country', '==', 'KR'),
           ),
         )
-        .orderBy('__name__')
         .get()
-      assert.deepEqual(ids(nested), ['seoul', 'tokyo'])
+      assert.deepEqual(idSet(nested), ['seoul', 'tokyo'])
     },
   },
 
@@ -223,12 +237,28 @@ export const queryProbes = [
         'seoul',
         'tokyo',
       ])
-      assert.deepEqual(ids(await cities.orderBy(FieldPath.documentId(), 'desc').get()), [
-        'tokyo',
-        'seoul',
-        'osaka',
-        'kyoto',
-      ])
+
+      // Inverted by SAK-223. This asserted descending name order until SAK-217
+      // pointed the probes at Google's emulator and found that production
+      // refuses a key scan it cannot read forwards. The matrix row claimed
+      // parity, the probe was green, and the claim was false: the refusal is
+      // the parity.
+      const refusal = await expectCode(GRPC.FAILED_PRECONDITION, () =>
+        cities.orderBy(FieldPath.documentId(), 'desc').get(),
+      )
+      assert.match(
+        refusal.message,
+        /descending key scans/,
+        `the refusal must name what is unsupported, got: ${refusal.message}`,
+      )
+
+      // The descending key is only refused as the *whole* order. As a
+      // tie-breaker after an explicit term it is served, which is what every
+      // `orderBy(field, 'desc')` compiles to.
+      assert.deepEqual(
+        ids(await cities.orderBy('country', 'desc').orderBy(FieldPath.documentId(), 'desc').get()),
+        ['seoul', 'tokyo', 'osaka', 'kyoto'],
+      )
     },
   },
 
@@ -521,10 +551,9 @@ export const queryProbes = [
         ['as_double', 'as_integer'],
         '31 and 31.0 are one value',
       )
-      assert.deepEqual(ids(await docs.where('n', '>', 30.5).orderBy('__name__').get()), [
-        'as_double',
-        'as_integer',
-      ])
+      // An inequality, so no explicit `__name__`: the SDK orders by `n`, and
+      // the two documents tie there, which the appended key breaks.
+      assert.deepEqual(ids(await docs.where('n', '>', 30.5).get()), ['as_double', 'as_integer'])
     },
   },
 
@@ -643,6 +672,67 @@ export const queryProbes = [
       // the direction of the last explicit term.
       assert.deepEqual(ids(await docs.orderBy('v').get()), ['a', 'b', 'c'])
       assert.deepEqual(ids(await docs.orderBy('v', 'desc').get()), ['c', 'b', 'a'])
+    },
+  },
+
+  {
+    id: 'semantics.nothing-follows-the-key-in-an-order',
+    served: async ({ raw, projectId, freshCollection }) => {
+      const docs = freshCollection('nameterminal')
+      await Promise.all([docs.doc('a').set({ v: 1 }), docs.doc('b').set({ v: 2 })])
+
+      // `__name__` is the tie-breaker that makes an order total, so a term
+      // after it can never change a result — and Firestore refuses the shape
+      // rather than ignoring the dead term.
+      //
+      // Driven through the SDK because that is the whole reason this row
+      // exists: the SDK builds the shape *unprompted*, appending the implicit
+      // order on an inequality field after the explicit key, so the wire
+      // carries a legal-looking `[__name__]` and the query is illegal anyway.
+      // Serving it locally means a query a user writes on the first day works
+      // here and dies in production.
+      const refusal = await expectCode(GRPC.INVALID_ARGUMENT, () =>
+        docs.where('v', '!=', null).orderBy('__name__').get(),
+      )
+      assert.match(
+        refusal.message,
+        /after the key/,
+        `the refusal must name the key, got: ${refusal.message}`,
+      )
+
+      // The rest at the wire level, and not only for coverage: the SDK retries
+      // a refused query with backoff, so each refusal driven through it costs
+      // about seven seconds against *any* host. Three of them overran this
+      // suite's 20s probe timeout.
+      const asc = (field) => ({ field: { field_path: field }, direction: 'ASCENDING' })
+      const run = (order_by) =>
+        serverStream(raw.firestore, 'RunQuery', {
+          parent: documentsRoot(projectId),
+          structured_query: { from: [{ collection_id: docs.id }], order_by },
+        })
+
+      for (const order_by of [
+        [asc('__name__'), asc('v')],
+        [asc('__name__'), asc('__name__')],
+        [asc('v'), asc('__name__'), asc('w')],
+      ]) {
+        const error = await expectCode(GRPC.INVALID_ARGUMENT, () => run(order_by))
+        assert.match(
+          error.message,
+          /after the key/,
+          `the refusal must name the key, got: ${error.message}`,
+        )
+      }
+
+      // The neighbours it must *not* refuse. A trailing key is the normal
+      // shape, and the same query without the explicit key is served — the SDK
+      // appends the key itself, so the refusal above costs the caller nothing.
+      assert.deepEqual(
+        (await run([asc('v'), asc('__name__')])).filter((m) => m.document).length,
+        2,
+        'a key as the last term is the ordinary shape',
+      )
+      assert.deepEqual(idSet(await docs.where('v', '!=', null).get()), ['a', 'b'])
     },
   },
 ]

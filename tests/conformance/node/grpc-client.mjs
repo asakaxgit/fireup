@@ -17,6 +17,7 @@
  * snake_case to camelCase in your head.
  */
 
+import { strict as assert } from 'node:assert'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -46,8 +47,38 @@ export const GRPC = {
   INVALID_ARGUMENT: 3,
   NOT_FOUND: 5,
   ALREADY_EXISTS: 6,
+  FAILED_PRECONDITION: 9,
   ABORTED: 10,
   UNIMPLEMENTED: 12,
+}
+
+/**
+ * Assert a call is refused with one exact gRPC code.
+ *
+ * `expectUnimplemented` in the runner is the stricter sibling, for the matrix's
+ * `unimplemented` rows: it also demands fireup's own refusal wording. This one
+ * is for a refusal that is *parity* rather than a gap — where Firestore itself
+ * refuses, so the code is the claim and the wording belongs to Google.
+ *
+ * Reading `code` off the caught error rather than a name keeps a typo from
+ * passing: an undefined `GRPC.SOMETHING` is `undefined`, and `undefined`
+ * matches every error that carries no code at all.
+ */
+export const expectCode = async (expected, fn) => {
+  let error
+  try {
+    await fn()
+  } catch (caught) {
+    error = caught
+  }
+  assert.ok(error, `expected gRPC code ${expected}, but the call succeeded`)
+  assert.ok(expected !== undefined, 'expectCode was given no code to expect')
+  assert.equal(
+    error.code,
+    expected,
+    `expected gRPC code ${expected}, got ${error.code}: ${error.message}`,
+  )
+  return error
 }
 
 export const connect = (host) => {
