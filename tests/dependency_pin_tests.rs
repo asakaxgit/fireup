@@ -2585,6 +2585,58 @@ const CONDITIONS_THAT_STILL_RUN: &[&str] = &[
     "${{ !cancelled() }}",
 ];
 
+/// `value` with one matching pair of surrounding YAML quotes removed.
+///
+/// `if: !cancelled()` is not valid YAML — a leading `!` is a tag indicator, so
+/// the workflow file itself does not parse:
+///
+/// ```text
+/// $ python3 -c "import yaml; yaml.safe_load('if: !cancelled()')"
+/// ConstructorError: could not determine a constructor for the tag '!cancelled()'
+/// ```
+///
+/// That makes `if: '!cancelled()'` the only shippable spelling of that member of
+/// `CONDITIONS_THAT_STILL_RUN`, and a reader comparing the raw text rejects it.
+/// Measured on the real `ci.yml` while checking SAK-249's must-be-green arms: a
+/// *stricter* edit to the gate went red, which is the direction that gets a
+/// guard deleted rather than fixed (SAK-250).
+///
+/// Unquoting cannot open a hole. It can only turn a non-matching value into one
+/// of `CONDITIONS_THAT_STILL_RUN`, every member of which means "run anyway"
+/// however it is quoted. `if: 'false'` unquotes to `false`, still not a member.
+/// And one pair comes off rather than all of them, so `if: "'false'"` stays
+/// `'false'` and still fails closed.
+///
+/// Shared by both readers of these two keys — the `deny` gate's
+/// `deny_gate_conditions` and `sibling_reporter_conditions` — because the gap is
+/// in how the value is compared, not in either reader's search.
+///
+/// Note which of the two keys this makes *shippable*, measured against the
+/// Actions workflow schema (`actions/runner`
+/// `src/Sdk/DTPipelines/workflow-v1.0.json`, read 2026-11-07):
+///
+/// | key | schema type | a quoted scalar |
+/// |---|---|---|
+/// | `if` | `step-if`, declared `"string": {}` | valid — `if: '!cancelled()'` and `if: "always()"` are shippable workflows |
+/// | `continue-on-error` | `boolean-steps-context`, declared `"boolean": {}` | **not** valid — `BooleanDefinition.IsMatch` accepts only a `BooleanToken`, and `'false'` is a `StringToken` |
+///
+/// So unquoting `continue-on-error: 'false'` is tolerance for a spelling nobody
+/// can ship, not permission for one: that workflow fails to parse before the
+/// gate runs, so letting it past here cannot hide a switched-off gate. Only
+/// `${{ false }}` reaches the runner as an `ExpressionToken`, which is why
+/// `check_nothing_switches_the_gate_off` names that spelling separately.
+fn unquote_condition(value: &str) -> &str {
+    for quote in ['\'', '"'] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|v| v.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    value
+}
+
 /// One live `if:` or `continue-on-error:` on the gate's path.
 #[derive(Debug, PartialEq, Eq)]
 struct GateCondition {
@@ -2594,7 +2646,8 @@ struct GateCondition {
     scope: String,
     /// `if` or `continue-on-error`, without the colon.
     key: String,
-    /// The value as written, comment stripped and trimmed.
+    /// The value as written, comment stripped, trimmed, and with one pair of
+    /// surrounding YAML quotes removed (`unquote_condition`).
     value: String,
 }
 
@@ -2728,6 +2781,10 @@ fn deny_gate_conditions(ci: &str) -> Result<GateConditions, String> {
 }
 
 /// `body` as a gate condition, if that is what it is.
+///
+/// The value arrives unquoted: see `unquote_condition` for why a reader that
+/// compared the raw text rejected `if: '!cancelled()'`, the one spelling of that
+/// condition a workflow can actually carry.
 fn gate_condition(scope: &str, body: &str) -> Option<GateCondition> {
     let (key, value) = body.split_once(':')?;
     let key = key.trim();
@@ -2737,7 +2794,7 @@ fn gate_condition(scope: &str, body: &str) -> Option<GateCondition> {
     Some(GateCondition {
         scope: scope.to_string(),
         key: key.to_string(),
-        value: value.trim().to_string(),
+        value: unquote_condition(value.trim()).to_string(),
     })
 }
 
@@ -6308,6 +6365,42 @@ include-build = false
         assert_eq!(read.keys, Vec::new());
     }
 
+    /// The reader hands back the value with one pair of YAML quotes off.
+    ///
+    /// Pinned with `assert_eq!` on synthetic input, where that is honest,
+    /// rather than on the shipped file, which carries none of these keys.
+    /// `conditions_that_still_run_the_gate_pass` and
+    /// `a_condition_that_switches_the_gate_off_fails` carry the arms that say
+    /// what the *verdict* is either way; this one says what was read.
+    #[test]
+    fn the_gate_condition_reader_strips_one_pair_of_yaml_quotes() {
+        let value_of = |inserted: &str| {
+            let read = deny_gate_conditions(&ci_yml_with_key_under(GATE_STEP_LINE, inserted))
+                .expect("readable");
+            match &read.keys[..] {
+                [found] => found.value.clone(),
+                other => panic!("expected exactly one condition, read {other:?}"),
+            }
+        };
+
+        // The reason this function exists: `if: !cancelled()` is not valid YAML,
+        // so this is the only spelling of it a workflow can carry.
+        assert_eq!(value_of("        if: '!cancelled()'"), "!cancelled()");
+        assert_eq!(value_of("        if: \"always()\""), "always()");
+        assert_eq!(value_of("        if: '${{ always() }}'"), "${{ always() }}");
+        assert_eq!(value_of("        continue-on-error: 'false'"), "false");
+
+        // One pair, not all of them.
+        assert_eq!(value_of("        if: \"'false'\""), "'false'");
+
+        // Unquoted and unbalanced values come back untouched. Tidying a
+        // mismatched pair would be inventing a value the file does not have.
+        assert_eq!(value_of("        if: always()"), "always()");
+        assert_eq!(value_of("        if: ${{ false }}"), "${{ false }}");
+        assert_eq!(value_of("        if: 'always()\""), "'always()\"");
+        assert_eq!(value_of("        if: 'always()"), "'always()");
+    }
+
     /// The hole this ticket is about: the gate is never reached, or its failure
     /// is never counted. Four arms, because the two keys are each valid in two
     /// places and a guard that read only one place would pass half of them.
@@ -6337,6 +6430,34 @@ include-build = false
                 "        continue-on-error: ${{ github.event_name == 'pull_request' }}",
                 "continue-on-error: ${{ github.event_name == 'pull_request' }}",
             ),
+            // The direction control for `unquote_condition` (SAK-250): a pair of
+            // quotes makes a switch readable as YAML, not harmless. The expected
+            // text is the *unquoted* value, which is also how these arms say the
+            // unquoting happened at all rather than the match failing by luck.
+            (DENY_JOB_LINE, "    if: 'false'", "if: false"),
+            (GATE_STEP_LINE, "        if: 'false'", "if: false"),
+            (GATE_STEP_LINE, "        if: \"false\"", "if: false"),
+            (
+                DENY_JOB_LINE,
+                "    continue-on-error: \"true\"",
+                "continue-on-error: true",
+            ),
+            (
+                GATE_STEP_LINE,
+                "        continue-on-error: \"true\"",
+                "continue-on-error: true",
+            ),
+            (
+                GATE_STEP_LINE,
+                "        continue-on-error: 'true'",
+                "continue-on-error: true",
+            ),
+            // One pair comes off, not all of them, so a doubly quoted switch is
+            // still not a member of `CONDITIONS_THAT_STILL_RUN`.
+            (GATE_STEP_LINE, "        if: \"'false'\"", "if: 'false'"),
+            // Unbalanced quotes are left alone and fail closed rather than
+            // being tidied into something that passes.
+            (GATE_STEP_LINE, "        if: 'always()\"", "if: 'always()\""),
         ] {
             let conditions =
                 deny_gate_conditions(&ci_yml_with_key_under(anchor, inserted)).expect("readable");
@@ -6433,18 +6554,28 @@ include-build = false
     #[test]
     fn conditions_that_still_run_the_gate_pass() {
         for value in CONDITIONS_THAT_STILL_RUN {
-            for (anchor, indent) in [(DENY_JOB_LINE, "    "), (GATE_STEP_LINE, "        ")] {
-                let conditions = deny_gate_conditions(&ci_yml_with_key_under(
-                    anchor,
-                    &format!("{indent}if: {value}"),
-                ))
-                .expect("readable");
-                assert!(
-                    check_nothing_switches_the_gate_off(&conditions).is_ok(),
-                    "`if: {value}` leaves the gate running and must not be reported as a \
-                     hole — a guard that reddened on it would be failing a tree that is \
-                     safer than the one shipped"
-                );
+            // All three spellings, because quoting an `if:` value changes
+            // nothing about what it means and `'!cancelled()'` is the *only*
+            // way to write that member at all — a bare `!` opens a YAML tag and
+            // the file stops parsing (SAK-250).
+            for spelling in [
+                value.to_string(),
+                format!("'{value}'"),
+                format!("\"{value}\""),
+            ] {
+                for (anchor, indent) in [(DENY_JOB_LINE, "    "), (GATE_STEP_LINE, "        ")] {
+                    let conditions = deny_gate_conditions(&ci_yml_with_key_under(
+                        anchor,
+                        &format!("{indent}if: {spelling}"),
+                    ))
+                    .expect("readable");
+                    assert!(
+                        check_nothing_switches_the_gate_off(&conditions).is_ok(),
+                        "`if: {spelling}` leaves the gate running and must not be reported \
+                         as a hole — a guard that reddened on it would be failing a tree \
+                         that is safer than the one shipped"
+                    );
+                }
             }
         }
 
@@ -6452,6 +6583,13 @@ include-build = false
             (DENY_JOB_LINE, "    continue-on-error: false"),
             (GATE_STEP_LINE, "        continue-on-error: false"),
             (GATE_STEP_LINE, "        continue-on-error: False"),
+            // Quoted, which no runner accepts for this key — the schema wants a
+            // `BooleanToken`. Green here all the same: that tree fails to parse
+            // before the gate runs, so a guard reddening on it is reporting a
+            // hole that is not one. See `unquote_condition`.
+            (DENY_JOB_LINE, "    continue-on-error: 'false'"),
+            (GATE_STEP_LINE, "        continue-on-error: 'false'"),
+            (GATE_STEP_LINE, "        continue-on-error: \"false\""),
             // Fail-safe, not fail-open: no install means no binary means the
             // gate step fails.
             (INSTALL_STEP_LINE, "        if: false"),
@@ -7046,32 +7184,6 @@ include-build = false
 /// `-D advisory-not-detected`: neither is redundant, because the hole needs
 /// both of them gone (SAK-229, SAK-249).
 const SIBLING_REPORTER_TARGET: &str = "fidelity_matrix_tests";
-
-/// `value` with one matching pair of surrounding YAML quotes removed.
-///
-/// `if: !cancelled()` is not valid YAML -- a leading `!` is a tag indicator --
-/// so the only shippable spelling of that member of `CONDITIONS_THAT_STILL_RUN`
-/// is `if: '!cancelled()'`, and comparing the raw text rejects it. Measured on
-/// the real `ci.yml`: without this, the `!cancelled()` arm was red.
-///
-/// Unquoting cannot open a hole. It can only turn a non-matching value into one
-/// of `CONDITIONS_THAT_STILL_RUN`, every member of which means "run anyway"
-/// however it is quoted; `if: 'false'` unquotes to `false`, still not a member.
-///
-/// Deliberately local to this reader rather than applied to
-/// `gate_conditions` too: the `deny` job's reader has the same gap and closing
-/// it belongs with that reader, not in the layer above it.
-fn unquote_condition(value: &str) -> &str {
-    for quote in ['\'', '"'] {
-        if let Some(inner) = value
-            .strip_prefix(quote)
-            .and_then(|v| v.strip_suffix(quote))
-        {
-            return inner;
-        }
-    }
-    value
-}
 
 /// The live `if:` / `continue-on-error:` on the `ci.yml` step that runs `target`.
 ///
