@@ -2,7 +2,7 @@
 
 > First-party Fireup code is licensed under **Apache-2.0** (see root `LICENSE`). Brand assets under `brand/` are carved out — see `brand/LICENSE`. Dependency-tree audit: [`CARGO_LICENSE_AUDIT.md`](CARGO_LICENSE_AUDIT.md).
 
-**Status:** current as of SAK-192 — PostgreSQL pushdown for equality/range query filters. Prior: Phase 2.1 (SAK-189) Firestore `Listen` / realtime listeners; SAK-195 managed-export fidelity regression fixtures; SAK-193 Phase L.1 out-of-band email flows (no mail transport); SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
+**Status:** current as of SAK-203 — Datastore `property_mask` on a mutation (masked entity writes, paired with the SAK-198 property transforms). Prior: SAK-192 PostgreSQL pushdown for equality/range query filters; Phase 2.1 (SAK-189) Firestore `Listen` / realtime listeners; SAK-195 managed-export fidelity regression fixtures; SAK-193 Phase L.1 out-of-band email flows (no mail transport); SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -340,8 +340,10 @@ since Phase 0 — this change serves four of its cases instead of refusing them.
 **No reverse engineering.** The Firebase Emulator Suite was not decompiled,
 disassembled, or binary-analysed, and no proprietary emulator source or data was
 copied or consulted. What is not served stays an explicit `UNIMPLEMENTED` or
-`INVALID_ARGUMENT`: `maximum`, `minimum`, a transform on a nested field path,
-and the Datastore spelling (`Mutation.property_transforms`).
+`INVALID_ARGUMENT`: `maximum`, `minimum`, and a transform on a nested field
+path. (The Datastore spelling, `Mutation.property_transforms`, was refused when
+this note was written and is served as of SAK-198; SAK-203 below adds the
+`property_mask` it pairs with.)
 
 ### SAK-195 notes — managed-export fidelity regression fixtures
 
@@ -449,6 +451,40 @@ Firestore still rejects queries this serves.
 timestamp outside years 0001–9999. Filed as SAK-205 rather than silently
 narrowed or worked around.
 
+### SAK-203 notes — Datastore `property_mask` on a mutation
+
+**No new Google or Firebase artefact, no new proto, no new Rust dependency, and
+no new npm package.** The proto pin is unchanged at googleapis `57aa4dbc`;
+`google/datastore/v1/datastore.proto`, already rowed above, is where
+`Mutation.property_mask` and `PropertyMask` live, and both have been compiled
+into the tree since Phase 3 (SAK-166) — this change serves the field instead of
+refusing it, completing the pairing SAK-198 started.
+
+#### What the implementation was written from
+
+| Source | Status | How it was used |
+|---|---|---|
+| The comments on `Mutation.property_mask` and `PropertyMask` in the vendored `datastore.proto` | Published Apache-2.0 googleapis definition, already in this ledger | Every rule the implementation encodes, quoted in the code and in `docs/local/README.md`: only masked properties are updated and others are left untouched; "properties referenced in the mask but not in the entity are deleted"; "none of the properties in the mask may have a reserved name, except for `__key__`"; "this field is ignored for `delete`"; "a path must not be empty"; dots separate nested property names and `.`/`\` in a name must be escaped; and — from `property_transforms` on the same message — that the transforms apply "regardless of the property mask … after the operation" |
+| The vendored `google/firestore/v1/write.proto` (`Write.update_mask`) | Published Apache-2.0 googleapis definition, already rowed above | The equivalent Firestore rule, which is why both surfaces now share one masked-write primitive in `src/local/store.rs` rather than two readings of the same sentence |
+| Behaviour of Google's **open-source** `@google-cloud/datastore` client (Apache-2.0) | Open source, public repository | Confirmation that a masked write round-trips as the official library encodes it, verified by running it as a **client** against our server in `tests/local-smoke-datastore/smoke.mjs`. As in SAK-198, `propertyMask` has no handwritten surface, so the mask is sent through the generated `DatastoreClient` the same package exports and read back through the handwritten `datastore.get()` |
+
+**No reverse engineering.** The Firebase Emulator Suite and the Cloud Datastore
+emulator were not decompiled, disassembled, binary-analysed, or run to derive
+this behaviour, and no proprietary emulator source or data was copied or
+consulted. Nothing was inferred from observing a Google service: every rule
+above is a sentence in the published proto.
+
+**Fidelity limits this change records rather than hides.** A nested mask path
+(`foo.bar`) and an escaped property name stay `UNIMPLEMENTED` on both surfaces —
+a nested mask has to merge *into* a stored map, and overwriting the whole parent
+property would be worse than refusing. An empty path and a reserved name other
+than `__key__` are `INVALID_ARGUMENT`. `docs/local/README.md` carries the full
+table, every row of it is probed by the SAK-194 conformance suite against the
+official SDKs, and this change closes the previously recorded "no field deletion
+through a mask" limit rather than leaving it half-true — the row SAK-194 had
+pinned as a `documented-divergence` is now a served row with a probe that
+asserts the deletion.
+
 ## Existing Fireup notes (pre-local-cloud)
 
 | Dependency | Version / pin | SPDX | Upstream | How we use it | Attribution OK? | Decision |
@@ -461,14 +497,14 @@ narrowed or worked around.
 The PR checklist in `.cursor/rules/firebase-gcp-compliance.mdc`, answered as each
 phase landed.
 
-| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 | SAK-196 | SAK-190 | Phase L.1 (SAK-193) | SAK-195 | Phase 2.1 (SAK-189) | SAK-192 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected | Yes — the vendored `write.proto` comments, public `FieldValue` docs, open-source client as a client | Yes — public REST + email-action-link docs, and the open-source client SDK's published link parser; no page markup or asset reproduced | Yes — fixtures generated first-party from the public LevelDB log spec and already-documented `EntityProto` numbering; no Google fixture or export used | Yes — vendored public protos, public `Listen` reference, open-source client source | Yes — the SQL translation comes from the public "sort order of Firestore values" and query documentation plus the already-vendored public protos; nothing inspected, and no query planner behaviour reconstructed |
-| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added | Yes — none added; first-party SPDX corrected to Apache-2.0; audit linked | Yes — none added | Yes — none added, of any kind | Yes — none added | Yes — none added | Yes — none added |
-| For a REST/JSON surface: public sources named | n/a / prior phases | Yes | n/a (protos) | n/a | n/a | n/a — no new surface | n/a (protos) | Yes — the four sources are rowed in the Phase L.1 notes | n/a — binary export format, sources named above | n/a (protos) | n/a (gRPC/protos); the SQL is first-party and the value-ordering source is named in `src/local/query.rs` |
-| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated → `501` (OOB too, until SAK-193) | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a | Yes — `maximum`/`minimum`, nested transform paths, and Datastore property transforms stay refused | Yes — `PHONE_VERIFICATION` → `501`; mail delivery stated as a non-goal rather than faked; the one-hour code lifetime and the landing route labelled as Fireup's own choices | Yes — the `numeric` negative-zero gap is stated in the fixture README and filed as SAK-202, not hidden | Yes — a `read_time` resume is refused per target; no resume tokens and no `ExistenceFilter`, both published in the matrix | Yes — every predicate the translation will not push is tabulated **with its reason** in `docs/local/README.md` and `src/local/postgres_filter.rs`, and falls back to the in-process engine rather than guessing. The `value_json` timestamp round-trip defect found on the way is filed as SAK-205, not hidden |
-| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged | Yes — retained in README licence section | Yes — unchanged | Yes — and the landing route's own response carries a "not a Google page" notice | Yes — unchanged | Yes — on `src/local/watch.rs` and the `Listen` row of `src/local/firestore.rs` | Yes — unchanged |
-| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added | Yes — no signing key; the link's `apiKey` placeholder is a sentence, not a key-shaped string | n/a — nothing added | n/a — nothing added | n/a — nothing added |
+| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 | SAK-196 | SAK-190 | Phase L.1 (SAK-193) | SAK-195 | Phase 2.1 (SAK-189) | SAK-192 | SAK-203 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected | Yes — the vendored `write.proto` comments, public `FieldValue` docs, open-source client as a client | Yes — public REST + email-action-link docs, and the open-source client SDK's published link parser; no page markup or asset reproduced | Yes — fixtures generated first-party from the public LevelDB log spec and already-documented `EntityProto` numbering; no Google fixture or export used | Yes — vendored public protos, public `Listen` reference, open-source client source | Yes — the SQL translation comes from the public "sort order of Firestore values" and query documentation plus the already-vendored public protos; nothing inspected, and no query planner behaviour reconstructed | Yes — the vendored `datastore.proto` comments only; the open-source client run as a client |
+| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added | Yes — none added; first-party SPDX corrected to Apache-2.0; audit linked | Yes — none added | Yes — none added, of any kind | Yes — none added | Yes — none added | Yes — none added | Yes — none added, of any kind |
+| For a REST/JSON surface: public sources named | n/a / prior phases | Yes | n/a (protos) | n/a | n/a | n/a — no new surface | n/a (protos) | Yes — the four sources are rowed in the Phase L.1 notes | n/a — binary export format, sources named above | n/a (protos) | n/a (gRPC/protos); the SQL is first-party and the value-ordering source is named in `src/local/query.rs` | n/a (protos) |
+| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated → `501` (OOB too, until SAK-193) | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a | Yes — `maximum`/`minimum`, nested transform paths, and Datastore property transforms stay refused | Yes — `PHONE_VERIFICATION` → `501`; mail delivery stated as a non-goal rather than faked; the one-hour code lifetime and the landing route labelled as Fireup's own choices | Yes — the `numeric` negative-zero gap is stated in the fixture README and filed as SAK-202, not hidden | Yes — a `read_time` resume is refused per target; no resume tokens and no `ExistenceFilter`, both published in the matrix | Yes — every predicate the translation will not push is tabulated **with its reason** in `docs/local/README.md` and `src/local/postgres_filter.rs`, and falls back to the in-process engine rather than guessing. The `value_json` timestamp round-trip defect found on the way is filed as SAK-205, not hidden | Yes — nested mask paths and escaped property names stay `UNIMPLEMENTED`; an empty path and a non-`__key__` reserved name are `INVALID_ARGUMENT` |
+| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged | Yes — retained in README licence section | Yes — unchanged | Yes — and the landing route's own response carries a "not a Google page" notice | Yes — unchanged | Yes — on `src/local/watch.rs` and the `Listen` row of `src/local/firestore.rs` | Yes — unchanged | Yes — unchanged |
+| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added | Yes — no signing key; the link's `apiKey` placeholder is a sentence, not a key-shaped string | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added |
 
 ## How to add a row
 

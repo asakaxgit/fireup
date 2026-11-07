@@ -141,9 +141,17 @@ pub enum Mutation {
     Put(Document),
     /// Replace only the named fields, creating the document if absent — the
     /// `update()` / `set(…, {merge: true})` path.
+    ///
+    /// A `None` value **deletes** that field rather than writing it. This is
+    /// what a mask path the request does not carry means on both surfaces:
+    /// Firestore's `update_mask` and Datastore's `property_mask` each say a
+    /// masked field missing from the submitted document is deleted. Keeping the
+    /// decision per-path (instead of a separate delete list) preserves mask
+    /// order, so a mask naming the same field twice resolves the same way the
+    /// request spelled it.
     Merge {
         name: String,
-        fields: Vec<(String, Value)>,
+        fields: Vec<(String, Option<Value>)>,
     },
     /// Remove the document. Idempotent: deleting a missing document succeeds.
     Delete { name: String },
@@ -297,7 +305,11 @@ pub(crate) fn mutate(
                 update_time: None,
             });
             for (field, value) in fields {
-                document.fields.insert(field, value);
+                match value {
+                    Some(value) => document.fields.insert(field, value),
+                    // A masked field the request did not carry: delete it.
+                    None => document.fields.remove(&field),
+                };
             }
             document
         }
@@ -511,11 +523,11 @@ pub trait Store: Send + Sync + 'static {
     }
 
     /// Merge `fields` into an existing document, creating it if absent. Only
-    /// the supplied field names are touched.
+    /// the supplied field names are touched; a `None` value deletes its field.
     async fn merge(
         &self,
         name: &str,
-        fields: Vec<(String, Value)>,
+        fields: Vec<(String, Option<Value>)>,
         now: Timestamp,
     ) -> StoreResult<WriteOutcome> {
         let mutation = Mutation::Merge {
@@ -787,6 +799,7 @@ pub mod conformance {
         overwrite_drops_fields_absent_from_the_new_document(store, &name("replace")).await;
         merge_only_touches_named_fields(store, &name("merge")).await;
         merge_creates_a_missing_document(store, &name("merge-create")).await;
+        a_none_in_a_merge_deletes_the_field(store, &name("merge-delete")).await;
         delete_reports_whether_the_document_existed(store, &name("delete")).await;
         missing_documents_read_as_none(store, &name("absent")).await;
         writes_and_deletes_change_what_a_read_returns(store, &name("count")).await;
@@ -859,7 +872,11 @@ pub mod conformance {
             .expect("put");
         assert_eq!(
             store
-                .merge(name, vec![("added".to_string(), string_value("x"))], ts(20))
+                .merge(
+                    name,
+                    vec![("added".to_string(), Some(string_value("x")))],
+                    ts(20),
+                )
                 .await
                 .expect("merge"),
             WriteOutcome::Updated
@@ -872,9 +889,46 @@ pub mod conformance {
         assert_eq!(found.update_time, Some(ts(20)));
     }
 
+    /// Both surfaces reach this through a mask path the request carries no value
+    /// for, so it has to mean the same thing in both backends — including that
+    /// deleting a field that was never there is not an error.
+    async fn a_none_in_a_merge_deletes_the_field(store: &dyn Store, name: &str) {
+        store
+            .put(doc(name, "keep", "v"), ts(10))
+            .await
+            .expect("put");
+        store
+            .merge(
+                name,
+                vec![
+                    ("added".to_string(), Some(string_value("x"))),
+                    ("keep".to_string(), None),
+                    ("never-there".to_string(), None),
+                ],
+                ts(20),
+            )
+            .await
+            .expect("merge with deletions");
+
+        let found = store.get(name).await.expect("get").expect("still present");
+        assert_eq!(found.fields["added"], string_value("x"));
+        assert!(
+            !found.fields.contains_key("keep"),
+            "a None value deletes the field: {:?}",
+            found.fields.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(found.fields.len(), 1);
+        assert_eq!(found.create_time, Some(ts(10)));
+        assert_eq!(found.update_time, Some(ts(20)));
+    }
+
     async fn merge_creates_a_missing_document(store: &dyn Store, name: &str) {
         let outcome = store
-            .merge(name, vec![("k".to_string(), string_value("v"))], ts(10))
+            .merge(
+                name,
+                vec![("k".to_string(), Some(string_value("v")))],
+                ts(10),
+            )
             .await
             .expect("merge");
 
@@ -1079,7 +1133,7 @@ pub mod conformance {
                     PendingWrite::guarded(
                         Mutation::Merge {
                             name: name.to_string(),
-                            fields: vec![("second".to_string(), string_value("v"))],
+                            fields: vec![("second".to_string(), Some(string_value("v")))],
                         },
                         // Only holds if the put above is already visible.
                         Some(Precondition::Exists(true)),
