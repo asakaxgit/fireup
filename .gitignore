@@ -1,7 +1,10 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is deliberately tracked, not ignored. `fireup` ships a binary, and
+# Cargo's guidance is to commit the lock file for binaries so that a build of a
+# given commit resolves the same dependency versions every time. CI asserts the
+# lock file stays in step with Cargo.toml by passing `--locked`.
 
 # IDE
 .vscode/

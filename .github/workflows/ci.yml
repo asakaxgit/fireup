@@ -54,19 +54,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          # Keyed on Cargo.toml, not Cargo.lock: see the note on `--locked` below.
-          key: ${{ runner.os }}-ci-${{ hashFiles('Cargo.toml') }}
+          # Keyed on the lock file, so the cache is invalidated by the exact
+          # resolved versions rather than by the semver ranges in Cargo.toml.
+          key: ${{ runner.os }}-ci-${{ hashFiles('Cargo.lock') }}
 
-      # No `--locked`: `Cargo.lock` is in `.gitignore` in this repository, so
-      # there is no committed lock file to verify against and `--locked` fails
-      # before it compiles anything. Committing the lock file — which Cargo
-      # recommends for a binary crate — would make these builds reproducible
-      # and is worth doing, but it is a repo-wide decision, not a CI tweak.
+      # `--locked` on every cargo invocation. Cargo.lock is committed, so this
+      # job builds the exact dependency versions the commit was tested against,
+      # and the build fails loudly if the lock file drifts out of step with
+      # Cargo.toml instead of silently re-resolving.
       - name: Build
-        run: cargo build --all-targets
+        run: cargo build --locked --all-targets
 
       - name: Unit tests
-        run: cargo test --lib
+        run: cargo test --locked --lib
 
       # The static checks that keep the documented promises honest: the fidelity
       # matrix, the comparison document, and the README badges all have to agree
@@ -74,8 +74,8 @@ jobs:
       # directory have to stay parseable.
       - name: Docs and matrix are in sync
         run: |
-          cargo test --test fidelity_matrix_tests
-          cargo test --test workflow_yaml_tests
+          cargo test --locked --test fidelity_matrix_tests
+          cargo test --locked --test workflow_yaml_tests
 
       # Guards that assert *how* a request is served rather than what comes
       # back, so no other suite can see them fail. `local_pushdown_boundary_tests`
@@ -88,21 +88,21 @@ jobs:
       # the pushdown there costs a full collection scan per write per listener.
       - name: Data-plane boundary guards
         run: |
-          cargo test --test local_pushdown_boundary_tests
-          cargo test --test local_listen_pushdown_tests
+          cargo test --locked --test local_pushdown_boundary_tests
+          cargo test --locked --test local_listen_pushdown_tests
 
       # Each of these starts what it needs in-process and talks to it over real
       # gRPC or real HTTP/1.1.
       - name: Local data plane
         run: |
-          cargo test --test local_firestore_tests
-          cargo test --test local_firestore_listen_tests
-          cargo test --test local_datastore_tests
-          cargo test --test local_auth_tests
+          cargo test --locked --test local_firestore_tests
+          cargo test --locked --test local_firestore_listen_tests
+          cargo test --locked --test local_datastore_tests
+          cargo test --locked --test local_auth_tests
 
       - name: Export parsing and the library/CLI surface
         run: |
-          cargo test --test real_export_validation
-          cargo test --test export_fidelity_tests
-          cargo test --test library_api_tests
-          cargo test --test cli_exit_code_tests
+          cargo test --locked --test real_export_validation
+          cargo test --locked --test export_fidelity_tests
+          cargo test --locked --test library_api_tests
+          cargo test --locked --test cli_exit_code_tests
