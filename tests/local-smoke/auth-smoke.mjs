@@ -646,9 +646,54 @@ const main = async () => {
     }
   })
 
+  await check('admin importUsers() is refused cleanly (batchCreate is not served)', async () => {
+    await assert.rejects(
+      () => adminAuth.importUsers([{ uid: 'smoke-import', email: 'import@example.com' }]),
+      /not served by fireup local/,
+      'batchCreate must fail with an explanation, not a 500 or a partial import',
+    )
+
+    // A refused import must not have created anything on the way out.
+    await expectAuthCode('auth/user-not-found', () => adminAuth.getUser('smoke-import'))
+  })
+
   await check('admin createSessionCookie() is refused cleanly (session cookies are not served)', async () => {
     const idToken = await signedIn.user.getIdToken()
-    await assert.rejects(() => adminAuth.createSessionCookie(idToken, { expiresIn: 60 * 60 * 1000 }))
+    await assert.rejects(
+      () => adminAuth.createSessionCookie(idToken, { expiresIn: 60 * 60 * 1000 }),
+      /not served by fireup local/,
+      'the refusal must name the gap, not report an unknown project',
+    )
+  })
+
+  // The SDK checks above only prove the call failed. The fidelity matrix
+  // promises a *shape* — 501 with a message naming the gap — and only a direct
+  // REST call can see the status code. Both of these answered the wrong one
+  // until SAK-224: `accounts:batchCreate` fell into the wrong-method handler
+  // and said "takes POST, not POST", and `projects/{p}:createSessionCookie`
+  // parsed its custom-method colon into the project id and 404'd.
+  await check('the unimplemented admin paths answer 501 and name the gap', async () => {
+    const refusals = [
+      { path: `/v1/projects/${PROJECT_ID}/accounts:batchCreate`, names: /batch account import/ },
+      { path: `/v1/projects/${PROJECT_ID}/accounts:batchDelete`, names: /batch account deletion/ },
+      { path: `/v1/projects/${PROJECT_ID}:createSessionCookie`, names: /session cookies/ },
+      { path: `/v1/projects/${PROJECT_ID}:verifySessionCookie`, names: /session cookies/ },
+    ]
+
+    for (const { path, names } of refusals) {
+      const response = await fetch(`http://${host}/identitytoolkit.googleapis.com${path}`, {
+        method: 'POST',
+        // How the Admin SDK authenticates against an emulator.
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer owner' },
+        body: '{}',
+      })
+      const body = await response.json()
+      const message = body.error?.message ?? JSON.stringify(body)
+
+      assert.equal(response.status, 501, `${path} must answer 501, got ${response.status}: ${message}`)
+      assert.match(message, names, `${path} must name the gap it is refusing for`)
+      assert.match(message, /not served by fireup local/, `${path} must say who refused it`)
+    }
   })
 
   await deleteClientApp(clientApp)

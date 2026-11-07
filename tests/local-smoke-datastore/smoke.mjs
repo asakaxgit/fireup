@@ -131,7 +131,97 @@ if (!(counter.touched instanceof Date)) {
   throw new Error(`stored touched is ${JSON.stringify(counter.touched)}, wanted a timestamp`)
 }
 
-console.log('7. maximum stays refused')
+console.log('7. property_mask: a masked write accumulates and deletes')
+const maskedName = `masked-${Date.now()}`
+const maskedKey = datastore.key([kind, maskedName])
+
+// Seed the whole entity through the ordinary SDK.
+await datastore.save({
+  key: maskedKey,
+  data: { title: 'first', hits: 0, author: 'ada' },
+})
+
+// Two masked upserts that only ever carry `title`. Because the mask keeps the
+// write off `hits`, the increment reads the stored value instead of one the
+// client had to send — the Datastore spelling of Firestore's update_mask plus
+// update_transforms. `propertyMask` has no handwritten surface either, so this
+// drives the same generated client as the transforms above.
+for (const [round, want] of [['second', 1], ['third', 2]]) {
+  const [response] = await rawClient.commit({
+    projectId,
+    mode: 'NON_TRANSACTIONAL',
+    mutations: [
+      {
+        upsert: {
+          key: keyProto(kind, maskedName),
+          properties: { title: { stringValue: round } },
+        },
+        propertyMask: { paths: ['title'] },
+        propertyTransforms: [{ property: 'hits', increment: { integerValue: 1 } }],
+      },
+    ],
+  })
+  const reported = Number(response.mutationResults[0].transformResults[0].integerValue)
+  if (reported !== want) {
+    throw new Error(`masked increment reported ${reported}, wanted ${want}`)
+  }
+}
+
+const [masked] = await datastore.get(maskedKey)
+if (masked.title !== 'third' || masked.hits !== 2) {
+  throw new Error(`masked write left ${JSON.stringify(masked)}, wanted title=third hits=2`)
+}
+if (masked.author !== 'ada') {
+  throw new Error(`a property the mask never named changed: ${JSON.stringify(masked)}`)
+}
+
+// The other half of the proto rule: "properties referenced in the mask but not
+// in the entity are deleted". The mask names `author`, the entity omits it.
+await rawClient.commit({
+  projectId,
+  mode: 'NON_TRANSACTIONAL',
+  mutations: [
+    {
+      update: {
+        key: keyProto(kind, maskedName),
+        properties: { title: { stringValue: 'fourth' } },
+      },
+      propertyMask: { paths: ['title', 'author'] },
+    },
+  ],
+})
+
+const [afterMaskedDelete] = await datastore.get(maskedKey)
+if (afterMaskedDelete.author !== undefined) {
+  throw new Error(`masked property was not deleted: ${JSON.stringify(afterMaskedDelete)}`)
+}
+if (afterMaskedDelete.title !== 'fourth' || afterMaskedDelete.hits !== 2) {
+  throw new Error(`masked delete disturbed other properties: ${JSON.stringify(afterMaskedDelete)}`)
+}
+
+console.log('8. nested mask paths stay refused')
+const refusedMask = await rawClient
+  .commit({
+    projectId,
+    mode: 'NON_TRANSACTIONAL',
+    mutations: [
+      {
+        upsert: {
+          key: keyProto(kind, maskedName),
+          properties: { title: { stringValue: 'nope' } },
+        },
+        propertyMask: { paths: ['author.name'] },
+      },
+    ],
+  })
+  .then(() => null, (error) => error)
+if (!refusedMask || refusedMask.code !== 12) {
+  throw new Error(
+    `expected UNIMPLEMENTED (12) for a nested mask path, got ${refusedMask && refusedMask.code}`,
+  )
+}
+
+console.log('9. maximum stays refused')
 const refused = await rawClient
   .commit({
     projectId,
@@ -148,7 +238,7 @@ if (!refused || refused.code !== 12) {
   throw new Error(`expected UNIMPLEMENTED (12) for maximum, got ${refused && refused.code}`)
 }
 
-console.log('8. delete')
+console.log('10. delete')
 await datastore.delete(key)
 const [afterDelete] = await datastore.get(key)
 if (afterDelete) {

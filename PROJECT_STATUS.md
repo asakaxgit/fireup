@@ -357,13 +357,52 @@ and `proto/`, without which the image could not have compiled the generated
 stubs at all.
 
 **Still unserved** (answer `UNIMPLEMENTED` with a message naming the gap):
-realtime listeners (`Listen`, streaming `Write`), aggregation queries,
-`PartitionQuery`, field transforms, nested paths in an `update_mask`,
+the streaming `Write` RPC, aggregation queries, `PartitionQuery`,
 point-in-time reads, and security rules. The fidelity matrix in
 `docs/local/README.md` is the authoritative list.
 
 Collection group queries, query cursors, and nested field paths in filters,
-orders, projections, and read masks are served as of SAK-191.
+orders, projections, and read masks are served as of SAK-191; field transforms
+as of SAK-190; realtime listeners as of SAK-189, below.
+
+**Phase 2.1 (SAK-189, November 6 2026)** — realtime listeners:
+
+- `Listen` is served for document watches (`DocumentsTarget`) and query watches
+  (`QueryTarget`, every query shape the matrix already covers, collection group
+  queries included), which is what `onSnapshot()` in the official SDKs uses.
+- The change feed is a `Store` decorator, so it sits *below* the data plane:
+  every Firestore write RPC, a Datastore `Commit`, and `fireup local seed` all
+  reach a Firestore listener without knowing a listener exists.
+- A query target is re-evaluated per change to its collection, which is what
+  keeps `limit`/`offset`/`orderBy` honest — a write that cannot affect a limited
+  result set reports nothing.
+- An unsupported target is refused as a `TargetChange::REMOVE` carrying the
+  cause, not by failing the call, so one bad target does not take down the other
+  listeners on the same stream. `read_time` resumes are refused; resume tokens
+  are never issued, so a reconnect re-snapshots.
+- **Known limit:** the feed is in-process. With `--postgres-url`, a write by a
+  *different* process does not wake these listeners — nothing polls the table.
+
+**Verified on 2026-11-06**, rebased onto `main` at the SAK-194 merge
+(`0f54f83`) and re-run after that rebase: `cargo test --lib` (474), `--test
+local_firestore_listen_tests` (15, over the real bidirectional gRPC stream),
+`--test fidelity_matrix_tests` (5), `--test local_firestore_tests` (46),
+`--test local_datastore_tests` (11), `--test local_auth_tests` (18), `--test
+local_auth_postgres_tests` (10), `--test local_postgres_store_tests` (7),
+`--test export_fidelity_tests` (21), `--test integration_tests` (55), `--test
+postgres_import_tests` (7), `--test ddl_postgres_load_tests` (9), `--test
+cli_exit_code_tests` (9), `--test real_export_validation` (7), `--test
+deployment_tests` (5) and `--test library_api_tests` (1) — the PostgreSQL ones
+against a throwaway cluster.
+
+With the official SDKs: `scripts/conformance-local.sh` **79/79 matrix features**
+(`firestore.Listen [served]` among them) plus its auth layer 36/36;
+`scripts/smoke-local-firestore.sh` **50/50 against both stores**, including
+`onSnapshot()` on a document, on a missing document, and on a query, with
+`docChanges()` reporting `added`/`removed` as documents enter and leave the
+result set; and `scripts/smoke-local-datastore.sh` green. The Python
+conformance layer skipped — its libraries are not installed in this
+environment.
 
 **Phase L (SAK-168, November 4 2026)** — Firebase Auth / Identity Platform, in
 parallel with Phase 2 and without waiting for a Phase 2 exit:
@@ -690,6 +729,46 @@ must still answer identically both ways. Deleting the guard fails that test
 green against a throwaway PostgreSQL 18 cluster, re-run after rebasing onto the
 updated SAK-192 head. `rustfmt`/`cargo clippy --all-targets` introduce no new
 finding on the changed files, measured as a per-file delta against the base.
+
+**SAK-203 (November 6 2026)** — `Mutation.property_mask` is served on `Commit`,
+which is the half that makes SAK-198's transforms useful. A masked
+`insert`/`update`/`upsert` maps onto the store's masked-write primitive, so
+`property_mask: {paths: ["title"]}` plus `increment("hits", 1)` leaves `hits` for
+the transform to read and the counter climbs across commits — the Datastore
+spelling of Firestore's `update_mask` + `update_transforms`.
+
+- **The proto's other half needed a real store change.** "Properties referenced
+  in the mask but not in the entity are deleted", and the shared store had no
+  field deletion — the gap `docs/local/README.md` recorded as "no field deletion
+  through a mask". Rather than refuse that one case, `Mutation::Merge` now
+  carries an `Option<Value>` per path, where `None` deletes. One primitive, so
+  the Firestore `update_mask` side gets the same rule instead of a second
+  reading of the same sentence.
+- **That fixed a live Firestore bug.** `FieldValue.delete()` reaches the wire as
+  an `update_mask` path the write carries no value for, so it was silently
+  leaving the field in place. SAK-194 had pinned it as a deliberate
+  `documented-divergence` (`limits.masked-field-deletion`); it is now the served
+  row `query.masked-field-deletion`, asserted by the conformance probe and the
+  Firestore SDK smoke.
+- Refusals follow the proto line by line: a nested path (`foo.bar`) or an
+  escaped name is `UNIMPLEMENTED` as on the Firestore side; an empty path and a
+  reserved name other than `__key__` are `INVALID_ARGUMENT`; `__key__` itself is
+  accepted and ignored, since the key travels in the entity's key. A mask does
+  not weaken the operation's precondition, and on a `delete` it is ignored.
+- Verified by 5 new gRPC tests in `tests/local_datastore_tests.rs` (16 total), a
+  new masked-deletion case in the shared store contract — so **both** backends
+  assert it — and a new Firestore gRPC test plus unit test (47 and 475). New
+  steps in both SDK smokes, with Google's official client libraries: Datastore
+  10/10 **against both stores**, Firestore 51/51.
+- Nine new rows in SAK-194's conformance suite (`88/88 matrix features
+  verified`, in-memory **and** PostgreSQL), seven of them a new
+  `#### Datastore property_mask on a mutation` table in the fidelity matrix. The
+  `fidelity_matrix_tests` drift gate caught the new README rows before they had
+  probes, which is exactly what it is for.
+- Stacked on [SAK-189](/SAK/issues/SAK-189) (PR #67): both changes edit
+  `matrix.json` and `probes-firestore.mjs` in the same region, and SAK-189
+  removes the `limits.listen-sdk-retry-loop` row this layer sits next to. All
+  gates above were re-run after that rebase.
 
 ---
 
