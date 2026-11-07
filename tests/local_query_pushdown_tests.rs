@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use fireup::local::postgres_store::{PostgresStore, DOCUMENTS_TABLE};
 use fireup::local::query::{Query, DOCUMENT_NAME_FIELD};
-use fireup::local::store::{now_timestamp, Store};
+use fireup::local::store::{now_timestamp, Store, StoreError};
 use fireup::protos::google::firestore::v1::structured_query::{
     composite_filter::Operator as CompositeOperator, field_filter::Operator as FieldOperator,
     filter::FilterType, unary_filter::OperandType, unary_filter::Operator as UnaryOperator,
@@ -217,12 +217,12 @@ fn corpus(root: &str) -> Vec<Document> {
             "ken",
             vec![("city", text("Nagoya")), ("profile", text("pro"))],
         ),
-        // A timestamp outside years 0001–9999 would be the one value whose
-        // encoding is not the fixed width the byte-order comparison relies on.
-        // There is deliberately no such document here: `value_json` cannot read
-        // one of those back at all today, so it cannot reach the store, and the
-        // width guard in `postgres_filter` is a margin rather than a live case.
-        // See SAK-205, which tracks that decoding bug.
+        // A timestamp outside years 0001–9999 is the one value whose encoding
+        // is not the fixed width the byte-order comparison relies on. It is
+        // not here because the store refuses to write one (SAK-205) and
+        // `MemoryStore` shares this corpus; it is inserted as raw SQL by
+        // `seed_legacy_wide_timestamp`, which is how such a row really gets
+        // into a database.
 
         // No fields at all beyond the one: every filter and every order has to
         // leave this one out.
@@ -681,6 +681,50 @@ async fn remove_project(url: &str, project: &str) {
         .expect("delete this test's rows");
 }
 
+/// Document id of the row [`seed_legacy_wide_timestamp`] writes.
+const LEGACY_ROW_ID: &str = "mallory";
+
+/// Seconds of the timestamp that row carries: `+11476-08-15T05:20:00Z`.
+const LEGACY_ROW_SECONDS: i64 = 300_000_000_000;
+
+/// Add the one row the store can read but no longer write: a `joined` outside
+/// years 0001–9999, spelled the way a pre-SAK-205 build spelled it.
+///
+/// Inserted as raw SQL because `value_json::encode` now refuses that value —
+/// which is also its real provenance, a database an older build wrote. It is
+/// what makes `postgres_filter`'s width guard a live case instead of a
+/// margin: `+11476-…` sorts *before* `2023-…` byte-wise, so a timestamp range
+/// that has to include year 11476 silently loses this row unless the guard
+/// keeps it out of the text comparison and lets the in-process engine decide.
+async fn seed_legacy_wide_timestamp(url: &str, project: &str, root: &str) {
+    let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+        .await
+        .expect("connect to insert the legacy row");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let name = format!("{root}/people/{LEGACY_ROW_ID}");
+    let fields = r#"{
+        "city": {"stringValue": "Legacy"},
+        "joined": {"timestampValue": "+11476-08-15T05:20:00.000000000Z"}
+    }"#;
+
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {DOCUMENTS_TABLE} (
+                     name, project_id, database_id, parent, collection_id, document_id,
+                     fields, create_time_seconds, create_time_nanos,
+                     update_time_seconds, update_time_nanos
+                 ) VALUES ($1, $2, '(default)', $3, 'people', $4, $5::text::jsonb, 0, 0, 0, 0)"
+            ),
+            &[&name, &project, &root, &LEGACY_ROW_ID, &fields],
+        )
+        .await
+        .expect("insert the legacy row");
+}
+
 fn ids(documents: &[Document]) -> Vec<String> {
     documents
         .iter()
@@ -713,6 +757,10 @@ async fn pushdown_answers_every_query_exactly_as_a_full_scan_does() {
             .await
             .expect("seed a document");
     }
+    // Every query shape also has to agree in the presence of a row whose
+    // timestamp is not the canonical width, which is the case the guard in
+    // `postgres_filter::timestamp_range` exists for.
+    seed_legacy_wide_timestamp(&url, &project, &root).await;
 
     for (name, structured) in cases(&root) {
         let compiled = Query::compile(&structured).expect("the case compiles");
@@ -740,6 +788,99 @@ async fn pushdown_answers_every_query_exactly_as_a_full_scan_does() {
             pushed_results.skipped, scanned_results.skipped,
             "pushdown changed the skipped count of {name:?}"
         );
+    }
+
+    remove_project(&url, &project).await;
+}
+
+/// A row a pre-SAK-205 build wrote stays readable, and stays out of the text
+/// comparison rather than being compared wrongly.
+///
+/// Three separate things, all of which that one row used to break:
+///
+/// 1. It decodes, so scanning the collection it sits in works at all. One
+///    such row used to fail every read of the whole collection.
+/// 2. The store refuses to write the same value back, as `INVALID_ARGUMENT` —
+///    the write is where an unstorable timestamp has to fail.
+/// 3. A timestamp range that has to include it does. This is the live case
+///    for the width guard: `+11476-…` is byte-wise *below* `2023-…`, so a
+///    `>=` against 2022 would drop the row if SQL compared it as text.
+#[tokio::test]
+async fn a_row_a_pre_sak_205_build_wrote_reads_back_and_is_never_compared_as_text() {
+    let Some(url) = test_url() else { return };
+    let project = unique_project();
+    let root = format!("projects/{project}/databases/(default)/documents");
+    let store = connect(&url).await;
+
+    for document in corpus(&root) {
+        store
+            .put(document, now_timestamp())
+            .await
+            .expect("seed a document");
+    }
+    seed_legacy_wide_timestamp(&url, &project, &root).await;
+
+    // 1. The collection reads, and the value comes back exactly.
+    let scanned = store
+        .scan_collection(&root, "people")
+        .await
+        .expect("a collection holding a legacy timestamp still scans");
+    let legacy = scanned
+        .iter()
+        .find(|document| document.name.ends_with(LEGACY_ROW_ID))
+        .expect("the legacy row is in the scan")
+        .clone();
+    assert_eq!(
+        legacy.fields.get("joined"),
+        Some(&timestamp(LEGACY_ROW_SECONDS, 0)),
+        "the legacy timestamp did not survive the read"
+    );
+
+    // 2. Writing that same document back is refused, not stored.
+    let error = store
+        .put(legacy.clone(), now_timestamp())
+        .await
+        .expect_err("an out-of-range timestamp must fail the write");
+    assert!(
+        matches!(error, StoreError::InvalidDocument(_)),
+        "wrong error for an out-of-range timestamp: {error}"
+    );
+    assert_eq!(
+        tonic::Status::from(error).code(),
+        tonic::Code::InvalidArgument,
+        "an SDK has to see this as its own bad argument"
+    );
+
+    // 3. The guard keeps the row as a candidate for a range in either
+    //    direction, and the in-process engine is what decides it.
+    for (name, operator, expected) in [
+        (
+            "a range the legacy row matches",
+            FieldOperator::GreaterThanOrEqual,
+            true,
+        ),
+        (
+            "a range the legacy row misses",
+            FieldOperator::LessThan,
+            false,
+        ),
+    ] {
+        let structured =
+            query(|q| q.r#where = field_filter("joined", operator, timestamp(1_650_000_000, 0)));
+        let compiled = Query::compile(&structured).expect("compiles");
+
+        let candidates = store
+            .scan_collection_filtered(&root, compiled.collection_id(), compiled.prefilter())
+            .await
+            .expect("pushed-down scan");
+        assert!(
+            ids(&candidates).contains(&LEGACY_ROW_ID.to_string()),
+            "{name}: the width guard let SQL compare a wide timestamp as text"
+        );
+
+        let matched =
+            ids(&compiled.evaluate(candidates).documents).contains(&LEGACY_ROW_ID.to_string());
+        assert_eq!(matched, expected, "{name}: wrong answer for the legacy row");
     }
 
     remove_project(&url, &project).await;

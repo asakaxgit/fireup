@@ -685,13 +685,50 @@ owns its store (the in-memory unit test); the shared contract asserts the same
 property scoped to its own collection, which is race-free and still exact.
 0 failures in 30 runs after the fix.
 
-**Found, not fixed (tracked as SAK-205):** `value_json` cannot decode its own
-encoding of a timestamp outside years 0001–9999 — it writes `+11476-08-15T…`
-and `decode_timestamp` rejects it. A client that stores such a timestamp gets a
-successful write and then an unreadable document, and the failure spreads to
-every collection scan that includes it. Unrelated to queries; surfaced while
-building the pushdown corpus. `MemoryStore` is unaffected, since it does not
-encode.
+**Found, not fixed here (fixed in SAK-205, below):** `value_json` could not
+decode its own encoding of a timestamp outside years 0001–9999 — it wrote
+`+11476-08-15T…` and `decode_timestamp` rejected it. A client that stored such
+a timestamp got a successful write and then an unreadable document, and the
+failure spread to every collection scan that included it. Unrelated to queries;
+surfaced while building the pushdown corpus.
+
+**SAK-205 (November 6 2026)** — that timestamp can no longer be written, and
+the rows that already carry one can still be read.
+
+- `value_json::encode` refuses a timestamp outside years 0001–9999 — the range
+  `google.protobuf.Timestamp` and Firestore are both specified for — so the
+  **write** fails with `INVALID_ARGUMENT` instead of succeeding and corrupting
+  every later read. Choosing this over widening `decode` keeps two properties
+  the rest of the module rests on: the payload is the REST encoding (a signed
+  five-digit year is not RFC 3339, and is not something the real API emits),
+  and every stored timestamp is a fixed 30 bytes, which is what lets the
+  pushdown compare them as text at all.
+- `decode` still reads the old spelling back, exactly. Refusing it would leave
+  a database that already holds one permanently unqueryable, collection-wide.
+  This is the one place the read set is deliberately wider than the write set,
+  and it is wider by exactly the payloads this module used to produce.
+- The check is shared. `store::encode_storable_fields` is now the single
+  pre-write encode both backends use, so `MemoryStore` — which keeps `Value`s
+  as they arrive and has no encode of its own to fail — cannot accept a
+  document `PostgresStore` refuses. That divergence would otherwise have
+  appeared only when somebody added `--postgres-url` to a working project. The
+  assertion lives in `store::conformance`, so it runs against both.
+
+**Verified on 2026-11-06:** the round-trip corpus now covers both ends of the
+range; eight out-of-range timestamps (year 11476, either side of each bound,
+year 0000, both `i64` extremes, and two illegal `nanos`) are each asserted to
+fail the write with a message that names the range; three legacy payloads are
+asserted to decode to the exact instant and then to be refused on re-encode.
+The width guard in `postgres_filter` finally has a live case:
+`tests/local_query_pushdown_tests.rs` inserts a `+11476-…` row with raw SQL —
+which is how such a row really gets into a database — and all 49 query shapes
+must still answer identically both ways. Deleting the guard fails that test
+*and* the differential suite, which reports the dropped row by name
+(`["Zoe", "bob"]` versus `["Zoe", "bob", "mallory"]`). `cargo test --lib` 489,
+`--test local_query_pushdown_tests` 6; `cargo test --lib --bins --tests` fully
+green against a throwaway PostgreSQL 18 cluster, re-run after rebasing onto the
+updated SAK-192 head. `rustfmt`/`cargo clippy --all-targets` introduce no new
+finding on the changed files, measured as a per-file delta against the base.
 
 **SAK-203 (November 6 2026)** — `Mutation.property_mask` is served on `Commit`,
 which is the half that makes SAK-198's transforms useful. A masked
