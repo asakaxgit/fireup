@@ -53,6 +53,42 @@
 //!    line went away, and nothing in CI would go red the day someone adds
 //!    `actions/cache` for `~/.cargo` or `--frozen` for reproducibility either.
 //!
+//! 5. **`[bans] wildcards` stays at `"deny"`.** A `*` version requirement is a
+//!    dependency on whatever cargo resolves at build time, which is the thing
+//!    `Cargo.lock` exists to stop, and it is how a major version nobody read
+//!    arrives on an unrelated `cargo update`. Measured on this tree (SAK-230):
+//!    with `tonic = "*"` in `Cargo.toml`, the shipped config exits 2 with
+//!    `error[wildcard]` and `bans FAILED`; the same tree under
+//!    `wildcards = "allow"` exits 0, so it is the setting and not the edit that
+//!    makes it red. `Cargo.lock` does not change in either arm — `*` is
+//!    satisfied by the version already pinned — so the red is not `--locked`
+//!    complaining.
+//!
+//!    Deleting the line is the same as allowing it, only quieter: cargo-deny's
+//!    default is `allow`, measured as exit 0 and `bans ok` with the wildcard
+//!    still sitting in `Cargo.toml`.
+//!
+//! 6. **`[sources]` keeps every crate on crates.io.** `unknown-registry` and
+//!    `unknown-git` are both `"deny"`, and `allow-registry` names crates.io
+//!    alone. Together they are what stops an unreviewed, unpinned third-party
+//!    repository from entering the build. Measured on this tree (SAK-230) with
+//!    a local `file://` git dependency added: the shipped config exits 8 with
+//!    `error[source-not-allowed]` and `sources FAILED`, and the same tree under
+//!    `unknown-git = "allow"` exits 0.
+//!
+//!    Deleting either line is worse than it looks. The default is `warn`, so
+//!    the same git dependency that fails the gate instead prints
+//!    `warning[source-not-allowed]`, the check reports `sources ok`, and the
+//!    step exits 0.
+//!
+//!    `allow-registry` is the part cargo-deny cannot check at all. A second
+//!    registry added to that list exits 0 with only
+//!    `warning[unmatched-source]` ("allowed source was not encountered") while
+//!    nothing uses it — and the day a crate does come from it, there is no
+//!    diagnostic left to print. This test is the only thing that can report
+//!    that edit, which is the same argument as (3) and (4): the setting is the
+//!    tool's own input.
+//!
 //! Reading `Cargo.lock` as text rather than running `cargo metadata` is
 //! deliberate: it keeps the test free of a toml dependency and of a subprocess,
 //! and the two fields it wants (`name`, `version`) are the first two lines of
@@ -372,6 +408,175 @@ fn check_unused_ignored_advisory_is_deny(deny: &str) -> Result<(), String> {
     }
 }
 
+/// The live value of a `key = value` line in `deny.toml`, comments stripped.
+///
+/// Last occurrence wins, which is how a TOML parser treats a redefinition, and
+/// comments are stripped before matching for the reason the three checks above
+/// strip them: the prose in `deny.toml` quotes the settings it explains, and
+/// that has to stay writable.
+///
+/// Flat matching with no notion of tables is enough — every key this file
+/// checks is unique across cargo-deny's whole schema. (The three checks above
+/// predate this helper and inline the same loop. They are left as they are so
+/// this change is only the two guards it adds; folding them in is a tidy-up for
+/// once the layers below this one have landed.)
+fn setting(deny: &str, key: &str) -> Option<String> {
+    let mut found = None;
+    for line in deny.lines() {
+        let code = line.split('#').next().unwrap_or("");
+        if let Some((candidate, value)) = code.split_once('=') {
+            if candidate.trim() == key {
+                found = Some(value.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    found
+}
+
+/// The entries of a `key = [...]` array in `deny.toml`, comments stripped.
+///
+/// Reads across newlines until the brackets balance. Matching a single line
+/// would be enough for the file as it ships and wrong for the edit this
+/// guards: a second registry would most naturally arrive as a reformatted
+/// multi-line array, and a reader that only looked at the `key = [` line would
+/// find no entries on it and pass.
+fn setting_array(deny: &str, key: &str) -> Option<Vec<String>> {
+    let mut entries = None;
+    let mut body: Option<String> = None;
+    for line in deny.lines() {
+        let code = line.split('#').next().unwrap_or("");
+        if let Some(open) = body.as_mut() {
+            open.push_str(code);
+        } else if let Some((candidate, value)) = code.split_once('=') {
+            if candidate.trim() == key && value.trim_start().starts_with('[') {
+                body = Some(value.to_string());
+            }
+        }
+
+        let Some(collected) = body.as_deref() else {
+            continue;
+        };
+        if collected.matches('[').count() != collected.matches(']').count() {
+            continue;
+        }
+        let inner = collected
+            .trim()
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .unwrap_or_default();
+        entries = Some(
+            inner
+                .split(',')
+                .map(|entry| entry.trim().trim_matches('"').to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect(),
+        );
+        body = None;
+    }
+    entries
+}
+
+/// `Err` unless `[bans] wildcards` is set to `"deny"`.
+fn check_wildcards_are_denied(deny: &str) -> Result<(), String> {
+    match setting(deny, "wildcards").as_deref() {
+        Some("deny") => Ok(()),
+        Some(level) => Err(format!(
+            "deny.toml sets `[bans] wildcards = \"{level}\"`, not \"deny\". A `*` version \
+             requirement resolves to whatever is newest at build time, so a major version \
+             nobody reviewed arrives on an unrelated `cargo update`. Measured on this tree \
+             (SAK-230): with `tonic = \"*\"` in Cargo.toml, \"deny\" exits 2 with \
+             `error[wildcard]` and `bans FAILED`, while the same tree at this value exits 0."
+        )),
+        None => Err(
+            "deny.toml has no `[bans] wildcards` setting, which is the same as allowing \
+                     wildcards and quieter: cargo-deny's default is `allow`. Measured on this \
+                     tree (SAK-230) with `tonic = \"*\"` in Cargo.toml and this line deleted, \
+                     `cargo deny check bans` printed no wildcard diagnostic at all and exited \
+                     0. Set it to \"deny\"."
+                .into(),
+        ),
+    }
+}
+
+/// The spellings of the crates.io index that count as crates.io.
+///
+/// `Cargo.lock` in this repository records the git form, which is what
+/// `allow-registry` carries. The sparse form is what newer cargo writes for the
+/// same registry, so both are accepted rather than failing a cosmetic change;
+/// anything else is a different registry.
+const CRATES_IO_INDEX: &[&str] = &[
+    "https://github.com/rust-lang/crates.io-index",
+    "sparse+https://index.crates.io/",
+];
+
+/// `Err` unless `[sources]` confines every dependency to crates.io.
+///
+/// Three facts, checked together because they only mean anything together and
+/// weakening any one of them is enough: `unknown-registry` and `unknown-git`
+/// decide whether a source nobody listed is an error, and `allow-registry`
+/// decides what counts as listed.
+fn check_sources_are_crates_io_only(deny: &str) -> Result<(), String> {
+    for key in ["unknown-registry", "unknown-git"] {
+        match setting(deny, key).as_deref() {
+            Some("deny") => {}
+            Some(level) => {
+                return Err(format!(
+                    "deny.toml sets `[sources] {key} = \"{level}\"`, not \"deny\". Anything but \
+                     \"deny\" lets a crate come from a source nobody listed, which is an \
+                     unreviewed and unpinned third party in the build. Measured on this tree \
+                     (SAK-230) with a local git dependency added: \"deny\" exits 8 with \
+                     `error[source-not-allowed]` and `sources FAILED`, and the same tree at \
+                     `unknown-git = \"allow\"` exits 0."
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "deny.toml has no `[sources] {key}`. That is as permissive as \"allow\" and \
+                     much quieter: cargo-deny's default is `warn`, so the dependency that \
+                     should fail the gate instead prints `warning[source-not-allowed]`, the \
+                     check reports `sources ok`, and the step exits 0 — measured on this tree \
+                     (SAK-230) with a local git dependency added. Set it to \"deny\"."
+                ));
+            }
+        }
+    }
+
+    let Some(registries) = setting_array(deny, "allow-registry") else {
+        return Err(
+            "deny.toml has no `[sources] allow-registry`. This one is not a hole today — \
+                     cargo-deny's default already allows crates.io, measured on this tree \
+                     (SAK-230) as `sources ok` and exit 0 with the line deleted. It is pinned \
+                     because that default is cargo-deny's to change and the version is bumped \
+                     by hand in ci.yml, so the registry Fireup accepts belongs in Fireup's own \
+                     config. Set it to [\"https://github.com/rust-lang/crates.io-index\"]."
+                .into(),
+        );
+    };
+
+    if registries.is_empty() {
+        return Err(
+            "deny.toml sets `[sources] allow-registry` to an empty list, so no registry is \
+                     allowed at all and nothing resolves. cargo-deny reports that loudly by \
+                     itself, but passing it here would be a vacuous green."
+                .into(),
+        );
+    }
+
+    for registry in &registries {
+        if !CRATES_IO_INDEX.contains(&registry.as_str()) {
+            return Err(format!(
+                "deny.toml allows the registry `{registry}`, which is not crates.io. Fireup \
+                 takes dependencies from crates.io only. This is the one fact in this file \
+                 that cargo-deny cannot report for itself: measured on this tree (SAK-230), a \
+                 second entry in `allow-registry` exits 0 with only \
+                 `warning[unmatched-source]` while nothing uses it, and once a crate does come \
+                 from it there is no diagnostic at all."
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -427,6 +632,20 @@ fn deny_toml_refuses_an_advisory_database_older_than_a_week() {
 #[test]
 fn deny_toml_fails_on_an_ignore_entry_that_matches_no_advisory() {
     if let Err(reason) = check_unused_ignored_advisory_is_deny(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_refuses_a_wildcard_dependency() {
+    if let Err(reason) = check_wildcards_are_denied(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_allows_crates_io_as_the_only_source() {
+    if let Err(reason) = check_sources_are_crates_io_only(&repo_file("deny.toml")) {
         panic!("{reason}");
     }
 }
@@ -756,5 +975,275 @@ yanked = \"deny\"
 unused-ignored-advisory = \"warn\"
 ";
         assert!(check_unused_ignored_advisory_is_deny(deny).is_err());
+    }
+
+    #[test]
+    fn the_wildcards_level_the_repository_ships_passes() {
+        assert!(check_wildcards_are_denied("wildcards = \"deny\"\n").is_ok());
+    }
+
+    /// The regression itself. Measured on the stack tip: with `tonic = "*"` in
+    /// `Cargo.toml`, `"deny"` exits 2 with `error[wildcard]` and this value
+    /// exits 0 on the identical tree.
+    #[test]
+    fn allowing_wildcard_dependencies_fails() {
+        let error =
+            check_wildcards_are_denied("wildcards = \"allow\"\n").expect_err("\"allow\" must fail");
+        assert!(error.contains("error[wildcard]"), "{error}");
+    }
+
+    /// `"warn"` is the third level cargo-deny accepts: the diagnostic is still
+    /// printed, and the check still exits 0.
+    #[test]
+    fn warning_on_a_wildcard_dependency_fails() {
+        assert!(check_wildcards_are_denied("wildcards = \"warn\"\n").is_err());
+    }
+
+    /// Deleting the line is the quiet version, and the one a tidy-up would
+    /// produce: cargo-deny's default is `allow`, so the file then reads as if
+    /// wildcards were never considered.
+    #[test]
+    fn omitting_the_wildcards_setting_fails() {
+        let deny = "[bans]\nmultiple-versions = \"warn\"\ndeny = []\n";
+        let error = check_wildcards_are_denied(deny).expect_err("a missing setting must fail");
+        assert!(error.contains("default is `allow`"), "{error}");
+    }
+
+    /// `deny.toml` is mostly comments, so a naive `contains` finds the prose
+    /// rather than the setting. Neither direction may be confused.
+    #[test]
+    fn the_comment_about_wildcards_is_not_read_as_the_setting() {
+        let deny = "\
+# `wildcards = \"deny\"` is what stops a `*` requirement reaching the lock file.
+multiple-versions = \"warn\"
+";
+        assert!(check_wildcards_are_denied(deny).is_err());
+
+        // And a commented-out good value must not rescue a live weakened one.
+        let deny = "\
+# wildcards = \"deny\"
+wildcards = \"allow\"
+";
+        assert!(check_wildcards_are_denied(deny).is_err());
+    }
+
+    /// `[sources]` as the repository ships it.
+    const SOURCES: &str = r#"
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+"#;
+
+    #[test]
+    fn the_sources_policy_the_repository_ships_passes() {
+        assert!(check_sources_are_crates_io_only(SOURCES).is_ok());
+    }
+
+    /// The regression for the git half. Measured on the stack tip with a local
+    /// `file://` git dependency added: `"deny"` exits 8 with
+    /// `error[source-not-allowed]`, this value exits 0 on the identical tree.
+    #[test]
+    fn allowing_an_unknown_git_source_fails() {
+        let deny = SOURCES.replace("unknown-git = \"deny\"", "unknown-git = \"allow\"");
+        let error =
+            check_sources_are_crates_io_only(&deny).expect_err("an allowed git source must fail");
+        assert!(error.contains("unknown-git"), "{error}");
+    }
+
+    #[test]
+    fn allowing_an_unknown_registry_fails() {
+        let deny = SOURCES.replace(
+            "unknown-registry = \"deny\"",
+            "unknown-registry = \"allow\"",
+        );
+        let error = check_sources_are_crates_io_only(&deny)
+            .expect_err("an allowed unknown registry must fail");
+        assert!(error.contains("unknown-registry"), "{error}");
+    }
+
+    /// `"warn"` is the cargo-deny default for both keys, which is why deleting
+    /// a line and weakening it to `"warn"` are the same regression: the
+    /// dependency is reported and the check still exits 0.
+    #[test]
+    fn warning_on_an_unlisted_source_fails() {
+        for key in ["unknown-registry", "unknown-git"] {
+            let deny = SOURCES.replace(&format!("{key} = \"deny\""), &format!("{key} = \"warn\""));
+            assert!(
+                check_sources_are_crates_io_only(&deny).is_err(),
+                "`{key} = \"warn\"` must fail"
+            );
+        }
+    }
+
+    /// Deleting either line, which is the quiet form of the same thing.
+    #[test]
+    fn omitting_an_unlisted_source_setting_fails() {
+        for key in ["unknown-registry", "unknown-git"] {
+            let deny = SOURCES.replace(&format!("{key} = \"deny\"\n"), "");
+            let error =
+                check_sources_are_crates_io_only(&deny).expect_err("a missing setting must fail");
+            assert!(error.contains("exits 0"), "{error}");
+        }
+    }
+
+    /// The regression cargo-deny itself cannot report: a second registry in the
+    /// allow list is exit 0 with only `warning[unmatched-source]`.
+    #[test]
+    fn a_second_registry_in_the_allow_list_fails() {
+        let deny = SOURCES.replace(
+            r#"allow-registry = ["https://github.com/rust-lang/crates.io-index"]"#,
+            r#"allow-registry = ["https://github.com/rust-lang/crates.io-index", "https://example.invalid/index"]"#,
+        );
+        let error =
+            check_sources_are_crates_io_only(&deny).expect_err("a second registry must fail");
+        assert!(error.contains("https://example.invalid/index"), "{error}");
+    }
+
+    /// Replacing crates.io outright, rather than adding alongside it.
+    #[test]
+    fn a_substituted_registry_fails() {
+        let deny = SOURCES.replace(
+            "https://github.com/rust-lang/crates.io-index",
+            "https://example.invalid/index",
+        );
+        assert!(check_sources_are_crates_io_only(&deny).is_err());
+    }
+
+    /// The multi-line form of the same edit. This is the shape a second
+    /// registry would most likely arrive in, and the shape a single-line reader
+    /// would pass over without seeing any entry at all.
+    #[test]
+    fn a_multi_line_allow_registry_is_read_across_lines() {
+        let good = r#"
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = [
+  "https://github.com/rust-lang/crates.io-index", # crates.io
+]
+"#;
+        assert!(check_sources_are_crates_io_only(good).is_ok());
+
+        let widened = r#"
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = [
+  "https://github.com/rust-lang/crates.io-index",
+  "https://example.invalid/index",
+]
+"#;
+        let error = check_sources_are_crates_io_only(widened)
+            .expect_err("a multi-line second registry must fail");
+        assert!(error.contains("https://example.invalid/index"), "{error}");
+    }
+
+    /// Not a hole on its own — cargo-deny allows crates.io by default — but the
+    /// default is the tool's to change, so the list is pinned here.
+    #[test]
+    fn omitting_the_allow_registry_list_fails() {
+        let deny = SOURCES.replace(
+            r#"allow-registry = ["https://github.com/rust-lang/crates.io-index"]"#,
+            "",
+        );
+        let error = check_sources_are_crates_io_only(&deny).expect_err("a missing list must fail");
+        assert!(error.contains("not a hole today"), "{error}");
+    }
+
+    /// An empty list breaks the build loudly rather than quietly, so it is not
+    /// the regression this guards — but reporting `Ok` for it would be a
+    /// vacuous pass, which is worse than a duplicated complaint.
+    #[test]
+    fn an_empty_allow_registry_fails_rather_than_passing_vacuously() {
+        let deny = SOURCES.replace(r#"["https://github.com/rust-lang/crates.io-index"]"#, "[]");
+        let error = check_sources_are_crates_io_only(&deny).expect_err("an empty list must fail");
+        assert!(error.contains("vacuous"), "{error}");
+    }
+
+    /// The sparse protocol is the same registry under a different spelling, so
+    /// it must not be reported as a foreign one.
+    #[test]
+    fn the_sparse_spelling_of_crates_io_passes() {
+        let deny = SOURCES.replace(
+            "https://github.com/rust-lang/crates.io-index",
+            "sparse+https://index.crates.io/",
+        );
+        assert!(check_sources_are_crates_io_only(&deny).is_ok());
+    }
+
+    /// The `[sources]` prose in `deny.toml` is three lines of comment above
+    /// three lines of config, and names both settings while explaining them.
+    #[test]
+    fn the_comment_about_the_sources_policy_is_not_read_as_the_policy() {
+        let deny = r#"
+# Everything must come from crates.io: `unknown-registry = "deny"` and
+# `unknown-git = "deny"`, with `allow-registry` naming crates.io alone.
+multiple-versions = "warn"
+"#;
+        assert!(check_sources_are_crates_io_only(deny).is_err());
+
+        // A commented-out good value must not rescue a live weakened one.
+        let deny = r#"
+unknown-registry = "deny"
+# unknown-git = "deny"
+unknown-git = "allow"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+"#;
+        assert!(check_sources_are_crates_io_only(deny).is_err());
+
+        // Nor may a commented-out registry list rescue a widened live one, or
+        // count as the list when the live one is gone.
+        let deny = r#"
+unknown-registry = "deny"
+unknown-git = "deny"
+# allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-registry = ["https://example.invalid/index"]
+"#;
+        assert!(check_sources_are_crates_io_only(deny).is_err());
+
+        let deny = r#"
+unknown-registry = "deny"
+unknown-git = "deny"
+# allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+"#;
+        let error = check_sources_are_crates_io_only(deny)
+            .expect_err("a commented-out list is not the list");
+        assert!(error.contains("not a hole today"), "{error}");
+    }
+
+    /// A commented-out multi-line array must not be read as the live one
+    /// either — the bracket-balancing reader is the part at risk here.
+    #[test]
+    fn a_commented_out_multi_line_allow_registry_is_not_the_list() {
+        let deny = r#"
+unknown-registry = "deny"
+unknown-git = "deny"
+# allow-registry = [
+#   "https://example.invalid/index",
+# ]
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+"#;
+        assert!(check_sources_are_crates_io_only(deny).is_ok());
+    }
+
+    #[test]
+    fn the_array_reader_reads_the_shapes_it_claims_to() {
+        assert_eq!(
+            setting_array(r#"allow-registry = ["a", "b"]"#, "allow-registry"),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            setting_array(
+                "allow-registry = [\n  \"a\",\n  \"b\",\n]\n",
+                "allow-registry"
+            ),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            setting_array("allow-registry = []", "allow-registry"),
+            Some(vec![])
+        );
+        assert_eq!(setting_array("deny = []", "allow-registry"), None);
+        // A plain scalar is not an array, and must not be reported as an empty
+        // one — that would turn a typo into a silent pass.
+        assert_eq!(setting_array(r#"wildcards = "deny""#, "wildcards"), None);
     }
 }
