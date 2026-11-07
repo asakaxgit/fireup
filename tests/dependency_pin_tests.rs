@@ -2068,6 +2068,19 @@ struct DenyStep {
     /// deliberately does not try to tell a positional check name from a flag's
     /// value, because it does not have to: see `check_every_deny_check_runs`.
     arguments: Vec<String>,
+    /// The words *before* the `check` subcommand, same cutting rules. Includes
+    /// the binary name and `--locked`.
+    ///
+    /// A separate field because cargo-deny's command line has two halves and
+    /// they hold different things. `-A`/`-W`/`-D` are `check`'s own options and
+    /// are only accepted after it; the options that redirect *what* gets
+    /// checked — `--config`, `--metadata-path`, `--target`, `--exclude`,
+    /// `--exclude-dev` — are top-level and are only accepted before it.
+    /// Measured on this tree (SAK-248): each of those six in the post-`check`
+    /// position is `unexpected argument`, exit 2, nothing checked; each in the
+    /// pre-`check` position runs. So a guard reading `arguments` alone cannot
+    /// see any of them, which is exactly the state this file was in.
+    options: Vec<String>,
 }
 
 /// The `deny` job's `cargo-deny … check` command, read out of `ci.yml`.
@@ -2216,8 +2229,73 @@ fn deny_step_checks(ci: &str) -> Result<DenyStep, String> {
             .iter()
             .map(|word| word.to_string())
             .collect(),
+        options: words[..check_at]
+            .iter()
+            .map(|word| word.to_string())
+            .collect(),
         command,
     })
+}
+
+/// The top-level options that change what the gate looks at, rather than how
+/// loudly it complains about what it found.
+///
+/// `(short, long)`. `None` where cargo-deny gives no short form — note in
+/// particular that `-c` is **`--color`**, measured, so a guard that treated it
+/// as short for `--config` would redden a harmless colour flag.
+const REDIRECTING_OPTIONS: &[(Option<&str>, &str)] = &[
+    // Replaces the policy file outright. Every one of this file's `deny.toml`
+    // assertions then describes a file cargo-deny does not read.
+    (None, "--config"),
+    // Supplies the crate graph from a file, so `cargo metadata` never runs —
+    // which also makes `--locked` beside it inert.
+    (None, "--metadata-path"),
+    // cargo-deny's own help: "This option overrides the top-level `targets = []`
+    // configuration value" — the key `check_graph_covers_every_target` (SAK-235)
+    // asserts is absent from `deny.toml`. It is absent. This says it anyway.
+    (Some("-t"), "--target"),
+    // The CLI twin of `[graph] exclude`.
+    (None, "--exclude"),
+    // The CLI twin of `[graph] exclude-dev` — the kill switch that
+    // `include-dev`'s guard (SAK-234) needs its second assertion for.
+    (None, "--exclude-dev"),
+];
+
+/// The redirecting options present in the gate command, in the order found.
+///
+/// Matching is deliberately strict — exactly the flag, or the flag with `=`
+/// glued to a value — and never a bare `starts_with`. Three measured reasons,
+/// all on this tree:
+///
+/// * `--exclude-unpublished` is a prefix match for `--exclude` and is **not** a
+///   hole: on a tree with a rejected licence it stays exit 5. A prefix reader
+///   would redden it.
+/// * `--all-features`, `--no-default-features`, `--workspace`, `--frozen` and
+///   `--offline` all stay exit 5 on that same tree. None of them subtract.
+/// * `--manifest-path` stays exit 4: it moves where `deny.toml` is looked up
+///   too, so cargo-deny logs `unable to find a config path, falling back to
+///   default config` and the default config allows no licence at all. It is
+///   loud, not quiet, so it is not guarded here.
+fn redirecting_options(step: &DenyStep) -> Vec<String> {
+    let mut found = Vec::new();
+    for word in &step.options {
+        let hit = REDIRECTING_OPTIONS.iter().find(|(short, long)| {
+            if word == long || word.starts_with(&format!("{long}=")) {
+                return true;
+            }
+            match short {
+                // `-t value` and `-tvalue` are both accepted (measured).
+                Some(short) => {
+                    word == short || (word.starts_with(short) && word.len() > short.len())
+                }
+                None => false,
+            }
+        });
+        if let Some((_, long)) = hit {
+            found.push((*long).to_string());
+        }
+    }
+    found
 }
 
 /// `Ok` if the `deny` job's command runs every check `deny.toml` configures,
@@ -2414,6 +2492,67 @@ fn check_no_policy_is_silenced(step: &DenyStep) -> Result<(), String> {
          it — not in the invocation, where cargo-deny prints `ok` and says nothing. \
          `-D`/`--deny` is the strict direction and passes this guard.",
         silenced.join(", "),
+        step.command
+    ))
+}
+
+/// `Ok` if the gate command does not redirect what cargo-deny looks at.
+///
+/// `check_no_policy_is_silenced` above reads the half of the command line after
+/// `check` and asks how loudly a finding is reported. This reads the half
+/// before it and asks whether the finding is ever produced. The two sets of
+/// flags do not overlap and neither position accepts the other's (measured,
+/// SAK-248): `-A rejected` after `check` takes a red tree to exit 0, before
+/// `check` it is `unexpected argument`/exit 2; the five options here are the
+/// mirror image.
+///
+/// Measured on this tree, one tree per option and an independent control for
+/// each, so that no option borrows another's evidence. The red baseline is
+/// `smartstring 1.0.1`, which is both MPL-2.0 (not in `allow`) and
+/// `unmaintained` — so the shipped command reports two findings and exits 5,
+/// and a hole has to hide both:
+///
+/// | option | hole | control |
+/// |---|---|---|
+/// | `--config <other.toml>` | `"MIT"` dropped from `allow`: exit 4/48 errors → **exit 0** | the same flag at a file that *also* lacks MIT: still exit 4 |
+/// | `--metadata-path <clean.json>` | **exit 0** | the same flag at the *bad* tree's metadata: still exit 5 |
+/// | `--target x86_64-unknown-linux-gnu` | windows-only dep: **exit 0** | `--target x86_64-pc-windows-msvc`: still exit 5 |
+/// | `--exclude-dev` | dev-only dep: **exit 0** | the same flag with the dep non-dev: still exit 5 |
+/// | `--exclude smartstring` | **exit 0** | `--exclude tokio-test`: still exit 5 |
+///
+/// The controls are the point. Each one keeps a *different* thing constant, so
+/// the green is the named file/triple/crate and not the mere presence of a
+/// flag — the correction this file's own history asked for when one error
+/// template was spreading one key's measurement across several keys (#88).
+///
+/// `--target` is the sharpest of the five: with no `targets` key in `deny.toml`
+/// at all, this flag drops the evaluated set from 217 crates to 173 — `cc`,
+/// `shlex`, `bumpalo`, every `windows-*`, every `objc2-*`, `wasi`, `r-efi` —
+/// and `check_graph_covers_every_target` passes throughout, because the key it
+/// reads really is absent. The policy is in the file; the decision is on the
+/// command line.
+fn check_nothing_redirects_what_is_checked(step: &DenyStep) -> Result<(), String> {
+    let redirecting = redirecting_options(step);
+    if redirecting.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the `{DENY_STEP}` step in ci.yml passes {} to cargo-deny: `{}`. That does not \
+         weaken a policy, it changes which crates the policy is applied to — or, for \
+         `--config` and `--metadata-path`, replaces the policy file or the crate graph \
+         wholesale. Every `deny.toml` assertion in this file keeps passing either way, \
+         because every one of them reads the file in the repository rather than the one \
+         cargo-deny was pointed at. Measured (SAK-248) against a tree carrying \
+         `smartstring 1.0.1` — MPL-2.0 and unmaintained, two findings, exit 5: each of \
+         these five options takes that to exit 0 with `advisories ok, bans ok, licenses \
+         ok, sources ok`, and in each case naming a different file, triple or crate \
+         leaves it red. If the graph genuinely has to be narrowed, narrow it in \
+         `deny.toml`'s `[graph]`, where the other guards here can see it — and expect \
+         `check_graph_covers_every_target` to have an opinion, which is the point. \
+         Options that do not subtract pass this guard: `--all-features`, \
+         `--no-default-features`, `--workspace`, `--exclude-unpublished`, `--frozen`, \
+         `--offline`, `--locked`, and `-c`/`--color`, all measured on the same red tree.",
+        redirecting.join(", "),
         step.command
     ))
 }
@@ -3073,6 +3212,17 @@ fn the_deny_jobs_command_silences_no_diagnostic() {
         Err(reason) => panic!("{reason}"),
     };
     if let Err(reason) = check_no_policy_is_silenced(&step) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn the_deny_jobs_command_redirects_nothing() {
+    let step = match deny_step_checks(&repo_file(".github/workflows/ci.yml")) {
+        Ok(step) => step,
+        Err(reason) => panic!("{reason}"),
+    };
+    if let Err(reason) = check_nothing_redirects_what_is_checked(&step) {
         panic!("{reason}");
     }
 }
@@ -5851,6 +6001,89 @@ include-build = false
                 "`{command}` does not lower any diagnostic's severity and must not be \
                  reported: {:?}",
                 silenced_diagnostics(&step)
+            );
+        }
+    }
+
+    /// Every spelling of the five redirecting options, each measured to take a
+    /// red tree to exit 0 before being listed.
+    ///
+    /// `-t` has two accepted shapes and each long form has two, all measured on
+    /// cargo-deny 0.20.2. A guard that caught one spelling would leave the
+    /// others open, which is the counting mistake SAK-247 had to avoid for
+    /// `-A`/`-W`.
+    #[test]
+    fn redirecting_what_the_gate_checks_fails() {
+        for (flag, expected) in [
+            ("--config other.toml", "--config"),
+            ("--config=other.toml", "--config"),
+            ("--metadata-path graph.json", "--metadata-path"),
+            ("--metadata-path=graph.json", "--metadata-path"),
+            ("--target x86_64-unknown-linux-gnu", "--target"),
+            ("--target=x86_64-unknown-linux-gnu", "--target"),
+            ("-t x86_64-unknown-linux-gnu", "--target"),
+            ("-tx86_64-unknown-linux-gnu", "--target"),
+            ("--exclude smartstring", "--exclude"),
+            ("--exclude=smartstring", "--exclude"),
+            ("--exclude-dev", "--exclude-dev"),
+        ] {
+            let step = deny_step_checks(&deny_job_with(&format!(
+                "cargo-deny --locked {flag} check \\\n  -D advisory-not-detected \\\n  \
+                 advisories licenses bans sources"
+            )))
+            .expect("readable");
+            let Err(error) = check_nothing_redirects_what_is_checked(&step) else {
+                panic!("`{flag}` changes what the gate checks and must be reported");
+            };
+            assert!(error.contains(expected), "`{flag}`: {error}");
+        }
+    }
+
+    /// The arms that keep this guard off a tree that did not narrow anything.
+    ///
+    /// Two groups, and both are load-bearing. The first is the options measured
+    /// on the red tree to leave it red — if any of these were reported the
+    /// guard would be reddening a gate for doing nothing wrong, and in
+    /// `--exclude-unpublished`'s case for an option that is a literal prefix
+    /// match of one that *is* a hole. The second is the strict-prefix and
+    /// short-flag arms: `-c` is `--color`, not `--config`, and
+    /// `--targets-are-fine` is not `--target`. Both would be caught by a bare
+    /// `starts_with`, and neither narrows anything.
+    #[test]
+    fn leaving_the_graph_and_the_policy_file_alone_passes() {
+        for command in [
+            // The shipped command.
+            SHIPPED_DENY_COMMAND,
+            // Measured on the red tree as still exit 4 or 5 — none subtract.
+            "cargo-deny --locked --all-features check advisories licenses bans sources",
+            "cargo-deny --locked --no-default-features check advisories licenses bans sources",
+            "cargo-deny --locked --workspace check advisories licenses bans sources",
+            "cargo-deny --locked --exclude-unpublished check advisories licenses bans sources",
+            "cargo-deny --frozen check advisories licenses bans sources",
+            "cargo-deny --locked --offline check advisories licenses bans sources",
+            // `-c` is `--color`. Measured: `-c never` on the red tree is exit 4.
+            "cargo-deny --locked -c never check advisories licenses bans sources",
+            "cargo-deny --locked --color=never check advisories licenses bans sources",
+            // Not short for anything here, and not `--target`.
+            "cargo-deny -L off --locked check advisories licenses bans sources",
+            // Strict-prefix arms. None of these exist in cargo-deny 0.20.2; the
+            // shape of the match is what they pin, so a later rewrite to a bare
+            // `starts_with` reddens a tree that narrowed nothing.
+            "cargo-deny --locked --config-check-only check advisories licenses bans sources",
+            "cargo-deny --locked --targets-are-fine check advisories licenses bans sources",
+            "cargo-deny --locked --excludes-nothing check advisories licenses bans sources",
+            // `--manifest-path` is measured and deliberately not guarded: it
+            // moves where `deny.toml` is looked up too, so cargo-deny falls
+            // back to the default config, which allows no licence at all. Exit
+            // 4 on an otherwise-clean tree. Loud, so not this guard's business.
+            "cargo-deny --locked --manifest-path ./Cargo.toml check advisories licenses bans \
+             sources",
+        ] {
+            let step = deny_step_checks(&deny_job_with(command)).expect("readable");
+            assert!(
+                check_nothing_redirects_what_is_checked(&step).is_ok(),
+                "`{command}` narrows nothing and must not be reported: {:?}",
+                redirecting_options(&step)
             );
         }
     }
