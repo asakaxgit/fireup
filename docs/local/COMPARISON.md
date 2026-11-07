@@ -80,8 +80,8 @@ implementation is the only reason these are known; each has a follow-up issue.
 |---|---|---|---|
 | Accepted an `order_by` with a term *after* `__name__`, including a duplicate `__name__` | `INVALID_ARGUMENT: order by clause cannot contain more fields after the key` | A query that passes locally fails in production. The official Node SDK emits this shape for `.where(…, '!=', …).orderBy('__name__')` | **fixed** — same status, same message |
 | Served a **descending `__name__` scan**, with a probe in `matrix.json` *asserting* it works | `FAILED_PRECONDITION: Firestore does not support descending key scans` | A matrix row claims parity that does not exist — the worst kind of row to have | **fixed** — and the probe now asserts the refusal |
-| `accounts:batchCreate` answers `405 "INVALID_ARGUMENT : accounts:batchCreate takes POST, not POST"` | `200` | A self-contradictory refusal, from a catch-all arm that fires regardless of method. The matrix promises refusals that name the gap | open |
-| `projects:createSessionCookie` answers `404 PROJECT_NOT_FOUND … not "fireup-local:createSessionCookie"` | `400 INVALID_ID_TOKEN` | The `{project}:customMethod` colon syntax is parsed into the project id, so the row refuses with the wrong error | open |
+| `accounts:batchCreate` answered `405 "INVALID_ARGUMENT : accounts:batchCreate takes POST, not POST"` | `200` | A self-contradictory refusal, from a catch-all arm that fired regardless of method. The matrix promises refusals that name the gap. **Fixed by SAK-224** — now `501 OPERATION_NOT_ALLOWED : batch account import (create accounts one at a time) is not served by fireup local` | **fixed** |
+| `projects:createSessionCookie` answered `404 PROJECT_NOT_FOUND … not "fireup-local:createSessionCookie"` | `400 INVALID_ID_TOKEN` | The `{project}:customMethod` colon syntax was parsed into the project id, so the row refused with the wrong error. **Fixed by SAK-224** — now `501 OPERATION_NOT_ALLOWED : session cookies is not served by fireup local` | **fixed** |
 
 **What the harness still cannot measure**, said plainly so no cell pretends
 otherwise:
@@ -371,12 +371,30 @@ both hand you the code. Phone, federated providers, MFA, tenants and session
 cookies are the gap.
 
 Measuring the privileged half is also where two of the Fireup bugs at the top of
-this document came from. `accounts:batchCreate` answers `405` with a message that
-contradicts itself, and `projects:createSessionCookie` answers
-`404 PROJECT_NOT_FOUND` because the `{project}:customMethod` colon is parsed
-into the project id. Both rows are `UNIMPLEMENTED` in the matrix, which is the
-right status — the refusals are the wrong shape, and the matrix promises a
-refusal that names the gap.
+this document came from. `accounts:batchCreate` answered `405` with a message
+that contradicted itself, and `projects:createSessionCookie` answered
+`404 PROJECT_NOT_FOUND` because the `{project}:customMethod` colon was parsed
+into the project id. Both rows are `UNIMPLEMENTED` in the matrix, which was
+always the right status — the refusals were the wrong shape, and the matrix
+promises a refusal that names the gap.
+
+SAK-224 fixed both, and the fireup side of those two rows was **re-measured, not
+reworded** — against `fireup local` built from `main` at `5d015dc`, on
+2026-11-06, with the same direct REST calls that found them:
+
+```
+POST /identitytoolkit.googleapis.com/v1/projects/{project}/accounts:batchCreate
+  → 501 OPERATION_NOT_ALLOWED : batch account import (create accounts one at a
+    time) is not served by fireup local
+POST /identitytoolkit.googleapis.com/v1/projects/{project}:createSessionCookie
+  → 501 OPERATION_NOT_ALLOWED : session cookies is not served by fireup local
+```
+
+`accounts:batchDelete` and `verifySessionCookie` answer the same way as their
+partners. The observed gap against the emulator is unchanged — it serves both
+and Fireup does not — so the rows stay in the table; only Fireup's half moved
+from "wrong error" to "a 501 that names the gap", which is what the matrix
+promised all along.
 
 ## How to choose
 

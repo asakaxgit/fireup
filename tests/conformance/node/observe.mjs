@@ -26,9 +26,9 @@
  * artefact — see `docs/licenses/FIREBASE_GCP_LOCAL.md`.
  *
  * Usage (scripts/conformance-target.sh wraps this):
- *   FIRESTORE_EMULATOR_HOST=127.0.0.1:4588 DATASTORE_EMULATOR_HOST=127.0.0.1:4588 \
+ *   FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 DATASTORE_EMULATOR_HOST=127.0.0.1:8081 \
  *     node tests/conformance/node/observe.mjs \
- *       --target 'floci-gcp 0.12.0' --out /tmp/floci.json [--only <id>] [--timeout 20000]
+ *       --target 'Firebase Emulator Suite v1.22.0' --out /tmp/observed.json [--only <id>] [--timeout 90000]
  */
 
 import { strict as assert } from 'node:assert'

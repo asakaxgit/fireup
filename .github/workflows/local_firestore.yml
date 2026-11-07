@@ -25,14 +25,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Was actions-rs/toolchain@v1, which is archived and whose Node runner
+      # GitHub no longer supports — actionlint flags it, and it will stop
+      # starting at all when the deadline passes. The replacement takes no
+      # `toolchain:`/`override:` inputs: the toolchain is the action ref
+      # (`@stable`) and it is always made the rustup default, so the two inputs
+      # have no equivalent here rather than a renamed one.
       - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -40,11 +43,35 @@ jobs:
             target
           key: ${{ runner.os }}-local-firestore-${{ hashFiles('**/Cargo.lock') }}
 
+      # First, because a workflow file GitHub cannot read makes every other job
+      # in this file unreachable — and that is not a hypothetical here, see the
+      # note on the next step. Checks that every file under .github/workflows/
+      # parses and has a name, an `on:` and jobs with steps.
+      - name: Workflow files are readable by GitHub
+        run: cargo test --test workflow_yaml_tests
+
       - name: Data plane unit tests
         # Quoted on purpose: a trailing `::` in an unquoted scalar makes YAML
         # read the line as a mapping key, and GitHub then rejects the whole
         # file — every push produced a "workflow file issue" failure until this
         # was quoted, so the job had never actually run.
+        #
+        # What that failure looks like, written down because it was misread
+        # once already: GitHub does not skip an unreadable workflow file. It
+        # manufactures a run for the *push* event even though the only trigger
+        # here is `workflow_dispatch`, concludes it `failure` with zero jobs,
+        # and titles it by **path** instead of by `name:` — it never parsed far
+        # enough to read `name:`. The annotation on that run is the real
+        # message: "Invalid workflow file: You have an error in your yaml
+        # syntax on line 44".
+        #
+        # And it hides well, because a manual `workflow_dispatch` keeps working
+        # off the last version GitHub could parse: whoever dispatches by hand
+        # sees green while every push shows a red X.
+        #
+        # tests/workflow_yaml_tests.rs now parses every file in this directory
+        # from `cargo test`, and keeps the broken line as a negative control.
+        # That test is the guard; this comment is why it exists.
         run: "cargo test --lib local::"
 
       - name: Firestore gRPC tests
@@ -89,10 +116,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -102,7 +126,7 @@ jobs:
           cache-dependency-path: tests/local-smoke/package-lock.json
 
       - name: Cache cargo
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -164,10 +188,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -182,7 +203,7 @@ jobs:
           python-version: '3.12'
 
       - name: Cache cargo
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry

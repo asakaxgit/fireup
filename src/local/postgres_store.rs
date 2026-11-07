@@ -16,21 +16,39 @@
 //! it on the way to disk would make a precondition that should succeed fail
 //! after a restart. Two integer columns keep the value exact and still sort
 //! correctly.
+//!
+//! ## Query pushdown
+//!
+//! [`Store::scan_collection_filtered`] narrows a collection read with the
+//! query's own equality and range predicates, translated by the private
+//! `postgres_filter` module. The translation is sound rather than exact — it
+//! may keep a row the query will reject, never drop one it would match — so
+//! the query engine still decides every result and the two backends cannot
+//! disagree. `src/local/postgres_filter.rs` has the full list of what is
+//! pushed and what is not, and why.
 
 use anyhow::{anyhow, Context};
 use deadpool_postgres::{Config, Pool, Runtime};
 use prost_types::Timestamp;
 use tokio_postgres::types::ToSql;
-use tokio_postgres::NoTls;
+use tokio_postgres::{NoTls, Row};
 use tracing::{debug, info};
 
 use crate::data_importer::parse_connection_url;
 use crate::local::names::parse_document_name;
+use crate::local::postgres_filter;
+use crate::local::query::Prefilter;
 use crate::local::store::{
     self, PendingWrite, Store, StoreError, StoreResult, WriteEffect, WriteOutcome,
 };
 use crate::local::value_json;
 use crate::protos::google::firestore::v1::Document;
+
+/// The columns a collection read selects, in one place so the three scans
+/// cannot drift apart. The keyed reads select the same set minus `name`, which
+/// they already know.
+const DOCUMENT_COLUMNS: &str = "name, fields, create_time_seconds, create_time_nanos, \
+                                update_time_seconds, update_time_nanos";
 
 /// Table holding the local data plane's documents.
 ///
@@ -74,6 +92,27 @@ fn schema_statements() -> Vec<String> {
         format!(
             "CREATE INDEX IF NOT EXISTS {DOCUMENTS_TABLE}_collection_idx
                  ON {DOCUMENTS_TABLE} (parent, collection_id, document_id)"
+        ),
+        // Can serve the pushed-down filters `postgres_filter` writes as `?`
+        // and `@>` — field presence and scalar equality, which between them
+        // cover the query shapes an SDK actually sends. `jsonb_ops` rather
+        // than `jsonb_path_ops`, because the latter has no operator class
+        // entry for `?`.
+        //
+        // "Can" rather than "does": at a few tens of thousands of documents
+        // the planner still prefers a sequential scan, and it is right to —
+        // the pushdown's win at that size is the rows it does not ship and
+        // decode, not an index seek. The index starts being chosen in the
+        // hundreds of thousands. It exists now so that transition happens on
+        // its own rather than needing a schema change later.
+        //
+        // One index over the whole payload rather than per-field expression
+        // indexes: the server cannot know which fields a project will query,
+        // and a local development store would rather pay a little on every
+        // write than make a developer declare indexes up front.
+        format!(
+            "CREATE INDEX IF NOT EXISTS {DOCUMENTS_TABLE}_fields_idx
+                 ON {DOCUMENTS_TABLE} USING gin (fields jsonb_ops)"
         ),
     ]
 }
@@ -158,6 +197,52 @@ impl PostgresStore {
         Ok(())
     }
 
+    /// Run a document read whose rows are selected by `selector` — a `WHERE`
+    /// clause over exactly two parameters — with the query's pre-filter
+    /// appended to it.
+    ///
+    /// Shared by the collection and kind reads, which differ only in that
+    /// clause. When nothing in `prefilter` can be translated the statement is
+    /// exactly the unfiltered read, so there is no separate fallback path to
+    /// keep in step.
+    async fn scan_filtered(
+        &self,
+        selector: &str,
+        first: &str,
+        second: &str,
+        prefilter: Prefilter<'_>,
+        context: &str,
+    ) -> StoreResult<Vec<Document>> {
+        // `selector` owns $1 and $2, so a translated filter numbers its own
+        // parameters from three.
+        let pushed = postgres_filter::compile(prefilter, 3);
+
+        let mut statement =
+            format!("SELECT {DOCUMENT_COLUMNS} FROM {DOCUMENTS_TABLE} WHERE {selector}");
+        let mut params: Vec<&(dyn ToSql + Sync)> = vec![&first, &second];
+        if let Some(pushed) = &pushed {
+            statement.push_str(" AND (");
+            statement.push_str(&pushed.sql);
+            statement.push(')');
+            params.extend(
+                pushed
+                    .params
+                    .iter()
+                    .map(|param| param as &(dyn ToSql + Sync)),
+            );
+            debug!(read = %context, filter = %pushed.sql, "pushing a query filter into SQL");
+        }
+
+        let client = self.client().await?;
+        let rows = client
+            .query(&statement, &params)
+            .await
+            .with_context(|| format!("failed to read {context} with a pushed-down filter"))
+            .map_err(StoreError::Backend)?;
+
+        rows_to_documents(context, &rows)
+    }
+
     async fn client(&self) -> StoreResult<deadpool_postgres::Object> {
         self.pool
             .get()
@@ -197,12 +282,6 @@ fn key_columns(name: &str) -> StoreResult<DocumentKey> {
         parent: parsed.parent(),
         collection_id: parsed.collection_id().to_string(),
         document_id: parsed.document_id().to_string(),
-    })
-}
-
-fn encode_fields(name: &str, document: &Document) -> StoreResult<serde_json::Value> {
-    value_json::encode_fields(&document.fields).map_err(|error| {
-        StoreError::Unsupported(format!("document {name} cannot be stored: {error}"))
     })
 }
 
@@ -371,9 +450,7 @@ impl Store for PostgresStore {
         let rows = client
             .query(
                 &format!(
-                    "SELECT name, fields, create_time_seconds, create_time_nanos,
-                            update_time_seconds, update_time_nanos
-                       FROM {DOCUMENTS_TABLE}
+                    "SELECT {DOCUMENT_COLUMNS} FROM {DOCUMENTS_TABLE}
                       WHERE parent = $1 AND collection_id = $2"
                 ),
                 &[&parent, &collection_id],
@@ -382,20 +459,23 @@ impl Store for PostgresStore {
             .with_context(|| format!("failed to read collection {parent}/{collection_id}"))
             .map_err(StoreError::Backend)?;
 
-        let mut documents = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let name: String = row.try_get("name").map_err(|error| StoreError::Corrupt {
-                name: format!("{parent}/{collection_id}"),
-                reason: format!("name column is not readable: {error}"),
-            })?;
-            documents.push(row_to_document(&name, row)?);
-        }
+        rows_to_documents(&format!("{parent}/{collection_id}"), &rows)
+    }
 
-        // Sorted here rather than in SQL: the contract is UTF-8 byte order,
-        // which is what `MemoryStore` and Firestore's `__name__` ordering use,
-        // and `ORDER BY` would instead use the database's collation.
-        documents.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
-        Ok(documents)
+    async fn scan_collection_filtered(
+        &self,
+        parent: &str,
+        collection_id: &str,
+        prefilter: Prefilter<'_>,
+    ) -> StoreResult<Vec<Document>> {
+        self.scan_filtered(
+            "parent = $1 AND collection_id = $2",
+            parent,
+            collection_id,
+            prefilter,
+            &format!("{parent}/{collection_id}"),
+        )
+        .await
     }
 
     async fn scan_kind(&self, documents_root: &str, kind: &str) -> StoreResult<Vec<Document>> {
@@ -404,9 +484,7 @@ impl Store for PostgresStore {
         let rows = client
             .query(
                 &format!(
-                    "SELECT name, fields, create_time_seconds, create_time_nanos,
-                            update_time_seconds, update_time_nanos
-                       FROM {DOCUMENTS_TABLE}
+                    "SELECT {DOCUMENT_COLUMNS} FROM {DOCUMENTS_TABLE}
                       WHERE collection_id = $1 AND starts_with(name, $2)"
                 ),
                 &[&kind, &prefix],
@@ -415,16 +493,26 @@ impl Store for PostgresStore {
             .with_context(|| format!("failed to scan kind {kind} under {documents_root}"))
             .map_err(StoreError::Backend)?;
 
-        let mut documents = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let name: String = row.try_get("name").map_err(|error| StoreError::Corrupt {
-                name: format!("{documents_root}/{kind}"),
-                reason: format!("name column is not readable: {error}"),
-            })?;
-            documents.push(row_to_document(&name, row)?);
-        }
-        documents.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
-        Ok(documents)
+        rows_to_documents(&format!("{documents_root}/{kind}"), &rows)
+    }
+
+    async fn scan_kind_filtered(
+        &self,
+        documents_root: &str,
+        kind: &str,
+        prefilter: Prefilter<'_>,
+    ) -> StoreResult<Vec<Document>> {
+        // Same filter, wider row selection: a kind spans every collection with
+        // this id under the root rather than one. That makes it the read where
+        // narrowing matters most.
+        self.scan_filtered(
+            "collection_id = $1 AND starts_with(name, $2)",
+            kind,
+            &format!("{documents_root}/"),
+            prefilter,
+            &format!("{documents_root}/{kind}"),
+        )
+        .await
     }
 
     async fn child_segments(&self, parent: &str) -> StoreResult<Vec<String>> {
@@ -473,6 +561,25 @@ impl Store for PostgresStore {
     }
 }
 
+/// Decode the rows of a collection read into documents, in `__name__` order.
+///
+/// `context` names what was being read, so a corrupt row's error says which
+/// scan hit it. Sorting happens here rather than in SQL: the contract is UTF-8
+/// byte order, which is what `MemoryStore` and Firestore's `__name__` ordering
+/// use, and `ORDER BY` would instead use the database's collation.
+fn rows_to_documents(context: &str, rows: &[Row]) -> StoreResult<Vec<Document>> {
+    let mut documents = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name: String = row.try_get("name").map_err(|error| StoreError::Corrupt {
+            name: context.to_string(),
+            reason: format!("name column is not readable: {error}"),
+        })?;
+        documents.push(row_to_document(&name, row)?);
+    }
+    documents.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+    Ok(documents)
+}
+
 /// Read one document inside a transaction.
 async fn read_document(
     transaction: &tokio_postgres::Transaction<'_>,
@@ -508,7 +615,9 @@ async fn upsert_document(
     key: &DocumentKey,
     document: &Document,
 ) -> StoreResult<()> {
-    let payload = encode_fields(name, document)?;
+    // Shared with `MemoryStore` so the two backends cannot disagree about
+    // which values are legal to store; see `store::encode_storable_fields`.
+    let payload = store::encode_storable_fields(document)?;
     let create_time = document.create_time.clone().unwrap_or_default();
     let update_time = document.update_time.clone().unwrap_or_default();
 

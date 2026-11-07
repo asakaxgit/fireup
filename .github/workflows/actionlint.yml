@@ -1,0 +1,69 @@
+name: actionlint
+
+# The one workflow in this repository with automatic triggers, on purpose.
+#
+# Everything else here is `workflow_dispatch:`-only ("TEMPORARILY DISABLED -
+# Re-enable after code preparation"), and that is still the right call for the
+# test suites — they need Postgres, Node and Python and are not yet reliable
+# enough to gate a merge on. None of that applies to this job: it downloads one
+# static binary and reads the files in this directory. It needs no toolchain, no
+# services and about ten seconds.
+#
+# It has to run automatically or it is worthless. A linter whose job is to catch
+# a workflow file nobody can run only helps if it reports *before* somebody
+# tries to run it; on `workflow_dispatch` it would sit there until a human
+# remembered to dispatch the checker — which is exactly the failure that got
+# [SAK-215] filed, where a broken workflow stayed broken because the only person
+# who looked dispatched by hand and saw green.
+#
+# Enabling triggers here is not a decision about re-enabling the test
+# workflows. When those come back on, they get their own triggers; this file
+# does not front-run that.
+#
+# `pull_request` is deliberately unfiltered by base branch: PRs in this
+# repository are routinely stacked onto other feature branches, and a
+# `branches: [main]` filter would skip every layer above the bottom one.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned, with the checksum published alongside the release, because this
+      # step fetches and executes a binary. Bumping the version means changing
+      # both values together.
+      #
+      # No setup action for the same reason the upstream README suggests this
+      # form: there isn't an official one, and a third-party wrapper would be
+      # one more unpinned action to audit for the sake of two lines of curl.
+      - name: Run actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.7
+          ACTIONLINT_SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum --check --strict -
+          tar xzf "$tarball" actionlint
+          # ubuntu-latest preinstalls shellcheck; actionlint finds it on PATH
+          # and runs it over every `run:` block in the repository. That is
+          # wanted, so the version is logged rather than left implicit.
+          #
+          # (No comment line in a `run:` block may begin with the tool's own
+          # name: a leading `# shellcheck ...` is read as one of its directives
+          # and fails to parse. This job caught that in its own file, which is
+          # the smallest possible proof that it is really running.)
+          shellcheck --version | sed -n '2p'
+          ./actionlint -version
+          ./actionlint -color

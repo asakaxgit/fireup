@@ -632,6 +632,104 @@ closes the one deliberate gap SAK-190 left.
   `scripts/smoke-local-datastore.sh`, passing **against both the in-memory and
   the PostgreSQL store** with Google's official client library.
 
+**SAK-192 (November 6 2026)** — Postgres pushdown for equality/range filters.
+Until now `RunQuery` read the whole collection and filtered in-process. It still
+*decides* in-process; it just no longer reads rows it cannot want.
+
+- `Query::prefilter` hands a backend the compiled filter plus the query's sort
+  fields. `Store::scan_collection_filtered` / `scan_kind_filtered` may use it to
+  return fewer rows, under a one-sided contract: **a superset of the matching
+  rows, never a subset**. `Query::evaluate` keeps the only vote on the result,
+  so the two backends still cannot disagree about what a query means. The
+  default implementations ignore the pre-filter, which is what `MemoryStore`
+  uses — CI keeps testing the in-process semantics.
+- `src/local/postgres_filter.rs` does the translation: `==`/`in` as GIN-usable
+  `@>` containment, ranges as `COLLATE "C"` byte-order comparisons (a locale
+  collation disagrees with Firestore's ordering and would drop rows), numbers in
+  two branches that mirror the engine's own int/double arithmetic, nested paths
+  walked through the stored `mapValue`/`fields` shape. `!=`, `not-in`, the array
+  operators, bytes ranges, and a half-translatable `OR` stay in-process, with
+  the reasons tabulated in `docs/local/README.md`.
+- A GIN index on `fields` comes with the schema. The planner ignores it at tens
+  of thousands of rows (correctly — scanning is cheaper there) and switches to a
+  bitmap index scan in the hundreds of thousands.
+
+**Verified on 2026-11-06:** the load-bearing test is
+`tests/local_query_pushdown_tests.rs` — it runs **49 query shapes both ways**
+against a real database, full scan versus pushdown, and requires byte-identical
+results, order, and `skipped` counts, plus the same for the collection group
+read. Five deliberate mutations confirmed it has teeth: dropping `COLLATE "C"`
+from text ranges, dropping it from `__name__`, losing the `doubleValue` branch
+of a numeric comparison, letting an `OR` discard an untranslatable branch, and
+re-joining a nested path with a `.` — each one fails it, the last by silently
+dropping every row. `cargo test --lib` 478, `--test local_firestore_tests` 46,
+`--test local_postgres_store_tests` 8 (one new end-to-end `RunQuery` over
+Postgres through the gRPC server), full suite green against a throwaway
+PostgreSQL 18 cluster; `cargo clippy --all-targets` clean on the new files.
+Measured with `cargo run --release --example pushdown_scale`: at 20,000
+documents a 1-in-1000 equality reads 20 rows instead of 20,000, a 1-in-7 reads
+2,857 — roughly 4–10× less wall clock depending on selectivity.
+
+**Also fixed here, because this change exposed it:** the shared store
+conformance suite asserted an exact *store-wide* `count()` (`before + 1`). The
+PostgreSQL backend shares one table across every test in its binary, so adding a
+second document-writing test to that binary turned a latent race into a real
+flake — measured at 1–2 failures in 8–16 runs, against 0 in 8 on the same base
+without this change. A failing contract test also skips its own cleanup, which
+left rows behind and cascaded into the two `local_auth_postgres_tests` that
+assert the documents table is empty. Asserting the *direction* of the change
+instead is no better: a concurrent insert masks the delete and you get
+`11 -> 11`. The exact count contract now lives in
+`conformance::assert_exclusive_count_contract`, called only from a test that
+owns its store (the in-memory unit test); the shared contract asserts the same
+property scoped to its own collection, which is race-free and still exact.
+0 failures in 30 runs after the fix.
+
+**Found, not fixed here (fixed in SAK-205, below):** `value_json` could not
+decode its own encoding of a timestamp outside years 0001–9999 — it wrote
+`+11476-08-15T…` and `decode_timestamp` rejected it. A client that stored such
+a timestamp got a successful write and then an unreadable document, and the
+failure spread to every collection scan that included it. Unrelated to queries;
+surfaced while building the pushdown corpus.
+
+**SAK-205 (November 6 2026)** — that timestamp can no longer be written, and
+the rows that already carry one can still be read.
+
+- `value_json::encode` refuses a timestamp outside years 0001–9999 — the range
+  `google.protobuf.Timestamp` and Firestore are both specified for — so the
+  **write** fails with `INVALID_ARGUMENT` instead of succeeding and corrupting
+  every later read. Choosing this over widening `decode` keeps two properties
+  the rest of the module rests on: the payload is the REST encoding (a signed
+  five-digit year is not RFC 3339, and is not something the real API emits),
+  and every stored timestamp is a fixed 30 bytes, which is what lets the
+  pushdown compare them as text at all.
+- `decode` still reads the old spelling back, exactly. Refusing it would leave
+  a database that already holds one permanently unqueryable, collection-wide.
+  This is the one place the read set is deliberately wider than the write set,
+  and it is wider by exactly the payloads this module used to produce.
+- The check is shared. `store::encode_storable_fields` is now the single
+  pre-write encode both backends use, so `MemoryStore` — which keeps `Value`s
+  as they arrive and has no encode of its own to fail — cannot accept a
+  document `PostgresStore` refuses. That divergence would otherwise have
+  appeared only when somebody added `--postgres-url` to a working project. The
+  assertion lives in `store::conformance`, so it runs against both.
+
+**Verified on 2026-11-06:** the round-trip corpus now covers both ends of the
+range; eight out-of-range timestamps (year 11476, either side of each bound,
+year 0000, both `i64` extremes, and two illegal `nanos`) are each asserted to
+fail the write with a message that names the range; three legacy payloads are
+asserted to decode to the exact instant and then to be refused on re-encode.
+The width guard in `postgres_filter` finally has a live case:
+`tests/local_query_pushdown_tests.rs` inserts a `+11476-…` row with raw SQL —
+which is how such a row really gets into a database — and all 49 query shapes
+must still answer identically both ways. Deleting the guard fails that test
+*and* the differential suite, which reports the dropped row by name
+(`["Zoe", "bob"]` versus `["Zoe", "bob", "mallory"]`). `cargo test --lib` 489,
+`--test local_query_pushdown_tests` 6; `cargo test --lib --bins --tests` fully
+green against a throwaway PostgreSQL 18 cluster, re-run after rebasing onto the
+updated SAK-192 head. `rustfmt`/`cargo clippy --all-targets` introduce no new
+finding on the changed files, measured as a per-file delta against the base.
+
 **SAK-203 (November 6 2026)** — `Mutation.property_mask` is served on `Commit`,
 which is the half that makes SAK-198's transforms useful. A masked
 `insert`/`update`/`upsert` maps onto the store's masked-write primitive, so

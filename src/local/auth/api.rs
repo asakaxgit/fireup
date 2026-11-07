@@ -852,7 +852,8 @@ impl AuthApi {
 
     // ----- admin endpoints --------------------------------------------------
 
-    /// Routes under `/v1/projects/{project}/...`.
+    /// Routes under `/v1/projects/{project}/...`, plus the custom methods that
+    /// hang off the project segment itself (`/v1/projects/{project}:method`).
     async fn route_admin(
         &self,
         method: &str,
@@ -861,8 +862,30 @@ impl AuthApi {
         now_millis: i64,
     ) -> (u16, Json) {
         let (project, tail) = rest.split_once('/').unwrap_or((rest, ""));
+
+        // A custom method can hang off the project segment itself
+        // (`projects/{p}:createSessionCookie`) rather than off a sub-collection,
+        // so split it before the project check. Otherwise the colon and the
+        // method name land in the project id and the caller gets a 404 advising
+        // `--project-id my-project:createSessionCookie`.
+        let (project, project_method) = match project.split_once(':') {
+            Some((project, method)) => (project, Some(method)),
+            None => (project, None),
+        };
+
         if let Some(response) = self.check_project(project) {
             return response;
+        }
+
+        // A project-segment custom method is the whole path: nothing follows it.
+        if let Some(custom_method) = project_method {
+            if !tail.is_empty() {
+                return self.unknown(&format!("/v1/projects/{project}:{custom_method}/{tail}"));
+            }
+            return match custom_method {
+                "createSessionCookie" | "verifySessionCookie" => not_served("session cookies"),
+                _ => self.unknown(&format!("/v1/projects/{project}:{custom_method}")),
+            };
         }
 
         // `accounts:batchGet` is a GET and takes its parameters in the query
@@ -891,9 +914,26 @@ impl AuthApi {
             ("POST", "accounts:batchDelete") => {
                 not_served("batch account deletion (delete accounts one at a time)")
             }
+            ("POST", "accounts:batchCreate") => {
+                not_served("batch account import (create accounts one at a time)")
+            }
+            // Wrong-method arms name the one method each *recognised* path
+            // takes. They are listed explicitly rather than as a catch-all on
+            // the tail, because an `accounts:*` sub-method this build does not
+            // recognise has no expected method to report: answering it from
+            // here formats "takes POST, not POST" and tells the caller nothing.
             (_, "accounts") => self.wrong_method(method, "accounts", "POST"),
+            (
+                _,
+                "accounts:lookup" | "accounts:update" | "accounts:delete"
+                | "accounts:sendOobCode" | "accounts:batchDelete" | "accounts:batchCreate",
+            ) => self.wrong_method(method, tail, "POST"),
+            (_, "accounts:batchGet") => self.wrong_method(method, tail, "GET"),
+            // An unrecognised `accounts:*` sub-method: Identity Toolkit has many
+            // more than fireup serves, so name the gap the way the served-but-
+            // unimplemented arms above do.
             (_, tail) if tail.starts_with("accounts:") => {
-                self.wrong_method(method, tail, "POST")
+                not_served(&format!("the {tail} admin sub-method"))
             }
             _ => self.unknown(&format!("/v1/projects/{project}/{tail}")),
         }
@@ -2072,6 +2112,8 @@ mod tests {
             "/v1/accounts:lookup",
             "/v1/token",
             "/v1/projects/demo/accounts",
+            // A custom method on the project segment, colon and all.
+            "/v1/projects/demo:createSessionCookie",
             "/emulator/v1/projects/demo/accounts",
             // The links this surface mints land here, so it has to be claimed
             // or every generated link 404s.
@@ -2130,6 +2172,100 @@ mod tests {
         let message = message(&body);
         assert!(message.contains("\"demo\""), "{message}");
         assert!(message.contains("\"other\""), "{message}");
+    }
+
+    /// The admin sub-methods fireup does not implement have to refuse by naming
+    /// the gap. They used to fall into the wrong-method handler, which formatted
+    /// the request's own method as the expected one — a 405 reading
+    /// "accounts:batchCreate takes POST, not POST".
+    #[tokio::test]
+    async fn an_unimplemented_admin_sub_method_names_the_gap() {
+        let api = api();
+
+        let (status, body) = post(&api, "/v1/projects/demo/accounts:batchCreate", json!({})).await;
+        assert_eq!(status, 501, "{body}");
+        assert!(message(&body).contains("batch account import"), "{body}");
+
+        let (status, body) = post(&api, "/v1/projects/demo/accounts:batchDelete", json!({})).await;
+        assert_eq!(status, 501, "{body}");
+        assert!(message(&body).contains("batch account deletion"), "{body}");
+
+        // Identity Toolkit has more admin sub-methods than fireup recognises;
+        // an unrecognised one is still a gap, not a method mismatch.
+        let (status, body) = post(&api, "/v1/projects/demo/accounts:query", json!({})).await;
+        assert_eq!(status, 501, "{body}");
+        assert!(message(&body).contains("accounts:query"), "{body}");
+    }
+
+    /// No refusal may ever report the caller's own method as the expected one.
+    /// This is the shape of the bug rather than one endpoint, so it is asserted
+    /// over every admin path, served or not.
+    #[tokio::test]
+    async fn a_refusal_never_reports_the_requests_own_method_as_expected() {
+        let api = api();
+        for method in ["GET", "POST", "DELETE", "PATCH"] {
+            for tail in [
+                "accounts",
+                "accounts:lookup",
+                "accounts:update",
+                "accounts:delete",
+                "accounts:sendOobCode",
+                "accounts:batchGet",
+                "accounts:batchDelete",
+                "accounts:batchCreate",
+                "accounts:query",
+            ] {
+                let path = format!("/v1/projects/demo/{tail}");
+                let (status, body) = request(&api, method, &path, "{}").await;
+                if status != 405 {
+                    continue;
+                }
+                assert!(
+                    !message(&body).contains(&format!("takes {method}, not {method}")),
+                    "{method} {path} refused with its own method as the expected one: {body}"
+                );
+            }
+        }
+    }
+
+    /// `projects/{p}:createSessionCookie` puts the custom method on the project
+    /// segment. The colon used to be read as part of the project id, so the
+    /// caller got a 404 advising `--project-id demo:createSessionCookie`.
+    #[tokio::test]
+    async fn a_custom_method_on_the_project_segment_is_not_part_of_the_project_id() {
+        let api = api();
+
+        for path in [
+            "/identitytoolkit.googleapis.com/v1/projects/demo:createSessionCookie",
+            "/v1/projects/demo:verifySessionCookie",
+        ] {
+            let (status, body) = post(&api, path, json!({})).await;
+            assert_eq!(status, 501, "{path}: {body}");
+            assert!(message(&body).contains("session cookies"), "{path}: {body}");
+        }
+
+        // Splitting the method off must not lose the project check: a custom
+        // method on the wrong project still names the two real project ids.
+        let (status, body) = post(&api, "/v1/projects/other:createSessionCookie", json!({})).await;
+        assert_eq!(status, 404, "{body}");
+        let message = message(&body);
+        assert!(message.contains("\"other\""), "{message}");
+        assert!(!message.contains("createSessionCookie"), "{message}");
+    }
+
+    /// The wrong method on a *recognised* admin path still reports the method it
+    /// does take — including `accounts:batchGet`, the one GET in the set.
+    #[tokio::test]
+    async fn an_admin_path_with_the_wrong_method_names_the_method_it_takes() {
+        let api = api();
+
+        let (status, body) = request(&api, "GET", "/v1/projects/demo/accounts:lookup", "").await;
+        assert_eq!(status, 405, "{body}");
+        assert!(message(&body).contains("takes POST, not GET"), "{body}");
+
+        let (status, body) = post(&api, "/v1/projects/demo/accounts:batchGet", json!({})).await;
+        assert_eq!(status, 405, "{body}");
+        assert!(message(&body).contains("takes GET, not POST"), "{body}");
     }
 
     // ----- sign-up ----------------------------------------------------------
