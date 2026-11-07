@@ -154,7 +154,13 @@ row with the official SDKs, and `cargo test --test fidelity_matrix_tests` fails
 if this table and that suite stop agreeing. See [Tests](#tests).
 
 For the same rows set beside Google's Firebase Emulator Suite and the production
-service, see [`COMPARISON.md`](COMPARISON.md).
+service, see [`COMPARISON.md`](COMPARISON.md) — most of whose emulator cells are
+measured by running the same probes against it
+([`measurements/`](measurements/README.md)). Two rows in the table below are
+known to be **wrong in Fireup's favour**, found that way: Fireup accepts an
+`order_by` with a term after `__name__`, and serves a descending `__name__`
+scan, where the emulator and production Firestore both reject them. Both have
+follow-up issues; the comparison quotes the emulator's verbatim error.
 
 ### RPCs
 

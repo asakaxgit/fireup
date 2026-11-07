@@ -361,6 +361,20 @@ export const datastoreProbes = [
         { names: /GQL/ },
       )
     },
+    // Dormant for Fireup; it exists so observe.mjs can measure GQL against an
+    // implementation that documents it, rather than taking the README's word.
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = await seedTasks(datastore, freshKind('gql'))
+      const response = await unary(raw.datastore, 'RunQuery', {
+        project_id: projectId,
+        partition_id: { project_id: projectId },
+        gql_query: { query_string: `SELECT * FROM ${kind}`, allow_literals: true },
+      })
+      const names = (response.batch?.entity_results ?? [])
+        .map((result) => result.entity?.key?.path?.at(-1)?.name)
+        .sort()
+      assert.deepEqual(names, ['a', 'b', 'c', 'd'], 'GQL must return the seeded entities')
+    },
   },
 
   {

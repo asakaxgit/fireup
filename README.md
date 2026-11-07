@@ -47,8 +47,12 @@ about ports.
 
 **[docs/local/COMPARISON.md](docs/local/COMPARISON.md)** is the feature matrix —
 Fireup, the Firebase Emulator Suite, and the production service — including the
-places where Fireup serves less and the places where it is more faithful. It
-says, per column, how reliable its own cells are.
+places where Fireup serves less and the places where it is more faithful. Most
+of the emulator column is **measured**: the conformance suite was pointed at the
+emulator Google ships and the raw per-row answers are committed in
+[`docs/local/measurements/`](docs/local/measurements/README.md). Every cell says
+which kind of evidence it is and which emulator version it is true of — four
+Fireup bugs and two corrections to our own document came out of measuring it.
 
 > **Independent implementation.** `fireup local` implements **public** Google API
 > contracts from public documentation and the public
