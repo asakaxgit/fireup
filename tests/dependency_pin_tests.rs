@@ -3420,6 +3420,29 @@ fn has_sha256_literal(line: &str) -> bool {
     false
 }
 
+/// The value `name` is given in the install step's `env:`, if it is given one.
+///
+/// `env` entries arrive as `KEY: value` with comments already stripped, so the
+/// split is on the first colon only: a value may itself contain one.
+fn env_value<'a>(env: &'a [String], name: &str) -> Option<&'a str> {
+    env.iter().find_map(|entry| {
+        let (key, value) = entry.split_once(':')?;
+        (key.trim() == name).then_some(value.trim())
+    })
+}
+
+/// Whether `value` is a digest *this commit* fixes.
+///
+/// Two conditions, and the second is the one the first does not cover. A
+/// 64-character hex run makes it a digest; the absence of `${{` makes it one
+/// the repository holds. `${{ vars.CARGO_DENY_SHA256 }}` satisfies neither,
+/// and `${{ vars.X || '<64 hex>' }}` satisfies only the first while still
+/// letting a value set outside the tree win -- so a fallback default is
+/// refused rather than read as a pin.
+fn is_a_pinned_digest(value: &str) -> bool {
+    has_sha256_literal(value) && !value.contains("${{")
+}
+
 /// The `Install cargo-deny` step, read out of `ci.yml`.
 ///
 /// Read rather than written down a second time for the same reason
@@ -3614,7 +3637,11 @@ fn check_install_verifies_its_download(step: &InstallStep) -> Result<(), String>
         // fetched from the same release alongside the tarball is signed by
         // whoever served the tarball, so it attests to nothing.
         let read = shell_vars(line);
-        let pinned_by_env = read.iter().any(|name| declared.contains(&name.as_str()));
+        let from_env: Vec<&String> = read
+            .iter()
+            .filter(|name| declared.contains(&name.as_str()))
+            .collect();
+        let pinned_by_env = !from_env.is_empty();
         if !pinned_by_env && !has_sha256_literal(line) && !read.is_empty() {
             return Err(format!(
                 "the `{INSTALL_STEP}` step in ci.yml compares against {read:?}, and this step \
@@ -3634,6 +3661,41 @@ fn check_install_verifies_its_download(step: &InstallStep) -> Result<(), String>
                  the same host as the tarball and attests to nothing. If the digest is in a \
                  checked-in file, this reader cannot tell that from a downloaded one, so it \
                  fails closed: say so in a ticket and widen it deliberately."
+            ));
+        }
+
+        // The name being declared here is not the same question as the value
+        // being fixed by this commit. `CARGO_DENY_SHA256: ${{ vars.X }}` is a
+        // declared name whose value lives in the repository's web settings --
+        // the same place SAK-240 found `default_workflow_permissions` and
+        // SAK-242 found the ruleset, changeable with no commit, no diff and no
+        // review.
+        if pinned_by_env
+            && !from_env
+                .iter()
+                .any(|name| env_value(&step.env, name).is_some_and(is_a_pinned_digest))
+        {
+            let values: Vec<(&str, &str)> = from_env
+                .iter()
+                .map(|name| (name.as_str(), env_value(&step.env, name).unwrap_or("")))
+                .collect();
+            return Err(format!(
+                "the `{INSTALL_STEP}` step in ci.yml compares against an `env:` name this \
+                 step declares but whose value this commit does not fix: {values:?}. \
+                 Measured by replaying the step body the way the runner does, with the \
+                 step's own `env:` map applied and the `${{{{ }}}}` filled from outside: \
+                 against the shipped literal pin the tree decides the bytes -- an outside \
+                 value of 0.19.9 plus its digest still installs 0.20.2 at step exit 0 -- \
+                 while with `CARGO_DENY_SHA256: ${{{{ vars.S }}}}` the same tree installs \
+                 0.20.2 or 0.19.9 at step exit 0 depending on a value held outside the \
+                 repository. The comparison is not off: an outside digest that does not \
+                 match is step exit 1 with nothing installed, and an unset one is the \
+                 same. What moved is who chooses the number. Write the digest out as a \
+                 64-character hex literal, in this `env:` or on the comparison line. Only \
+                 the digest needs it: `CARGO_DENY_VERSION: ${{{{ vars.V }}}}` with the \
+                 digest left literal gives an outside value no new freedom -- measured, it \
+                 can only pick the version the digest already pins (0.20.2 exit 0, 0.19.9 \
+                 exit 1, unset exit 1)."
             ));
         }
 
@@ -7063,6 +7125,117 @@ include-build = false
         // A `set +e` after the comparison has already run and been acted on.
         // Harmless, so not a hole — the arms above put it *before*.
         assert!(install_arm(VERIFY_LINE, &format!("{VERIFY_LINE}\n          set +e")).is_ok());
+    }
+
+    /// The digest the comparison reads has to be a number this commit holds.
+    ///
+    /// The name being declared in this step's `env:` was the whole of the
+    /// earlier question, and a declared name's *value* can still live outside
+    /// the repository. Measured by replaying the step body the way the runner
+    /// does, with the step's own `env:` map applied and `${{ }}` filled from
+    /// outside:
+    ///
+    /// ```text
+    ///   tree                  outside says            step exit  installed
+    ///   shipped literal       nothing                     0      0.20.2
+    ///   shipped literal       0.19.9 + its digest          0      0.20.2   <- the tree decides
+    ///   `${{ vars.* }}`       0.20.2 + its digest          0      0.20.2
+    ///   `${{ vars.* }}`       0.19.9 + its digest          0      0.19.9   <- outside decides
+    ///   `${{ vars.* }}`       0.19.9 + wrong digest        1      none
+    ///   `${{ vars.* }}`       nothing                      1      none
+    /// ```
+    ///
+    /// Row two is the control that makes row four a finding: with the literal
+    /// in place an outside value changes nothing at all. Rows five and six are
+    /// the other control — the comparison still runs and still fails closed on
+    /// a mismatch, so what the fourth row shows is not verification being off
+    /// but the number being chosen somewhere this repository cannot see. Each
+    /// arm was `181 passed` and `actionlint` rc 0 before this assertion
+    /// existed.
+    #[test]
+    fn a_digest_supplied_from_outside_the_repository_fails() {
+        for value in [
+            "${{ vars.CARGO_DENY_SHA256 }}",
+            "${{ secrets.CARGO_DENY_SHA256 }}",
+            "${{ env.CARGO_DENY_SHA256 }}",
+            "${{ github.event.inputs.sha }}",
+            // A literal is present, and an outside value still wins over it.
+            // This is why `is_a_pinned_digest` asks two things rather than one.
+            concat!(
+                "${{ vars.CARGO_DENY_SHA256 || '",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "' }}"
+            ),
+            // Not a digest at all. Fail-closed at run time — an empty or
+            // malformed checksum line is `sha256sum` exit 1 with nothing
+            // installed — but unreadable to this guard either way, and the
+            // rule everywhere else in this file is that an unreadable pin
+            // fails rather than passes.
+            "\"\"",
+            "latest",
+        ] {
+            let why = install_arm(
+                SHA_PIN_LINE,
+                &format!("          CARGO_DENY_SHA256: {value}"),
+            )
+            .expect_err(
+                "a digest whose value this commit does not hold is not a pin, and the \
+                 earlier `declared` check passes it: the name is right there in `env:`",
+            );
+            assert!(
+                why.contains("does not fix"),
+                "the failure must say the value is not fixed by this commit, said: {why}"
+            );
+            assert!(
+                why.contains("CARGO_DENY_SHA256"),
+                "the failure must name the env key whose value moved, said: {why}"
+            );
+        }
+    }
+
+    /// And a digest this commit does hold stays green, including the shapes
+    /// that are stricter than the one shipped.
+    ///
+    /// Without these the cheapest way back to green would be to delete the
+    /// assertion above — the mistake SAK-241 undid in
+    /// `the_permissions_reader_finds_exactly_the_live_keys`.
+    #[test]
+    fn a_digest_this_commit_holds_passes() {
+        // The base's own literal, quoted and unquoted.
+        assert!(install_arm(SHA_PIN_LINE, SHA_PIN_LINE).is_ok());
+        assert!(install_arm(
+            SHA_PIN_LINE,
+            &format!("          CARGO_DENY_SHA256: \"0000000000000000000000000000000000000000000000000000000000000000\"")
+        )
+        .is_ok());
+        // Under a different name, still written out here.
+        assert!(install_arm(
+            SHA_PIN_LINE,
+            &format!("          CARGO_DENY_SHA256: 0000000000000000000000000000000000000000000000000000000000000000\n          GATE_DIGEST: 0000000000000000000000000000000000000000000000000000000000000000")
+        )
+        .is_ok());
+        // The *version* from outside, with the digest left literal. Measured:
+        // this gives an outside value no new freedom — it can only pick the
+        // version the digest already pins (0.20.2 exit 0, 0.19.9 exit 1, unset
+        // exit 1). Only the digest is load-bearing for which bytes run, so
+        // only the digest is asked for, and this arm is what keeps the
+        // assertion from over-reaching to both pins.
+        assert!(install_arm(
+            "          CARGO_DENY_VERSION: 0.0.0",
+            "          CARGO_DENY_VERSION: ${{ vars.CARGO_DENY_VERSION }}"
+        )
+        .is_ok());
+        // A comparison line that reads two declared names, only one of which
+        // is a digest. This is why the check asks whether *any* name it reads
+        // is a pinned digest rather than whether all of them are: the version
+        // is a declared name and is not a digest, and a tree that builds the
+        // filename out of it is pinned just the same.
+        assert!(install_arm(
+            VERIFY_LINE,
+            "          echo \"${CARGO_DENY_SHA256}  cargo-deny-${CARGO_DENY_VERSION}.tar.gz\" \
+             | sha256sum -c -"
+        )
+        .is_ok());
     }
 
     /// Shapes the reader cannot read fail rather than passing.
