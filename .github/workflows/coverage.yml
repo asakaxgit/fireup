@@ -76,7 +76,7 @@ jobs:
           {
             echo '## Line coverage'
             echo
-            echo 'Unit-test scope (`cargo llvm-cov --lib`), floor '"${FIREUP_COVERAGE_MIN}"'%.'
+            echo "Unit-test scope (\`cargo llvm-cov --lib\`), floor ${FIREUP_COVERAGE_MIN}%."
             echo
             echo '```'
             cat target/coverage/summary.txt 2>/dev/null || echo 'no summary produced'
