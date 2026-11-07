@@ -36,6 +36,23 @@
 //!    back. Note that `cargo deny` itself cannot catch this — the setting is
 //!    its own input — which is why it needs a check outside the tool.
 //!
+//! 4. **`[advisories] maximum-db-staleness` stays at a week or less.** Also a
+//!    scope question, and the same blind spot as (3) for the same reason.
+//!    Without the setting cargo-deny has no age limit on the advisory database
+//!    at all: given `--offline` or `--frozen` it falls back to whatever is
+//!    cached in `$CARGO_HOME/advisory-dbs` and reports `advisories ok` with no
+//!    warning, however old that copy is. Measured on this config before the
+//!    line existed (SAK-228): a 30-day-old database, `--offline`, exit 0,
+//!    silent. Every other way of not having a fresh database already fails
+//!    closed, so a stale cache was the one route to a green gate that had not
+//!    heard of last week's advisories.
+//!
+//!    Deleting the line reads as tidying up a redundant default, which is what
+//!    makes it worth a test. CI does not take the `--offline` path today — the
+//!    `deny` job passes only `--locked` — so nothing in CI would go red if the
+//!    line went away, and nothing in CI would go red the day someone adds
+//!    `actions/cache` for `~/.cargo` or `--frozen` for reproducibility either.
+//!
 //! Reading `Cargo.lock` as text rather than running `cargo metadata` is
 //! deliberate: it keeps the test free of a toml dependency and of a subprocess,
 //! and the two fields it wants (`name`, `version`) are the first two lines of
@@ -224,6 +241,94 @@ fn check_unmaintained_scope_is_all(deny: &str) -> Result<(), String> {
     }
 }
 
+/// Seconds in an ISO-8601 period, for the subset that can express a week.
+///
+/// `Err` on a year or a date-part month on purpose. Either one is longer than
+/// the bound below, so rejecting them outright is the same answer the length
+/// comparison would give, and it keeps the parser out of the ISO-8601 trap
+/// where `M` means months before the `T` and minutes after it.
+fn staleness_seconds(period: &str) -> Result<u64, String> {
+    let body = period
+        .strip_prefix('P')
+        .ok_or_else(|| format!("`{period}` is not an ISO-8601 period; it must start with `P`"))?;
+    let (date, time) = match body.split_once('T') {
+        Some((date, time)) => (date, time),
+        None => (body, ""),
+    };
+
+    let mut seconds: u64 = 0;
+    for (part, units) in [
+        (date, [('W', 604_800), ('D', 86_400)].as_slice()),
+        (time, &[('H', 3_600), ('M', 60), ('S', 1)]),
+    ] {
+        let mut digits = String::new();
+        for character in part.chars() {
+            if character.is_ascii_digit() {
+                digits.push(character);
+                continue;
+            }
+            let Some((_, unit)) = units.iter().find(|(name, _)| *name == character) else {
+                return Err(format!(
+                    "`{period}` uses `{character}`, which this check does not read. A year or a \
+                     month is longer than the bound either way; use days, weeks, or hours."
+                ));
+            };
+            let count: u64 = digits
+                .parse()
+                .map_err(|_| format!("`{period}` has a `{character}` with no number before it"))?;
+            digits.clear();
+            seconds += count * unit;
+        }
+        if !digits.is_empty() {
+            return Err(format!("`{period}` has a trailing `{digits}` with no unit"));
+        }
+    }
+    Ok(seconds)
+}
+
+/// The longest advisory database age this repository accepts.
+const MAX_DB_STALENESS: u64 = 7 * 86_400;
+
+/// `Err` unless `[advisories] maximum-db-staleness` is set to a week or less.
+///
+/// Comments are stripped before matching, for the same reason as
+/// `check_unmaintained_scope_is_all`.
+fn check_db_staleness_is_bounded(deny: &str) -> Result<(), String> {
+    let mut found = None;
+    for line in deny.lines() {
+        let code = line.split('#').next().unwrap_or("");
+        let Some((key, value)) = code.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "maximum-db-staleness" {
+            found = Some(value.trim().trim_matches('"').to_string());
+        }
+    }
+
+    let Some(period) = found else {
+        return Err(
+            "deny.toml has no `[advisories] maximum-db-staleness`. Without it \
+                    cargo-deny accepts a cached advisory database of any age, so \
+                    `cargo deny --offline check` reports `advisories ok` off a database \
+                    from last month without printing a warning — see SAK-228. Set it to \
+                    \"P7D\"."
+                .into(),
+        );
+    };
+
+    let seconds = staleness_seconds(&period)?;
+    if seconds > MAX_DB_STALENESS {
+        return Err(format!(
+            "deny.toml allows an advisory database up to `{period}` old, which is more \
+             than the week this repository accepts. The point of the bound is that a \
+             cached database is the only way this gate goes green without knowing about \
+             current advisories; widening it makes the gate quieter, so nothing else \
+             will tell you this changed."
+        ));
+    }
+    Ok(())
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -265,6 +370,13 @@ fn deny_toml_no_longer_accepts_the_h2_advisory() {
 #[test]
 fn deny_toml_reports_unmaintained_advisories_for_the_whole_graph() {
     if let Err(reason) = check_unmaintained_scope_is_all(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_refuses_an_advisory_database_older_than_a_week() {
+    if let Err(reason) = check_db_staleness_is_bounded(&repo_file("deny.toml")) {
         panic!("{reason}");
     }
 }
@@ -469,5 +581,75 @@ unmaintained = \"all\"
 unmaintained = \"workspace\"
 ";
         assert!(check_unmaintained_scope_is_all(deny).is_err());
+    }
+
+    #[test]
+    fn the_staleness_bound_the_repository_ships_passes() {
+        assert!(check_db_staleness_is_bounded("maximum-db-staleness = \"P7D\"\n").is_ok());
+    }
+
+    /// The regression itself, and the quiet one: before SAK-228 the line was
+    /// simply absent, and `cargo deny --offline check` was green off a
+    /// 30-day-old database. Deleting it again looks like removing a redundant
+    /// default.
+    #[test]
+    fn omitting_the_staleness_bound_fails() {
+        let deny = "[advisories]\nyanked = \"deny\"\nunmaintained = \"all\"\n";
+        let error = check_db_staleness_is_bounded(deny).expect_err("a missing bound must fail");
+        assert!(error.contains("any age"), "{error}");
+    }
+
+    /// Widening is the other half: the setting can stay in the file and still
+    /// stop meaning anything.
+    #[test]
+    fn a_staleness_bound_longer_than_a_week_fails() {
+        assert!(check_db_staleness_is_bounded("maximum-db-staleness = \"P8D\"\n").is_err());
+        assert!(check_db_staleness_is_bounded("maximum-db-staleness = \"P2W\"\n").is_err());
+        assert!(check_db_staleness_is_bounded("maximum-db-staleness = \"P1Y\"\n").is_err());
+        // A week and an hour is over the line too — the check is a comparison,
+        // not a match against the one string we ship.
+        assert!(check_db_staleness_is_bounded("maximum-db-staleness = \"P7DT1H\"\n").is_err());
+    }
+
+    /// Shorter is not the regression this guards, so it must not be reported as
+    /// one. `P0D` is unusable in practice — it calls a database stale seconds
+    /// after the fetch — but that failure is loud and self-inflicted, unlike a
+    /// widened bound.
+    #[test]
+    fn a_shorter_staleness_bound_passes() {
+        assert!(check_db_staleness_is_bounded("maximum-db-staleness = \"P1D\"\n").is_ok());
+        assert!(check_db_staleness_is_bounded("maximum-db-staleness = \"PT12H\"\n").is_ok());
+        assert!(check_db_staleness_is_bounded("maximum-db-staleness = \"P0D\"\n").is_ok());
+    }
+
+    /// The prose above the setting quotes `P7D` and `P0D` on purpose, to explain
+    /// why the bound is not zero. Neither may be read as the setting.
+    #[test]
+    fn the_comment_about_the_staleness_bound_is_not_read_as_the_bound() {
+        let deny = "\
+# `P7D` and not `P0D`: the limit is measured against the cached fetch.
+maximum-db-staleness = \"P7D\"
+";
+        assert!(check_db_staleness_is_bounded(deny).is_ok());
+
+        // And a commented-out good value must not rescue a widened live one.
+        let deny = "\
+# maximum-db-staleness = \"P7D\"
+maximum-db-staleness = \"P90D\"
+";
+        assert!(check_db_staleness_is_bounded(deny).is_err());
+    }
+
+    #[test]
+    fn the_period_parser_reads_the_units_it_claims_to() {
+        assert_eq!(staleness_seconds("P7D"), Ok(7 * 86_400));
+        assert_eq!(staleness_seconds("P1W"), Ok(7 * 86_400));
+        assert_eq!(
+            staleness_seconds("P1DT2H3M4S"),
+            Ok(86_400 + 7_200 + 180 + 4)
+        );
+        assert!(staleness_seconds("7D").is_err());
+        assert!(staleness_seconds("P1M").is_err());
+        assert!(staleness_seconds("P7").is_err());
     }
 }

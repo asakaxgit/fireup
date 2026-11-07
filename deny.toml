@@ -29,6 +29,28 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # A yanked crate in the lock file is an error, not a warning: it means the
 # version we pinned was withdrawn from crates.io after we pinned it.
 yanked = "deny"
+# An advisory database older than a week is an error rather than a silent
+# fallback. Without this line, cargo-deny has no age limit at all: given
+# `--offline` or `--frozen` it uses whatever is in `$CARGO_HOME/advisory-dbs`,
+# however old, and prints `advisories ok` with no warning. Measured on this
+# config (SAK-228): a database aged 30 days, checked with `--offline`, exited 0
+# and said nothing. Every other way of not getting a fresh database already
+# fails closed — an unresolvable `db-urls` host, a 404 repository, and
+# `--offline` with no cache at all each exit 1 — so the only way to run this
+# gate against a database that does not know about last week's advisories was
+# to run it against a stale copy of one.
+#
+# CI does not currently take that path: the `deny` job passes only `--locked`
+# and its runner clones the database fresh every time. This is for local runs,
+# and for the two ordinary changes that would hand CI the same hole —
+# `actions/cache` on `~/.cargo`, or `--frozen` for reproducibility. With this
+# line either of those goes red; without it, either of them goes quietly green.
+#
+# `P7D` and not `P0D`: the limit is measured against the cached fetch, so `P0D`
+# calls a database stale seconds after fetching it. A week is short enough that
+# the gate still reflects current advisories and long enough to survive a
+# weekend of offline work.
+maximum-db-staleness = "P7D"
 # Unmaintained-crate advisories cover the whole graph, transitive dependencies
 # included.
 #
