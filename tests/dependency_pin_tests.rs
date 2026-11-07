@@ -2313,6 +2313,111 @@ fn check_every_deny_check_runs(step: &DenyStep) -> Result<(), String> {
     Ok(())
 }
 
+/// cargo-deny's two severity-*lowering* flags, each as `(short, long)`.
+///
+/// `-D`/`--deny` is deliberately absent. That is the strict direction and the
+/// shipping command already uses it; a guard that reddened on it would be
+/// reddening a stricter gate.
+const SEVERITY_LOWERING_FLAGS: &[(&str, &str)] = &[("-A", "--allow"), ("-W", "--warn")];
+
+/// The severity-lowering flags on the gate's command line, as written.
+///
+/// One entry per occurrence, with the diagnostic folded in so a failure can
+/// quote the whole thing: `-A rejected` is two words, while `-Arejected` and
+/// `--allow=rejected` are one. All four spellings were measured against
+/// cargo-deny 0.20.2 and all four silence the policy, so all four are read.
+///
+/// The long form is matched only as exactly `--allow` or a `--allow=` prefix,
+/// never as a bare prefix, so a future `--allow-<something-stricter>` is not
+/// mistaken for this.
+fn silenced_diagnostics(step: &DenyStep) -> Vec<String> {
+    let mut silenced: Vec<String> = Vec::new();
+    for (at, word) in step.arguments.iter().enumerate() {
+        let separate = SEVERITY_LOWERING_FLAGS
+            .iter()
+            .any(|(short, long)| word == short || word == long);
+        let attached = SEVERITY_LOWERING_FLAGS.iter().any(|(short, long)| {
+            word.starts_with(&format!("{long}="))
+                || (word.len() > short.len() && word.starts_with(short))
+        });
+        match (separate, attached) {
+            // A flag written as its own word takes the next word as its value.
+            (true, _) => match step.arguments.get(at + 1) {
+                Some(value) => silenced.push(format!("{word} {value}")),
+                None => silenced.push(word.clone()),
+            },
+            (false, true) => silenced.push(word.clone()),
+            (false, false) => {}
+        }
+    }
+    silenced
+}
+
+/// `Ok` if the `deny` job's command has not been told to stop failing on a
+/// diagnostic.
+///
+/// `check_every_deny_check_runs` reads whether a whole check is named. One
+/// level in from that: a check can be named, run, and still be unable to fail
+/// the step. `-A <diagnostic>` drops the diagnostic to "allow" and `-W` to
+/// "warn", and either overrides whatever `deny.toml` says — the config file is
+/// not consulted about it. Measured on this tree, two checks so that neither
+/// one's evidence is borrowed for the other:
+///
+/// | tree | command | step |
+/// |---|---|---|
+/// | `"MIT"` dropped from `allow` | shipped | exit 4, 48 errors, `licenses FAILED` |
+/// | same | `+ -A rejected` | **exit 0, 0 errors, `licenses ok`** |
+/// | same | `+ -W rejected` | **exit 0**, 54 warnings, `licenses ok` |
+/// | same | `+ -A duplicate` (control) | exit 4, 48 errors — still red |
+/// | `allow-registry = []` | shipped | exit 8, 216 errors, `sources FAILED` |
+/// | same | `+ -A source-not-allowed` | **exit 0**, `sources ok` |
+/// | same | `+ -A rejected` (control) | exit 8, 216 errors — still red |
+///
+/// The two control rows are what make the other four mean anything: silencing
+/// the *wrong* diagnostic leaves the step red, so the green is the named
+/// diagnostic going quiet and not the mere presence of a flag.
+///
+/// This is the same tool-invisible shape as the dropped check name. cargo-deny
+/// cannot report it, because the thing that changed is its own invocation: the
+/// step prints `advisories ok, bans ok, licenses ok, sources ok` and exits 0.
+/// Measured on the real `ci.yml`: with `-A rejected` added to the gate command
+/// this suite was still **165 passed**, and renaming the gate step in the same
+/// file takes it to 7 failed — so the green was a missing assertion, not an
+/// unread file.
+///
+/// Deliberately **not** asserted here: `--locked`. The `ci.yml` comment says it
+/// is there to "check the exact versions this commit pins", and dropping it is
+/// certainly a weaker promise, but two attempts to build a tree where the
+/// committed lockfile is red and a fresh resolution is green both failed on
+/// this graph — `cargo update -p shlex --precise 1.2.0` lands on 1.3.0, because
+/// `cc` floors shlex at `^1.3`, so the vulnerable version is unreachable here.
+/// With no measured fail-open, demanding the literal flag would also redden
+/// `--frozen` and `--offline`, which are equivalent-or-stricter spellings — the
+/// `set -euo pipefail`-as-a-string mistake SAK-246 avoided. It wants its own
+/// ticket and its own measurement, not a guess in this one.
+fn check_no_policy_is_silenced(step: &DenyStep) -> Result<(), String> {
+    let silenced = silenced_diagnostics(step);
+    if silenced.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the `{DENY_STEP}` step in ci.yml lowers the severity of {} on its own command \
+         line: `{}`. A diagnostic dropped to allow/warn cannot fail the step however \
+         `deny.toml` is configured — the flag wins, and deny.toml is not consulted. \
+         Measured (SAK-247): with `\"MIT\"` dropped from deny.toml's allow list the step \
+         exits 4 with 48 errors; adding `-A rejected` to that same command takes it to \
+         exit 0 with 0 errors and `licenses ok`, while `-A duplicate` on the same tree \
+         stays at exit 4. Independently, with `allow-registry = []` the step exits 8 with \
+         216 errors, and `-A source-not-allowed` takes it to exit 0. If a diagnostic \
+         genuinely has to be tolerated, put it in `deny.toml` where the exception is \
+         reviewable next to the policy it weakens and this file's other guards can see \
+         it — not in the invocation, where cargo-deny prints `ok` and says nothing. \
+         `-D`/`--deny` is the strict direction and passes this guard.",
+        silenced.join(", "),
+        step.command
+    ))
+}
+
 /// The id of the job in `ci.yml` that holds the gate — the mapping key under
 /// `jobs:`, not the `name:` beside it.
 const DENY_JOB: &str = "deny";
@@ -2957,6 +3062,17 @@ fn the_deny_job_runs_every_check_deny_toml_configures() {
         Err(reason) => panic!("{reason}"),
     };
     if let Err(reason) = check_every_deny_check_runs(&step) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn the_deny_jobs_command_silences_no_diagnostic() {
+    let step = match deny_step_checks(&repo_file(".github/workflows/ci.yml")) {
+        Ok(step) => step,
+        Err(reason) => panic!("{reason}"),
+    };
+    if let Err(reason) = check_no_policy_is_silenced(&step) {
         panic!("{reason}");
     }
 }
@@ -5660,6 +5776,83 @@ include-build = false
         ))
         .expect("readable");
         assert!(check_every_deny_check_runs(&step).is_ok(), "{step:?}");
+    }
+
+    /// Every spelling of `-A`/`-W` that cargo-deny 0.20.2 accepts, and each one
+    /// measured to silence the licence policy at exit 0 before being listed
+    /// here. The guard reads all four shapes because the parser does.
+    #[test]
+    fn lowering_a_diagnostics_severity_on_the_command_line_fails() {
+        for flag in [
+            "-A rejected",
+            "-Arejected",
+            "--allow rejected",
+            "--allow=rejected",
+            "-W rejected",
+            "-Wrejected",
+            "--warn rejected",
+            "--warn=rejected",
+        ] {
+            let step = deny_step_checks(&deny_job_with(&format!(
+                "cargo-deny --locked check {flag} \\\n  -D advisory-not-detected \\\n  \
+                 advisories licenses bans sources"
+            )))
+            .expect("readable");
+            let Err(error) = check_no_policy_is_silenced(&step) else {
+                panic!("`{flag}` stops the gate failing on `rejected` and must be reported");
+            };
+            assert!(error.contains("lowers the severity"), "`{flag}`: {error}");
+        }
+    }
+
+    /// The direction control, and the arm that keeps this guard off a stricter
+    /// tree.
+    ///
+    /// `-D`/`--deny` is the same flag family pointing the other way — the
+    /// shipping command is built on it — so every spelling of it has to pass.
+    /// Without this arm a guard that merely looked for a `-` followed by a
+    /// capital letter would read as working while reddening the gate for
+    /// getting stricter, which is the mistake SAK-241 undid in
+    /// `the_permissions_reader_finds_exactly_the_live_keys`.
+    #[test]
+    fn raising_a_diagnostics_severity_or_leaving_it_alone_passes() {
+        for command in [
+            // The shipped command, which already carries a `-D`.
+            SHIPPED_DENY_COMMAND,
+            // Stricter still, in each spelling of the strict flag.
+            "cargo-deny --locked check -D advisory-not-detected -D rejected advisories \
+             licenses bans sources",
+            "cargo-deny --locked check --deny rejected advisories licenses bans sources",
+            "cargo-deny --locked check --deny=rejected advisories licenses bans sources",
+            "cargo-deny --locked check -Drejected advisories licenses bans sources",
+            // No check names at all: stricter, and passes assertion 1 too.
+            "cargo-deny --locked check -D advisory-not-detected",
+            // Flags that are not about severity at all, including the two
+            // lock-related ones this guard deliberately says nothing about.
+            "cargo-deny --frozen check -D advisory-not-detected advisories licenses bans \
+             sources",
+            "cargo-deny --locked --offline check advisories licenses bans sources",
+            "cargo-deny --locked check --all-features advisories licenses bans sources",
+            "cargo-deny check advisories licenses bans sources",
+            // The strict-prefix arms. `silenced_diagnostics` matches the long
+            // form as exactly `--allow`/`--warn` or an `=`-suffixed prefix of
+            // one, and nothing else. These pin that shape, so a later rewrite
+            // to a bare `starts_with("--allow")` reddens a tree in which no
+            // diagnostic was lowered at all. Neither flag exists in cargo-deny
+            // 0.20.2 — the shape of the match is the whole point, and it is the
+            // only thing standing between this guard and a future
+            // `--allow-<something stricter>`.
+            "cargo-deny --locked check --allow-registry-only advisories licenses bans sources",
+            "cargo-deny --locked check --warn-as-error advisories licenses bans sources",
+        ] {
+            let step = deny_step_checks(&deny_job_with(command)).expect("readable");
+            assert!(
+                check_no_policy_is_silenced(&step).is_ok(),
+                "`{command}` does not lower any diagnostic's severity and must not be \
+                 reported: {:?}",
+                silenced_diagnostics(&step)
+            );
+        }
     }
 
     /// Fails closed, rather than passing, on anything it cannot read.
