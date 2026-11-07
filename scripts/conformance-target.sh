@@ -14,9 +14,9 @@
 # never fails the build; the report is the output.
 #
 # Usage:
-#   scripts/conformance-target.sh --target 'floci-gcp 0.12.0' \
-#     --firestore-host 127.0.0.1:4588 [--datastore-host 127.0.0.1:4588] \
-#     [--out docs/local/measurements/floci-gcp-0.12.0.json] [--timeout 20000] \
+#   scripts/conformance-target.sh --target 'Firebase Emulator Suite v1.22.0' \
+#     --firestore-host 127.0.0.1:8080 [--datastore-host 127.0.0.1:8081] \
+#     [--out docs/local/measurements/firebase-emulator-v1.22.0.json] [--timeout 90000] \
 #     [--only <matrix-id-substring>]
 #
 # `--datastore-host` defaults to `--firestore-host`, which is right for a
@@ -47,7 +47,7 @@ while [[ $# -gt 0 ]]; do
     --datastore-host) datastore_host="$2"; shift 2 ;;
     --out) out="$2"; shift 2 ;;
     --timeout|--only) extra+=("$1" "$2"); shift 2 ;;
-    -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
