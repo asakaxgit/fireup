@@ -73,6 +73,7 @@ prost-build = "0.12"
 tonic-build = { version = "0.11", default-features = false, features = ["prost", "transport"] }
 
 [dev-dependencies]
+serde_yaml = "0.9"
 tempfile = "3.8"
 tokio-test = "0.4"
 
@@ -126,3 +127,7 @@ path = "tests/local_auth_postgres_tests.rs"
 [[test]]
 name = "fidelity_matrix_tests"
 path = "tests/fidelity_matrix_tests.rs"
+
+[[test]]
+name = "workflow_yaml_tests"
+path = "tests/workflow_yaml_tests.rs"

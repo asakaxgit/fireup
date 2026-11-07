@@ -26,9 +26,14 @@ use std::sync::Arc;
 use fireup::local::postgres_store::{PostgresStore, DOCUMENTS_TABLE};
 use fireup::local::store::{conformance, SharedStore};
 use fireup::local::{self, LocalConfig};
+use fireup::protos::google::firestore::v1::run_query_request::QueryType;
+use fireup::protos::google::firestore::v1::structured_query::{
+    field_filter::Operator as FieldOperator, filter::FilterType, CollectionSelector, Direction,
+    FieldFilter, FieldReference, Filter, Order,
+};
 use fireup::protos::google::firestore::v1::{
     firestore_client::FirestoreClient, value::ValueType, ArrayValue, CreateDocumentRequest,
-    Document, GetDocumentRequest, MapValue, Value,
+    Document, GetDocumentRequest, MapValue, RunQueryRequest, StructuredQuery, Value,
 };
 use tonic::transport::Channel;
 
@@ -376,6 +381,103 @@ async fn seed_loads_an_export_and_is_idempotent() {
     assert_eq!(
         found.fields["rank"].value_type,
         Some(ValueType::IntegerValue(1))
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+    cleanup(&url, &project_id).await;
+}
+
+/// `RunQuery` over the Postgres store, end to end through the gRPC server.
+///
+/// `local_query_pushdown_tests` proves the translation agrees with a full scan
+/// for every query shape; this proves the server is actually wired to it and an
+/// SDK gets the right documents back. Ordering by a field is included because
+/// that is the half of the pre-filter that is not part of the `where` clause.
+#[tokio::test]
+async fn run_query_over_postgres_answers_a_filtered_ordered_query() {
+    let Some(url) = test_url() else { return };
+    let project_id = unique_project("runquery");
+    let root = format!("projects/{project_id}/databases/(default)/documents");
+
+    let (server, mut client) = start(&url, &project_id).await;
+    for (id, city, age) in [
+        ("alice", "Tokyo", 31),
+        ("bob", "Kyoto", 41),
+        ("carol", "Tokyo", 24),
+        // No age, so a query ordering by age must leave this one out.
+        ("dan", "Tokyo", -1),
+    ] {
+        let mut fields: std::collections::HashMap<String, Value> =
+            [("city".to_string(), string_value(city))].into_iter().collect();
+        if id != "dan" {
+            fields.insert("age".to_string(), value(ValueType::IntegerValue(age)));
+        }
+        client
+            .create_document(CreateDocumentRequest {
+                parent: root.clone(),
+                collection_id: "people".to_string(),
+                document_id: id.to_string(),
+                document: Some(Document {
+                    fields,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("create a document");
+    }
+
+    let query = StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: "people".to_string(),
+            all_descendants: false,
+        }],
+        r#where: Some(Filter {
+            filter_type: Some(FilterType::FieldFilter(FieldFilter {
+                field: Some(FieldReference {
+                    field_path: "city".to_string(),
+                }),
+                op: FieldOperator::Equal as i32,
+                value: Some(string_value("Tokyo")),
+            })),
+        }),
+        order_by: vec![Order {
+            field: Some(FieldReference {
+                field_path: "age".to_string(),
+            }),
+            direction: Direction::Ascending as i32,
+        }],
+        ..Default::default()
+    };
+
+    let mut stream = client
+        .run_query(RunQueryRequest {
+            parent: root.clone(),
+            query_type: Some(QueryType::StructuredQuery(query)),
+            ..Default::default()
+        })
+        .await
+        .expect("the query runs")
+        .into_inner();
+
+    let mut found = Vec::new();
+    while let Some(response) = stream.message().await.expect("a response") {
+        if let Some(document) = response.document {
+            found.push(
+                document
+                    .name
+                    .rsplit('/')
+                    .next()
+                    .expect("a name has segments")
+                    .to_string(),
+            );
+        }
+    }
+
+    assert_eq!(
+        found,
+        ["carol", "alice"],
+        "Tokyo only, youngest first, and dan has no age to order by"
     );
 
     server.shutdown().await.expect("clean shutdown");

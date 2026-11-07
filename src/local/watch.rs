@@ -32,7 +32,7 @@ use tonic::{Status, Streaming};
 use tracing::debug;
 
 use crate::local::names::{parse_document_name, parse_parent_name};
-use crate::local::query::Query;
+use crate::local::query::{Prefilter, Query};
 use crate::local::store::{
     now_timestamp, Mutation, PendingWrite, SharedStore, Store, StoreResult, WriteEffect,
     WriteOutcome,
@@ -250,8 +250,37 @@ impl Store for WatchedStore {
         self.inner.scan_collection(parent, collection_id).await
     }
 
+    // The filtered scans are *defaulted* trait methods whose default throws the
+    // pre-filter away and reads everything. Forwarding them is therefore not
+    // optional boilerplate: this decorator is what the data plane holds, so a
+    // missing forward here silently turns the Postgres pushdown off for every
+    // query the server serves, with every answer still correct. See
+    // `tests/local_pushdown_boundary_tests.rs`, which exists to catch exactly
+    // this. Any method added to `Store` later has to be forwarded here too.
+    async fn scan_collection_filtered(
+        &self,
+        parent: &str,
+        collection_id: &str,
+        prefilter: Prefilter<'_>,
+    ) -> StoreResult<Vec<Document>> {
+        self.inner
+            .scan_collection_filtered(parent, collection_id, prefilter)
+            .await
+    }
+
     async fn scan_kind(&self, documents_root: &str, kind: &str) -> StoreResult<Vec<Document>> {
         self.inner.scan_kind(documents_root, kind).await
+    }
+
+    async fn scan_kind_filtered(
+        &self,
+        documents_root: &str,
+        kind: &str,
+        prefilter: Prefilter<'_>,
+    ) -> StoreResult<Vec<Document>> {
+        self.inner
+            .scan_kind_filtered(documents_root, kind, prefilter)
+            .await
     }
 
     async fn child_segments(&self, prefix: &str) -> StoreResult<Vec<String>> {
@@ -462,11 +491,21 @@ async fn evaluate(store: &SharedStore, tracked: &Tracked) -> Result<Vec<Document
         }
         Tracked::Query { parent, query, .. } => {
             // The same two scans `RunQuery` picks between, so watching a query
-            // and reading it once see the same documents.
+            // and reading it once see the same documents — including the
+            // pre-filter, which matters more here than it does there. This runs
+            // once per change event per active target, so an unfiltered read
+            // turns every write into a full collection scan (a full *kind* scan
+            // for a collection group listener) for each listener watching it,
+            // rather than once per request.
+            let prefilter = query.prefilter();
             let documents = if query.all_descendants() {
-                store.scan_kind(parent, query.collection_id()).await?
+                store
+                    .scan_kind_filtered(parent, query.collection_id(), prefilter)
+                    .await?
             } else {
-                store.scan_collection(parent, query.collection_id()).await?
+                store
+                    .scan_collection_filtered(parent, query.collection_id(), prefilter)
+                    .await?
             };
             Ok(query.evaluate(documents).documents)
         }
