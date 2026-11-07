@@ -294,6 +294,118 @@ wrong:
   than — and usually a fraction of a millisecond before — the document's
   `update_time`.
 
+### Query pushdown (Postgres only)
+
+With `--postgres-url`, a query's equality and range predicates are translated
+into SQL so the database returns the rows that could match instead of the whole
+collection. It applies to both query reads — one collection, and the collection
+group form that spans every matching collection below the parent — and to both
+read paths: `RunQuery`, and the per-change re-evaluation of a `Listen` query
+target. The in-memory store does not do this and reads everything.
+
+**It cannot change an answer.** The translation is *sound, not exact*: it must
+keep every row the query could match, and is free to keep rows the query will
+then reject. The in-process engine runs afterwards either way and has the only
+vote on the result, so the two backends cannot drift apart — and a predicate
+that cannot be translated faithfully is simply not translated. The differential
+test in [`tests/local_query_pushdown_tests.rs`](../../tests/local_query_pushdown_tests.rs)
+runs every query shape both ways against a real database and requires identical
+answers.
+
+Pushed into SQL:
+
+| Predicate | On |
+|---|---|
+| `==`, `in` | `null`, booleans, numbers, timestamps, strings, bytes, references, geo points, `__name__` |
+| `<`, `<=`, `>`, `>=` | numbers, booleans, strings, references, timestamps, `__name__` |
+| `IS_NULL`, `IS_NAN` | any field (exactly) |
+| `IS_NOT_NULL`, `IS_NOT_NAN` | any field (narrowed to "the field is present") |
+| `orderBy()` | as "the document carries the sort field", which excludes the rest |
+| `AND` | if any child is pushable |
+| `OR` | only if *every* child is pushable |
+
+All of the above work on a nested path (`profile.plan`) as well as a top-level
+field: the translation walks the stored map shape, one
+`-> 'mapValue' -> 'fields'` hop per extra segment, rather than looking for a
+field whose name contains a dot.
+
+Still filtered in the server process — these read the collection (or the part of
+it an `AND` sibling narrowed) and decide in Rust:
+
+| Case | Why |
+|---|---|
+| `!=`, `not-in` | Negating an approximate translation is not sound, and neither is selective enough to be worth an exact one. |
+| `array-contains`, `array-contains-any` | Firestore compares elements by value, where `1` equals `1.0`; JSONB containment compares them as written. |
+| `==` on an array or map value | Same reason, applied at every depth inside the value. |
+| `<`/`>` on bytes | Stored base64, which does not sort like the bytes it encodes. |
+| `<`/`>` on null, geo points, arrays, maps | No cheap SQL ordering, and no real query uses them. |
+| `OR` with one unpushable branch | That branch could match any row, so the whole `OR` could. |
+| `limit()`, `offset()`, cursors | All three are positional, resolved against the ordered result the pre-filter has already fed, so there is no way to know which rows they would keep. |
+
+#### The Datastore surface pushes down too
+
+`RunQuery` has its own filter language, so there was nothing for it to forward
+until that language was translated into the same compiled predicate — a
+Datastore `Filter` is a different type from the `Predicate` a pre-filter
+carries. [`datastore_filter.rs`](../../src/local/datastore_filter.rs) is that
+translation, and it reuses the SQL above unchanged:
+
+| Datastore filter | Pushed |
+|---|---|
+| `=`, `<`, `<=`, `>`, `>=` on a plain property name | yes |
+| `AND` of those | yes |
+| `AND` with one untranslatable term | the translatable terms are, and the whole filter still decides in process |
+| `HAS_ANCESTOR` | it chooses *which* collection to read rather than narrowing one, so it is not a predicate |
+| `OR`, `IN`, `not-in`, `!=` | no — the in-process evaluator answers these as "no match", so a pre-filter for one would narrow a read whose answer is empty either way |
+| A property *path* (`a.b`), an escaped property name, `__key__` | no |
+
+Two things about the shape of that work are worth knowing:
+
+- **A Datastore `order` does not become a `required_fields` entry**, unlike the
+  Firestore side. Firestore excludes a document that has no value for a sort
+  field, which is what lets its pre-filter demand the field be present;
+  Datastore instead *orders* an entity missing the property first. Copying the
+  Firestore spelling would have dropped those entities from the answer.
+- **The value comparator is shared; the evaluator deliberately is not.** The
+  Datastore evaluator used to compare two values with a function whose
+  fall-through arm returned "equal" for every type pair it did not name, so
+  `priority = 3` matched an entity whose `priority` was a string, a blob, or a
+  list. That also made pushing down `=`, `<=` and `>=` unsound, because the
+  translated predicate would have dropped rows the evaluator was still keeping.
+  Property comparison now goes through the same partial order a `Predicate` is
+  evaluated with, which fixes it — real Datastore returns none of those
+  entities either. What is *not* shared is the evaluation: `RunQuery` still
+  answers with its own evaluator rather than with the translated predicate, so
+  the two stay independent implementations and the differential test has
+  something to catch. See `tests/local_datastore_pushdown_tests.rs` for the
+  three mutations that confirm it does.
+
+#### Where the speedup actually comes from
+
+Two separate effects, worth keeping apart because they kick in at different
+sizes:
+
+1. **Fewer rows shipped and decoded.** This is most of it. Decoding a row's
+   JSONB back into a `Document` is the expensive part of a collection read, and
+   a filtered scan skips that for every row that cannot match. Reproduce with
+   `cargo run --release --example pushdown_scale` against a test database: with
+   20,000 documents in one collection, a 1-in-1000 equality reads 20 rows
+   instead of 20,000 and a 1-in-7 equality reads 2,857. On the development box
+   that was roughly **4–10× less wall clock** depending on selectivity; the row
+   counts are the part that does not vary.
+2. **An index seek**, once the collection is big enough to be worth one. The
+   schema carries a GIN index on `fields`, and the `@>` spelling of equality is
+   what lets the planner use it. At 20,000 rows it still chooses a sequential
+   scan — correctly, since scanning is cheaper than the index at that size — and
+   at 200,000 rows it switches to a bitmap index scan on
+   `fireup_local_documents_fields_idx`. So effect 1 is what you get at small
+   volumes and effect 2 arrives on its own later.
+
+Range comparisons are JSONB expressions and are not indexed at all; they get
+effect 1 only. Per-field expression indexes would fix that and are deliberately
+not created — the server cannot know which fields a project queries, and
+guessing would cost every write.
+
 ### Realtime listeners (Phase 2.1)
 
 `Listen` is served well enough for `onSnapshot()` in the official SDKs. A target
@@ -328,7 +440,11 @@ What to know before trusting a listener here:
   affect a limited result set produces no change, where matching each write
   against the filter alone would wrongly report it. It also means a watched
   collection is rescanned per change, which is fine for development volumes and
-  is not how production Firestore does it.
+  is not how production Firestore does it. The rescan goes through the same
+  [query pushdown](#query-pushdown-postgres-only) as `RunQuery`, so with
+  `--postgres-url` it reads the target's filtered rows rather than the whole
+  collection — the read that most needs narrowing, being one per write per
+  listener rather than one per request.
 - **No resume tokens are issued.** Every `TargetChange` carries an empty
   `resume_token`, so an SDK has nothing to resume from and reconnects with a
   full snapshot. A token that arrives anyway is ignored rather than honoured:
@@ -371,7 +487,7 @@ What to know before trusting a listener here:
 | RPC | Status | Notes |
 |---|---|---|
 | `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
-| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`), `AND`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. |
+| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`), `AND`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
 | `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` and `property_mask` (below). |
 | `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. |
 | `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
@@ -459,13 +575,16 @@ whole entity is removed rather than some of its properties.
 
 ### Other known limits
 
-- **A query reads the whole collection** — and a collection group query reads
-  every matching collection below its parent. Filtering, ordering, cursors, and
-  limiting happen in the server process, not in SQL, so that both stores answer
-  a query identically ([`src/local/query.rs`](../../src/local/query.rs) explains
-  the trade-off). In particular a cursor does not make the scan smaller, only
-  the result set. Fine for local-development volumes; not a production query
-  planner.
+- **A query is decided in the server process, not in SQL.** Filtering,
+  ordering, cursors, and limiting all happen in Rust, so both stores answer a
+  query identically ([`src/local/query.rs`](../../src/local/query.rs) explains
+  the trade-off). The Postgres store narrows *what it reads* first — see
+  [Query pushdown](#query-pushdown-postgres-only) — but the answer is always the
+  in-process one, and a cursor still narrows only the result set and never the
+  scan. The in-memory store reads the whole collection every time, and a
+  collection group query reads every matching collection below its parent.
+  Either way this is a local-development engine, not a production query planner:
+  there is no cost model, no index selection, and no `EXPLAIN`.
 - **Nested mask paths are refused on both surfaces.** A Firestore `update_mask`
   or a Datastore `property_mask` naming `foo.bar` is `UNIMPLEMENTED` rather than
   overwriting the whole parent field; top-level paths are served, including the
@@ -748,10 +867,12 @@ src/local/
   names.rs           resource-name parsing (projects/*/databases/*/documents/**)
   store.rs           the Store trait, MemoryStore, and the conformance suite
   postgres_store.rs  the durable Store implementation
+  postgres_filter.rs Firestore filter → SQL WHERE fragment, for pushdown
   query.rs           StructuredQuery compilation and evaluation
   transactions.rs    transaction tokens, read sets, and the conflict check
   value_json.rs      Firestore Value ⇄ JSON, the format of data at rest
   entity_map.rs      Datastore Key/Entity ⇄ Firestore document mapping
+  datastore_filter.rs Datastore Filter → compiled Predicate, for pushdown
   http.rs            the HTTP/1.1 surface: GET /, GET /health, and auth routing
   seed.rs            export → store
   firestore.rs       the google.firestore.v1.Firestore service implementation
@@ -784,9 +905,13 @@ advisory lock, because `CREATE TABLE IF NOT EXISTS` is not race-safe):
 | Column | Why |
 |---|---|
 | `name` | Primary key: the full Firestore resource name. |
-| `project_id`, `database_id`, `parent`, `collection_id`, `document_id` | What collection reads and queries will filter and order on. Deriving them from `name` at query time would mean no index could help. |
-| `fields` (`jsonb`) | The document's fields in the public Firestore REST value shape: `{"rank": {"integerValue": "7"}}`. Legible to SQL, and usable by the query engine later. |
+| `project_id`, `database_id`, `parent`, `collection_id`, `document_id` | What collection reads and queries filter and order on. Deriving them from `name` at query time would mean no index could help. |
+| `fields` (`jsonb`) | The document's fields in the public Firestore REST value shape: `{"rank": {"integerValue": "7"}}`. Legible to SQL, which is what makes [query pushdown](#query-pushdown-postgres-only) possible. |
 | `create_time_seconds` / `_nanos`, `update_time_seconds` / `_nanos` | Exact. `timestamptz` only keeps microseconds, and clients compare `update_time` exactly — it is a write precondition — so rounding it would break a precondition that should succeed. |
+
+Two indexes come with it: a btree on `(parent, collection_id, document_id)`,
+which *is* the collection read, and a GIN index on `fields`, which serves the
+pushed-down equality and field-presence filters.
 
 The table is created in the connection's default schema, so a role whose
 `search_path` changes between runs would look at a different table.
@@ -794,6 +919,16 @@ The table is created in the connection's default schema, so a role whose
 `src/local/value_json.rs` owns that encoding; its tests round-trip every value
 type an SDK can store, including `int64` past 2^53 (written as a string),
 non-finite doubles, raw bytes, and nested maps and arrays.
+
+A timestamp is written as RFC 3339 with nanosecond precision and a `Z`, which
+is a fixed 30 bytes — the property the
+[pushdown](#query-pushdown-postgres-only) relies on to compare timestamps as
+text. That holds only for years 0001–9999, which is the range both
+`google.protobuf.Timestamp` and Firestore are specified for, so a timestamp
+outside it is refused with `INVALID_ARGUMENT` at the **write**, by both stores.
+Rows a build before that check wrote — the year appears signed and five digits
+wide, `+11476-…` — are still read back exactly, and are kept out of the text
+comparison rather than compared wrongly.
 
 ## Protos
 

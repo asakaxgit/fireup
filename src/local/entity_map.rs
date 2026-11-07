@@ -520,7 +520,12 @@ fn ds_transform_type_to_fs(
     })
 }
 
-fn ds_value_to_fs(
+/// Convert one Datastore value to the Firestore value it is stored as.
+///
+/// `pub(crate)` so a filter's operand crosses the same conversion the stored
+/// property did — see [`datastore_filter`](crate::local::datastore_filter),
+/// which is the same reason `compile_property_transforms` converts its operands.
+pub(crate) fn ds_value_to_fs(
     value: &DsValue,
     project_id: &str,
     database_id: &str,

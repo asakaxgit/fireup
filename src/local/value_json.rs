@@ -10,6 +10,14 @@
 //! 2. **No silent fallbacks.** A value this module cannot represent is an
 //!    error, never a dropped field or a coerced type.
 //!
+//! The two are in tension for a value `encode` can write but `decode` cannot
+//! read, so the set of storable values is pinned down on the **encode** side:
+//! `encode` refuses anything outside it (property 2) rather than writing a
+//! payload the read path then rejects, which is what makes property 1 hold as
+//! stated. `decode` is deliberately the wider of the two — it also reads back
+//! the payloads a pre-SAK-205 build wrote, so a database that already holds
+//! one stays readable; see [`decode_timestamp`].
+//!
 //! The wire shape is the documented REST encoding of `google.firestore.v1.Value`
 //! (`{"stringValue": "x"}`, `{"integerValue": "7"}`, …), chosen over an opaque
 //! protobuf blob so the JSONB is legible to SQL and usable by the query engine
@@ -35,6 +43,19 @@ pub enum ValueCodecError {
     /// store should never be handed.
     #[error("{variant} cannot be stored in a document")]
     Unstorable { variant: &'static str },
+
+    /// A timestamp outside years 0001–9999, which is the range both
+    /// `google.protobuf.Timestamp` and Firestore are specified for.
+    ///
+    /// Its own variant rather than a [`ValueCodecError::Malformed`] because it
+    /// is the one encode failure a client can cause with an otherwise
+    /// well-formed value, and the message has to name the range rather than
+    /// leave an SDK guessing why its write was refused.
+    #[error(
+        "timestampValue {seconds}s {nanos}ns is outside years 0001-9999, \
+         the range a Firestore timestamp can hold"
+    )]
+    TimestampOutOfRange { seconds: i64, nanos: i32 },
 
     /// Structurally wrong JSON: not an object, unknown tag, wrong payload type.
     #[error("{0}")]
@@ -299,28 +320,98 @@ fn decode_integer(payload: &Json) -> Result<i64> {
     }
 }
 
+/// `0001-01-01T00:00:00Z`, the first instant a Firestore timestamp can hold.
+const TIMESTAMP_MIN_SECONDS: i64 = -62_135_596_800;
+
+/// `9999-12-31T23:59:59Z`, the last whole second one can hold.
+const TIMESTAMP_MAX_SECONDS: i64 = 253_402_300_799;
+
+/// The fixed width of an encoded timestamp: `0000-00-00T00:00:00.000000000Z`.
+///
+/// Public because the SQL pushdown compares stored timestamps as text and
+/// relies on every one of them being exactly this wide; see
+/// [`postgres_filter`](crate::local::postgres_filter).
+pub const ENCODED_TIMESTAMP_LEN: usize = 30;
+
 /// RFC 3339 with nanosecond precision and a `Z` offset, as the REST API uses.
+///
+/// Refuses a timestamp outside years 0001–9999. That range is not ours: it is
+/// what `google.protobuf.Timestamp` is specified for and what Firestore
+/// documents, so a value outside it is one no SDK could have obtained from the
+/// real service. Refusing it here fails the **write**, which is the error the
+/// client can act on. The alternative — chrono's `+11476-08-15T…Z`, with a
+/// signed five-digit year — is not RFC 3339, is not what the REST API would
+/// ever emit, and is not the fixed width the pushdown's text comparison needs;
+/// writing one would succeed and then break every later read of the whole
+/// collection (SAK-205).
 fn encode_timestamp(timestamp: &Timestamp) -> Result<String> {
+    let out_of_range = || ValueCodecError::TimestampOutOfRange {
+        seconds: timestamp.seconds,
+        nanos: timestamp.nanos,
+    };
+
+    if !(TIMESTAMP_MIN_SECONDS..=TIMESTAMP_MAX_SECONDS).contains(&timestamp.seconds)
+        // proto3 requires `0 <= nanos <= 999,999,999`; a negative one would
+        // otherwise widen into a nonsense `u32` below.
+        || !(0..=999_999_999).contains(&timestamp.nanos)
+    {
+        return Err(out_of_range());
+    }
+
     let moment = chrono::DateTime::from_timestamp(timestamp.seconds, timestamp.nanos as u32)
-        .ok_or_else(|| {
-            malformed(format!(
-                "timestamp {}s {}ns is outside the representable range",
-                timestamp.seconds, timestamp.nanos
-            ))
-        })?;
-    Ok(moment.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+        .ok_or_else(out_of_range)?;
+    let text = moment.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    debug_assert_eq!(
+        text.len(),
+        ENCODED_TIMESTAMP_LEN,
+        "an in-range timestamp must encode to the fixed width the pushdown assumes"
+    );
+    Ok(text)
 }
 
+/// Read a timestamp back, including the one shape `encode` no longer writes.
+///
+/// A build before SAK-205 encoded an out-of-range timestamp as chrono's signed
+/// expanded year (`+11476-08-15T05:20:00.000000000Z`), which
+/// `parse_from_rfc3339` rejects — and because a collection scan decodes every
+/// row it reads, one such row made the entire collection unreadable. Those
+/// rows are already in databases, so they are read back exactly rather than
+/// left as permanent poison. This is the one place the read set is wider than
+/// the write set, and it is wider by exactly the payloads this module used to
+/// produce: nothing is guessed at or coerced, and a value that comes back this
+/// way is refused the next time anything tries to store it.
 fn decode_timestamp(payload: &Json) -> Result<Timestamp> {
     let text = payload
         .as_str()
         .ok_or_else(|| malformed(format!("{} must be an RFC 3339 string", tag::TIMESTAMP)))?;
-    let moment = chrono::DateTime::parse_from_rfc3339(text)
-        .map_err(|error| malformed(format!("{} {text:?} is not RFC 3339: {error}", tag::TIMESTAMP)))?;
+
+    let moment = match chrono::DateTime::parse_from_rfc3339(text) {
+        Ok(moment) => moment.with_timezone(&chrono::Utc),
+        Err(error) => decode_expanded_year_timestamp(text).ok_or_else(|| {
+            malformed(format!(
+                "{} {text:?} is not RFC 3339: {error}",
+                tag::TIMESTAMP
+            ))
+        })?,
+    };
+
     Ok(Timestamp {
         seconds: moment.timestamp(),
         nanos: moment.timestamp_subsec_nanos() as i32,
     })
+}
+
+/// The pre-SAK-205 spelling only: a leading `+`/`-` sign on the year, a `Z`
+/// offset, and otherwise the same fields. Anything else is not something this
+/// module ever wrote, so it stays an error.
+fn decode_expanded_year_timestamp(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if !text.starts_with('+') && !text.starts_with('-') {
+        return None;
+    }
+    let naive = text.strip_suffix('Z')?;
+    chrono::NaiveDateTime::parse_from_str(naive, "%Y-%m-%dT%H:%M:%S%.f")
+        .ok()
+        .map(|naive| naive.and_utc())
 }
 
 fn encode_geo_point(point: &LatLng) -> Json {
@@ -389,6 +480,16 @@ mod tests {
             value(ValueType::TimestampValue(Timestamp {
                 seconds: -1,
                 nanos: 1,
+            })),
+            // Both ends of the range, which is where an off-by-one in the
+            // check added for SAK-205 would show up.
+            value(ValueType::TimestampValue(Timestamp {
+                seconds: TIMESTAMP_MIN_SECONDS,
+                nanos: 0,
+            })),
+            value(ValueType::TimestampValue(Timestamp {
+                seconds: TIMESTAMP_MAX_SECONDS,
+                nanos: 999_999_999,
             })),
             value(ValueType::StringValue(String::new())),
             value(ValueType::StringValue("hello".to_string())),
@@ -502,6 +603,150 @@ mod tests {
             json["timestampValue"],
             Json::String("2023-11-14T22:13:20.123456789Z".to_string())
         );
+    }
+
+    /// Every timestamp `encode` must refuse, as a list, so each case is named.
+    fn every_unstorable_timestamp() -> Vec<(&'static str, Timestamp)> {
+        vec![
+            (
+                "the ticket's repro, year 11476",
+                Timestamp {
+                    seconds: 300_000_000_000,
+                    nanos: 0,
+                },
+            ),
+            (
+                "one second past 9999-12-31T23:59:59Z",
+                Timestamp {
+                    seconds: TIMESTAMP_MAX_SECONDS + 1,
+                    nanos: 0,
+                },
+            ),
+            (
+                "one second before 0001-01-01T00:00:00Z",
+                Timestamp {
+                    seconds: TIMESTAMP_MIN_SECONDS - 1,
+                    nanos: 0,
+                },
+            ),
+            (
+                // Inside chrono's range and so encodable as `0000-01-01…`, but
+                // outside the proto's: year 0 is not a year 0001-9999.
+                "year 0000",
+                Timestamp {
+                    seconds: -62_167_219_200,
+                    nanos: 0,
+                },
+            ),
+            ("i64::MAX seconds", Timestamp {
+                seconds: i64::MAX,
+                nanos: 0,
+            }),
+            ("i64::MIN seconds", Timestamp {
+                seconds: i64::MIN,
+                nanos: 0,
+            }),
+            (
+                "negative nanos, which proto3 forbids",
+                Timestamp {
+                    seconds: 0,
+                    nanos: -1,
+                },
+            ),
+            (
+                "a whole second's worth of nanos",
+                Timestamp {
+                    seconds: 0,
+                    nanos: 1_000_000_000,
+                },
+            ),
+        ]
+    }
+
+    /// The bug SAK-205 reported, stated as the property that was violated:
+    /// a write either fails or produces a payload the read path accepts.
+    #[test]
+    fn a_timestamp_outside_years_0001_9999_fails_the_write() {
+        for (case, timestamp) in every_unstorable_timestamp() {
+            let error = encode(&value(ValueType::TimestampValue(timestamp)))
+                .expect_err(&format!("{case} must not encode"));
+            assert!(
+                matches!(error, ValueCodecError::TimestampOutOfRange { .. }),
+                "{case}: wrong error {error}"
+            );
+            // The message has to say what is wrong; it is what reaches the SDK.
+            assert!(
+                error.to_string().contains("0001-9999"),
+                "{case}: unhelpful message {error}"
+            );
+        }
+    }
+
+    /// The property the SQL pushdown depends on: every timestamp this module
+    /// writes is the same number of bytes, so byte order is chronological
+    /// order. The old encoder broke this as well as the round trip.
+    #[test]
+    fn every_encoded_timestamp_is_the_same_fixed_width() {
+        let timestamps: Vec<String> = every_storable_value()
+            .iter()
+            .filter_map(|original| {
+                let json = encode(original).expect("storable values encode");
+                Some(json.get(tag::TIMESTAMP)?.as_str()?.to_string())
+            })
+            .collect();
+
+        assert!(timestamps.len() >= 5, "the corpus lost its timestamps");
+        for text in timestamps {
+            assert_eq!(
+                text.len(),
+                ENCODED_TIMESTAMP_LEN,
+                "{text} is not fixed width"
+            );
+            assert!(text.ends_with('Z'), "{text} is not a UTC spelling");
+            assert!(
+                text.starts_with(|first: char| first.is_ascii_digit()),
+                "{text} has a signed year"
+            );
+        }
+    }
+
+    /// A row a pre-SAK-205 build wrote stays readable, because refusing it
+    /// fails every scan of the collection holding it, not just that document.
+    #[test]
+    fn a_legacy_expanded_year_payload_is_still_readable() {
+        let cases = [
+            ("+11476-08-15T05:20:00.000000000Z", 300_000_000_000, 0),
+            ("+10000-01-01T00:00:00.000000000Z", 253_402_300_800, 0),
+            ("-0001-01-01T00:00:00.000000001Z", -62_198_755_200, 1),
+        ];
+
+        for (payload, seconds, nanos) in cases {
+            let decoded = decode(&serde_json::json!({ "timestampValue": payload }))
+                .unwrap_or_else(|error| panic!("{payload} must still decode: {error}"));
+            assert_eq!(
+                decoded,
+                value(ValueType::TimestampValue(Timestamp { seconds, nanos })),
+                "{payload} decoded to the wrong instant"
+            );
+
+            // And it is refused the next time anything tries to store it, so
+            // the legacy spelling cannot be written back.
+            encode(&decoded).expect_err("re-encoding a legacy timestamp must fail");
+        }
+    }
+
+    #[test]
+    fn a_timestamp_that_is_neither_rfc_3339_nor_the_legacy_spelling_is_rejected() {
+        for payload in [
+            "2023-11-14",
+            "+not-a-date",
+            "+11476-08-15T05:20:00.000000000",
+            "+11476-08-15T05:20:00.000000000+09:00",
+            "",
+        ] {
+            decode(&serde_json::json!({ "timestampValue": payload }))
+                .expect_err(&format!("{payload:?} is not a timestamp"));
+        }
     }
 
     #[test]

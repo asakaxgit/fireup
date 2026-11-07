@@ -20,6 +20,14 @@ on:
   # repository is stacked (one PR based on another, not on `main`), so a
   # `branches: [main]` filter would skip exactly the PRs that most need
   # checking — every layer of a stack but the bottom one.
+  #
+  # Removing the filter is necessary but not sufficient: GitHub only schedules a
+  # `pull_request` run for a workflow that already exists on the PR's **base**
+  # branch. Measured on this very PR — the layer above it (base
+  # `sak-206/badges-matrix`, which carries this file) got automatic CI, while
+  # this PR (base `sak-203/...`, which predates the file) got none and had to be
+  # checked by `workflow_dispatch`. That resolves itself the moment this lands on
+  # `main`; until then, dispatch manually and say so in the PR.
   pull_request:
   workflow_dispatch:
 
@@ -62,9 +70,26 @@ jobs:
 
       # The static checks that keep the documented promises honest: the fidelity
       # matrix, the comparison document, and the README badges all have to agree
-      # with tests/conformance/matrix.json.
+      # with tests/conformance/matrix.json, and the workflow files in this
+      # directory have to stay parseable.
       - name: Docs and matrix are in sync
-        run: cargo test --locked --test fidelity_matrix_tests
+        run: |
+          cargo test --locked --test fidelity_matrix_tests
+          cargo test --locked --test workflow_yaml_tests
+
+      # Guards that assert *how* a request is served rather than what comes
+      # back, so no other suite can see them fail. `local_pushdown_boundary_tests`
+      # is the one that catches a `Store` decorator which forwards
+      # `scan_collection` but not `scan_collection_filtered` — correct answers,
+      # pushdown silently gone. Needs no database: it records the calls a
+      # `MemoryStore` stack receives.
+      # `local_listen_pushdown_tests` is the same assertion for the other read
+      # path: a `Listen` query target is re-evaluated once per change, so losing
+      # the pushdown there costs a full collection scan per write per listener.
+      - name: Data-plane boundary guards
+        run: |
+          cargo test --locked --test local_pushdown_boundary_tests
+          cargo test --locked --test local_listen_pushdown_tests
 
       # Each of these starts what it needs in-process and talks to it over real
       # gRPC or real HTTP/1.1.
