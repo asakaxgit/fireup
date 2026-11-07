@@ -36,6 +36,22 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege for every job in this workflow, declared here rather than left
+# to the repository's `default_workflow_permissions` setting — which lives in the
+# web UI, outside this tree, and can be widened to `write` with no commit, no
+# pull request and no review. It reads `read` today; this line is what makes that
+# a fact about the repository rather than a fact about a checkbox.
+#
+# The `deny` job is the one that most wants a read-only token: it is the only job
+# here that deliberately goes to the network, and what it does there is download
+# a third-party binary and run it — in a workspace where `actions/checkout` has,
+# by default (`persist-credentials: true`), written this token into `.git/config`.
+#
+# `dependency_pin_tests` fails if this block goes away or gains a `write`, for any
+# scope and in any job (SAK-240).
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -97,11 +113,12 @@ jobs:
           cargo test --locked --test local_listen_pushdown_tests
 
       # The other half of that: the supply-chain facts only Cargo.lock and
-      # deny.toml record. This target reads both off disk and needs no network
-      # and no third-party binary, which is exactly why it belongs in this job
-      # and not in `deny` below — and it has to be named here, because every
-      # cargo invocation in this job names its target, so a test target that no
-      # step lists never runs at all.
+      # deny.toml record — and, since SAK-239 and SAK-240, two about this file.
+      # The target reads all three off disk and needs no network and no
+      # third-party binary, which is exactly why it belongs in this job and not
+      # in `deny` below — and it has to be named here, because every cargo
+      # invocation in this job names its target, so a test target that no step
+      # lists never runs at all.
       #
       # It is also the one check that can report a *widened* gate. cargo-deny
       # cannot: deny.toml is its own input, so relaxing a setting makes it

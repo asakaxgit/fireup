@@ -129,6 +129,14 @@
 //! and the two fields it wants (`name`, `version`) are the first two lines of
 //! every `[[package]]` block in the v3/v4 lock format.
 //!
+//! Not all of them are in `Cargo.lock` or `deny.toml` any more. Two now read
+//! `.github/workflows/ci.yml`, because that is where the rest of this gate's
+//! behaviour is written down: SAK-239 needs the `grep` the `deny` job runs, and
+//! SAK-240 needs the scope of the token every job in that workflow is handed.
+//! Those checks live here rather than in a workflow test of their own for the
+//! reason the bottom of this header gives — this is the one test target CI
+//! actually names.
+//!
 //! The checks are written as functions over parsed text, not as assertions over
 //! the real file, so that the "and it really does fail" half can be committed
 //! too — see the `negative_controls` module at the bottom. A hand-edited
@@ -1782,6 +1790,256 @@ fn check_ignore_entries_are_logged(deny: &str, pattern: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// A `permissions:` key in a workflow, and the block it owns.
+#[derive(Debug, PartialEq, Eq)]
+struct PermissionsKey {
+    /// Columns of indentation before the key. `0` is the workflow top level;
+    /// anything deeper is a job's own block, which overrides the top-level one
+    /// for that job and is *not* capped by it.
+    indent: usize,
+    /// Whatever followed the colon on the same line, comment stripped. Empty
+    /// when the scopes are a block mapping on the lines below.
+    inline: String,
+    /// The `scope: value` lines of a block mapping, comments stripped. Empty
+    /// for an inline form — and also for a key with nothing under it at all,
+    /// which is why `inline` has to be consulted first.
+    entries: Vec<String>,
+}
+
+/// `line` with any `#` comment and trailing whitespace removed.
+///
+/// Good enough because a `permissions:` block is scopes and the words `read`,
+/// `write` and `none`: there is nowhere for a `#` to appear inside a quoted
+/// string and be data. A value this does mangle ends up unreadable rather than
+/// read wrongly, and unreadable fails closed below.
+fn without_comment(line: &str) -> &str {
+    match line.split_once('#') {
+        Some((before, _)) => before.trim_end(),
+        None => line.trim_end(),
+    }
+}
+
+/// Every `permissions:` key in a workflow, at any depth, in file order.
+///
+/// Line-oriented for the same reason the rest of this file is: it keeps the
+/// test target free of a YAML dependency, and the grammar in question is two
+/// levels of plain `key: value`.
+///
+/// A commented-out key is not a key. That is not a nicety — a workflow that
+/// documents its own settings carries the word `permissions:` in prose, and a
+/// reader that matched anywhere in a line would find the comment, read the
+/// value beside it, and report on a setting that is not in effect.
+fn permissions_keys(workflow: &str) -> Vec<PermissionsKey> {
+    let lines: Vec<&str> = workflow.lines().collect();
+    let mut keys = Vec::new();
+    for (at, line) in lines.iter().enumerate() {
+        let bare = without_comment(line);
+        let body = bare.trim_start();
+        let Some(inline) = body.strip_prefix("permissions:") else {
+            continue;
+        };
+        let indent = bare.len() - body.len();
+
+        // The block is every deeper-indented line until the first line at this
+        // depth or shallower. Blank and comment-only lines belong to neither,
+        // so they are skipped rather than ending the block.
+        let mut entries = Vec::new();
+        for next in &lines[at + 1..] {
+            let bare = without_comment(next);
+            let body = bare.trim_start();
+            if body.is_empty() {
+                continue;
+            }
+            if bare.len() - body.len() <= indent {
+                break;
+            }
+            entries.push(body.to_string());
+        }
+
+        keys.push(PermissionsKey {
+            indent,
+            inline: inline.trim().to_string(),
+            entries,
+        });
+    }
+    keys
+}
+
+/// `Ok` if `scope: value` grants no more than reading.
+///
+/// `read` and `none` are the only two values that pass. `write` is the point of
+/// the check; anything else is a value this reader does not understand, and is
+/// refused rather than guessed at — `contents: Read` and `contents: "read"` are
+/// both real spellings that GitHub rejects or ignores, and neither may read as
+/// a pass.
+fn scope_is_read_only(pair: &str, which: &str) -> Result<(), String> {
+    let Some((scope, value)) = pair.split_once(':') else {
+        return Err(format!(
+            "{which} has an entry this reader cannot parse as `scope: value`: `{pair}`. \
+             Refused rather than assumed harmless: the whole job of this guard is to \
+             read what the token can do, and a shape it does not understand is a shape \
+             it cannot clear."
+        ));
+    };
+    let (scope, value) = (scope.trim(), value.trim());
+    match value {
+        "read" | "none" => Ok(()),
+        "write" => Err(format!(
+            "{which} grants `{scope}: write`, so this workflow's GITHUB_TOKEN can change \
+             the repository. The `deny` job fetches and executes a third-party binary with \
+             a checkout whose `.git/config` holds that token (actions/checkout defaults to \
+             `persist-credentials: true`), so a write scope here is a write scope handed to \
+             downloaded code. If a job genuinely needs to write, give that one job its own \
+             `permissions:` and say in a comment what it writes — do not widen the workflow."
+        )),
+        other => Err(format!(
+            "{which} sets `{scope}` to `{other}`, which is not one of `read`, `write` or \
+             `none`. This guard fails closed on a value it cannot read rather than passing \
+             it: `Read` and `\"read\"` both look right and neither is the word GitHub \
+             accepts. Write it as a bare lower-case `read` (or `none`)."
+        )),
+    }
+}
+
+/// `Ok` if this one `permissions:` key grants no more than reading.
+fn permissions_key_is_read_only(key: &PermissionsKey) -> Result<(), String> {
+    let which = if key.indent == 0 {
+        "the top-level `permissions:` in ci.yml".to_string()
+    } else {
+        format!(
+            "a job-level `permissions:` in ci.yml (indented {} columns)",
+            key.indent
+        )
+    };
+
+    if !key.inline.is_empty() {
+        // `read-all`, `write-all`, or a flow mapping on the same line.
+        if let Some(inner) = key
+            .inline
+            .strip_prefix('{')
+            .and_then(|rest| rest.strip_suffix('}'))
+        {
+            // `{}` is every scope at `none`, which is stricter than `read`.
+            if inner.trim().is_empty() {
+                return Ok(());
+            }
+            for pair in inner.split(',') {
+                scope_is_read_only(pair.trim(), &which)?;
+            }
+            return Ok(());
+        }
+        return match key.inline.as_str() {
+            "read-all" => Ok(()),
+            "write-all" => Err(format!(
+                "{which} is `write-all`, which grants every scope at write. That is the \
+                 widest token GitHub will issue and it is handed to a workflow whose \
+                 `deny` job runs a downloaded binary. Use `contents: read`."
+            )),
+            other => Err(format!(
+                "{which} is `{other}`, which this reader does not understand. The forms it \
+                 knows are `read-all`, `write-all`, `{{}}`, and a block of `scope: value` \
+                 lines. Unreadable fails closed here, because the alternative is reporting \
+                 on a token nobody has measured."
+            )),
+        };
+    }
+
+    if key.entries.is_empty() {
+        return Err(format!(
+            "{which} has no scopes under it. An empty key is not a least-privilege \
+             declaration — it is a YAML null, which GitHub rejects when it loads the \
+             workflow, so the run that was supposed to be gated does not happen at all. \
+             Write `contents: read` under it, or `permissions: {{}}` if the intent really \
+             is no scopes."
+        ));
+    }
+
+    // Every scope, not just the first one that looks safe. A write hides
+    // perfectly well as the second entry under a reassuring `contents: read`.
+    for entry in &key.entries {
+        scope_is_read_only(entry, &which)?;
+    }
+    Ok(())
+}
+
+/// `Ok` if `ci.yml` declares a top-level token that can only read.
+///
+/// `ci.yml` shipped with no `permissions:` at all, which does not mean the
+/// token was wide — measured on SAK-240, `default_workflow_permissions` for
+/// this repository is `read` — it means **the tree does not say**. The scope of
+/// the token every job in this workflow gets was decided by a checkbox in the
+/// repository's web settings, outside the tree, changeable with no commit, no
+/// pull request and no review, and nothing in the repository would report it.
+///
+/// That matters here more than in a workflow that only compiles things. The
+/// comment at the top of `ci.yml` names the `deny` job as the one job that
+/// deliberately goes to the network, and what it does there is download a
+/// third-party binary and run it — in a workspace where `actions/checkout`
+/// has, by default, written the token into `.git/config`.
+///
+/// Three things this asserts that a laxer reading would miss:
+///
+/// * **The value, not the key.** A guard that only checked that a
+///   `permissions:` line exists would accept `contents: write`. The arms below
+///   pair every failing value with the passing one, because a guard whose
+///   direction is wrong looks identical to a correct one until someone widens
+///   the setting. (SAK-237's `include-dependencies` and SAK-238's
+///   `include-build` default opposite ways; getting a direction backwards is
+///   not hypothetical in this file.)
+/// * **Every scope.** `contents: read` beside `packages: write` reads safe at a
+///   glance and is not. Same shape as SAK-237's optional `checksum` sub-key:
+///   the thing that unpins the gate is the token you did not look at.
+/// * **Every block, not only the top-level one.** A job's `permissions:`
+///   replaces the workflow's for that job and is *not* capped by it — only the
+///   repository-wide maximum caps it — so a job-level `permissions: write-all`
+///   would hand the `deny` job a write token with the reassuring
+///   `contents: read` still sitting at the top of the file. That is the
+///   kill-switch-beside-the-policy shape from SAK-231's
+///   `disable-yank-checking`, and it is why this reads all of them.
+///
+/// Deliberately strict in one direction: the top-level key is *required*.
+/// Putting `contents: read` on the `deny` job alone would be safe for that job
+/// and this still fails it. The failure mode of being wrong about that is one
+/// harmless line, against a default that lives where nobody reads it.
+///
+/// Note what this cannot do: it is a statement about the tree, not about the
+/// repository setting. A top-level `contents: read` caps the token regardless
+/// of what the web checkbox says, which is exactly why declaring it is the fix
+/// — but if someone widens `default_workflow_permissions` and deletes these
+/// lines in the same change, it is the deleted lines this reports, not the
+/// checkbox.
+fn check_workflow_token_is_read_only(ci: &str) -> Result<(), String> {
+    let keys = permissions_keys(ci);
+
+    let top_level = keys.iter().filter(|key| key.indent == 0).count();
+    if top_level == 0 {
+        return Err(
+            "ci.yml declares no top-level `permissions:`, so the scope of every job's \
+             GITHUB_TOKEN is whatever the repository's `default_workflow_permissions` web \
+             setting happens to be. That setting is outside this tree: it can be widened to \
+             `write` with no commit, no pull request and no review, and nothing in the \
+             repository reports it. It reads `read` today (measured, SAK-240) — the problem \
+             is that no file here says so. Add, above `jobs:`:\n\
+             \n    permissions:\n      contents: read\n\n\
+             which caps the token for the whole workflow in the tree, where a change to it \
+             is a diff someone reviews."
+                .to_string(),
+        );
+    }
+    if top_level > 1 {
+        return Err(format!(
+            "ci.yml has {top_level} top-level `permissions:` keys. YAML duplicate keys are \
+             resolved last-one-wins by some loaders and rejected by others, so which token \
+             this workflow asks for is not something a reader can tell. Keep one."
+        ));
+    }
+
+    for key in &keys {
+        permissions_key_is_read_only(key)?;
+    }
+    Ok(())
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -1918,6 +2176,13 @@ fn every_accepted_advisory_is_visible_in_the_deny_jobs_log() {
         Err(reason) => panic!("{reason}"),
     };
     if let Err(reason) = check_ignore_entries_are_logged(&repo_file("deny.toml"), &pattern) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn ci_yml_declares_a_read_only_token_for_every_job() {
+    if let Err(reason) = check_workflow_token_is_read_only(&repo_file(".github/workflows/ci.yml")) {
         panic!("{reason}");
     }
 }
@@ -3750,5 +4015,243 @@ include-build = false
             "{step}      - name: Something else\n        run: grep -n 'x' deny.toml\n"
         ))
         .is_err());
+    }
+
+    /// A workflow with `permissions` spliced in where `ci.yml` carries it:
+    /// top level, between `env:` and `jobs:`.
+    ///
+    /// The argument is literal source text rather than a parsed value, so an
+    /// arm can hand this a shape no author would choose on purpose — an empty
+    /// key, a capitalised value, a key that is only a comment. Those are the
+    /// arms that decide whether the guard fails closed.
+    fn workflow_with(permissions: &str) -> String {
+        format!(
+            "name: CI\n\non:\n  push:\n    branches: [main]\n  pull_request:\n\n\
+             env:\n  CARGO_TERM_COLOR: always\n\n\
+             {permissions}jobs:\n  deny:\n    name: supply chain\n    \
+             runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      \
+             - run: cargo deny check\n"
+        )
+    }
+
+    /// D1. The shipped state before this ticket: no `permissions:` anywhere, so
+    /// the token's scope is the repository's web setting and the tree is silent
+    /// about it. This is the arm that is red on the tree as it stands, which is
+    /// why the two lines in `ci.yml` and this guard had to land together.
+    #[test]
+    fn a_workflow_that_declares_no_permissions_fails() {
+        let error = check_workflow_token_is_read_only(&workflow_with(""))
+            .expect_err("a workflow with no permissions block must fail");
+        assert!(error.contains("default_workflow_permissions"), "{error}");
+    }
+
+    /// D2 / D3. The direction control, and the pair that matters most.
+    ///
+    /// A guard that checked for the *presence* of a `permissions:` key would
+    /// pass both of these, and would have been written, committed and reviewed
+    /// looking exactly like this one. Only the fact that `write` fails where
+    /// `read` passes says the guard reads the value.
+    #[test]
+    fn a_write_scope_fails_where_the_same_scope_at_read_passes() {
+        let error = check_workflow_token_is_read_only(&workflow_with(
+            "permissions:\n  contents: write\n\n",
+        ))
+        .expect_err("contents: write must fail");
+        assert!(error.contains("contents: write"), "{error}");
+
+        assert!(
+            check_workflow_token_is_read_only(&workflow_with("permissions:\n  contents: read\n\n"))
+                .is_ok(),
+            "contents: read is the declaration this ticket asks for and must pass, or the \
+             guard is one that can never be satisfied"
+        );
+    }
+
+    /// D4 / D5. The two blanket forms. `write-all` is the widest token GitHub
+    /// issues; `read-all` is a legitimate way to say the same thing the block
+    /// form says, so refusing it would be refusing a correct declaration.
+    #[test]
+    fn write_all_fails_where_read_all_passes() {
+        let error = check_workflow_token_is_read_only(&workflow_with("permissions: write-all\n\n"))
+            .expect_err("write-all must fail");
+        assert!(error.contains("every scope at write"), "{error}");
+
+        assert!(
+            check_workflow_token_is_read_only(&workflow_with("permissions: read-all\n\n")).is_ok(),
+            "read-all grants nothing but reading and must pass"
+        );
+    }
+
+    /// D6. The one a careless reader ships: the write is in the *second* scope.
+    /// Stop at `contents` and the block reads safe. Same shape as the optional
+    /// `checksum` sub-key in SAK-237 — what unpins the gate is the token nobody
+    /// looked at.
+    #[test]
+    fn a_write_scope_hiding_behind_a_read_one_fails() {
+        let error = check_workflow_token_is_read_only(&workflow_with(
+            "permissions:\n  contents: read\n  packages: write\n\n",
+        ))
+        .expect_err("a second scope at write must fail");
+        assert!(error.contains("packages: write"), "{error}");
+    }
+
+    /// D7 / D8. Two things that look alike in a diff and are not the same at
+    /// all. `permissions: {}` is every scope at `none` — stricter than this
+    /// guard demands. A key with nothing under it is a YAML null that GitHub
+    /// refuses to load, so the gated run simply never happens; passing it would
+    /// be passing a workflow that does not run.
+    #[test]
+    fn an_empty_mapping_passes_where_an_empty_key_fails() {
+        assert!(
+            check_workflow_token_is_read_only(&workflow_with("permissions: {}\n\n")).is_ok(),
+            "`permissions: {{}}` is no scopes at all, which is stricter than contents: read"
+        );
+
+        let error = check_workflow_token_is_read_only(&workflow_with("permissions:\n\n"))
+            .expect_err("an empty permissions key must fail");
+        assert!(error.contains("no scopes under it"), "{error}");
+    }
+
+    /// D9. Fails closed on a value it cannot read, rather than guessing. Both
+    /// spellings here are ones a careful author might type; GitHub accepts
+    /// neither, and a guard that shrugged at them would be reporting on a token
+    /// nobody has measured. Same call SAK-235 made for `[graph] targets`.
+    #[test]
+    fn a_value_this_reader_cannot_parse_fails() {
+        for value in ["Read", "READ", "\"read\"", "true"] {
+            let Err(error) = check_workflow_token_is_read_only(&workflow_with(&format!(
+                "permissions:\n  contents: {value}\n\n"
+            ))) else {
+                panic!("`contents: {value}` is not a value GitHub accepts and must fail");
+            };
+            assert!(error.contains("not one of"), "{error}");
+        }
+
+        // The control: the one spelling that is the word GitHub accepts.
+        assert!(
+            check_workflow_token_is_read_only(&workflow_with("permissions:\n  contents: read\n\n"))
+                .is_ok(),
+            "the bare lower-case value must pass, or the arms above are failing on \
+             something other than the spelling"
+        );
+    }
+
+    /// D10. Comments inside the block are not entries. `ci.yml` explains every
+    /// setting it carries, and this block is no exception, so a reader that
+    /// counted comment lines as scopes would fail the file it was written for.
+    #[test]
+    fn comments_inside_the_block_do_not_change_the_reading() {
+        assert!(
+            check_workflow_token_is_read_only(&workflow_with(
+                "permissions:\n  # Least privilege for every job.\n  contents: read\n\n"
+            ))
+            .is_ok(),
+            "a comment inside the block must not be read as a scope"
+        );
+
+        // Including a trailing one on the live line.
+        assert!(check_workflow_token_is_read_only(&workflow_with(
+            "permissions:\n  contents: read  # nothing here writes\n\n"
+        ))
+        .is_ok());
+    }
+
+    /// A commented-out declaration is not a declaration. `ci.yml` documents its
+    /// own settings in prose, so the word `permissions:` appears in the file
+    /// whether or not the key does — and a substring match would find the
+    /// comment, read the value beside it, and call an unset workflow safe.
+    #[test]
+    fn a_commented_out_permissions_block_is_not_the_setting() {
+        let error = check_workflow_token_is_read_only(&workflow_with(
+            "# permissions:\n#   contents: read\n\n",
+        ))
+        .expect_err("a commented-out block must not count as a declaration");
+        assert!(error.contains("default_workflow_permissions"), "{error}");
+
+        // And the mirror: a commented-out `write` beside a live `read` is prose
+        // about history, not a setting, and must not fail the file.
+        assert!(
+            check_workflow_token_is_read_only(&workflow_with(
+                "permissions:\n  # was: contents: write, until SAK-240\n  contents: read\n\n"
+            ))
+            .is_ok(),
+            "a commented-out write must not fail a workflow whose live value is read"
+        );
+    }
+
+    /// The scope the ticket left out, and the reason this guard reads every
+    /// block rather than only the first.
+    ///
+    /// A job's `permissions:` *replaces* the workflow's for that job — it is
+    /// not capped by it; only the repository-wide maximum is a cap — so this
+    /// workflow would hand the `deny` job a write token with `contents: read`
+    /// still sitting reassuringly at the top of the file. Policy at the top,
+    /// kill switch further down: the shape SAK-231 found in
+    /// `disable-yank-checking`.
+    #[test]
+    fn a_job_level_block_that_widens_the_token_fails() {
+        let widened = "name: CI\n\non:\n  pull_request:\n\npermissions:\n  contents: read\n\n\
+                       jobs:\n  deny:\n    runs-on: ubuntu-latest\n    \
+                       permissions: write-all\n    steps:\n      - run: cargo deny check\n";
+        let error = check_workflow_token_is_read_only(widened)
+            .expect_err("a job-level write-all must fail even under a read-only top level");
+        assert!(error.contains("job-level"), "{error}");
+
+        // A job-level block that only narrows is fine, and must stay fine:
+        // giving the `deny` job its own `contents: read` is good practice, and
+        // a guard that failed it would be teaching people to delete it.
+        let narrowed = "name: CI\n\non:\n  pull_request:\n\npermissions:\n  contents: read\n\n\
+                        jobs:\n  deny:\n    runs-on: ubuntu-latest\n    \
+                        permissions:\n      contents: read\n    steps:\n      \
+                        - run: cargo deny check\n";
+        assert!(check_workflow_token_is_read_only(narrowed).is_ok());
+    }
+
+    /// The reader itself, on the real file and on the shapes above.
+    ///
+    /// Here because every arm in this section is only as good as this parse: if
+    /// `permissions_keys` found nothing in any input, most of the failing arms
+    /// would still fail — for the wrong reason — and the passing ones would be
+    /// the only thing left telling the difference.
+    #[test]
+    fn the_permissions_reader_finds_exactly_the_live_keys() {
+        let ci = repo_file(".github/workflows/ci.yml");
+        let keys = permissions_keys(&ci);
+        assert_eq!(
+            keys.len(),
+            1,
+            "ci.yml must carry exactly one `permissions:` key, found {keys:?}"
+        );
+        assert_eq!(keys[0].indent, 0);
+        assert_eq!(keys[0].inline, "");
+        assert_eq!(keys[0].entries, vec!["contents: read".to_string()]);
+
+        // Depth is what separates a workflow-wide key from a job's own.
+        let keys = permissions_keys(
+            "permissions:\n  contents: read\njobs:\n  deny:\n    permissions: write-all\n",
+        );
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].indent, 0);
+        assert_eq!(keys[1].indent, 4);
+        assert_eq!(keys[1].inline, "write-all");
+
+        // A comment is not a key, and a longer key that merely starts with the
+        // word is not this key either.
+        assert_eq!(permissions_keys("# permissions: write-all\n"), Vec::new());
+        assert_eq!(
+            permissions_keys("permissions-note: write-all\n"),
+            Vec::new()
+        );
+
+        // The block ends at the next key at the same depth, and a blank line in
+        // the middle of it does not end it early.
+        let keys = permissions_keys(
+            "permissions:\n  contents: read\n\n  packages: none\njobs:\n  deny:\n    \
+             runs-on: ubuntu-latest\n",
+        );
+        assert_eq!(
+            keys[0].entries,
+            vec!["contents: read".to_string(), "packages: none".to_string()]
+        );
     }
 }
