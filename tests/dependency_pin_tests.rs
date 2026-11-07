@@ -48,10 +48,11 @@
 //!    heard of last week's advisories.
 //!
 //!    Deleting the line reads as tidying up a redundant default, which is what
-//!    makes it worth a test. CI does not take the `--offline` path today — the
-//!    `deny` job passes only `--locked` — so nothing in CI would go red if the
-//!    line went away, and nothing in CI would go red the day someone adds
-//!    `actions/cache` for `~/.cargo` or `--frozen` for reproducibility either.
+//!    makes it worth a test. The `deny` job would not notice: CI does not take
+//!    the `--offline` path today — that job passes only `--locked` — so
+//!    `cargo deny` stays green if the line goes away, and stays green the day
+//!    someone adds `actions/cache` for `~/.cargo` or `--frozen` for
+//!    reproducibility. The step that goes red is the one running this file.
 //!
 //! 5. **`[bans] wildcards` stays at `"deny"`.** A `*` version requirement is a
 //!    dependency on whatever cargo resolves at build time, which is the thing
@@ -134,6 +135,18 @@
 //! `Cargo.lock` is not a usable mutation here: cargo re-resolves an inconsistent
 //! lock file before it runs the test, so breaking the real file on disk proves
 //! nothing.
+//!
+//! None of the above is a guard unless something runs it. This is an integration
+//! test target: `cargo test --lib` does not reach it, `cargo build
+//! --all-targets` only compiles it, and `coverage.yml` measures `--lib` scope
+//! only. Every cargo invocation in the `test` job of `.github/workflows/ci.yml`
+//! names its target with `--test`, and for the first five tickets' worth of
+//! checks above none of them named this one — so the file ran nowhere but on the
+//! machine of whoever typed a bare `cargo test`, and each of the one-line config
+//! edits it exists to catch passed CI green. Measured in SAK-232, which added
+//! the step. If a later tidy-up drops `--test dependency_pin_tests` from that
+//! workflow, every check in this file switches off and CI gets quieter, not
+//! louder.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

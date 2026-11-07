@@ -96,6 +96,19 @@ jobs:
           cargo test --locked --test local_pushdown_boundary_tests
           cargo test --locked --test local_listen_pushdown_tests
 
+      # The other half of that: the supply-chain facts only Cargo.lock and
+      # deny.toml record. This target reads both off disk and needs no network
+      # and no third-party binary, which is exactly why it belongs in this job
+      # and not in `deny` below — and it has to be named here, because every
+      # cargo invocation in this job names its target, so a test target that no
+      # step lists never runs at all.
+      #
+      # It is also the one check that can report a *widened* gate. cargo-deny
+      # cannot: deny.toml is its own input, so relaxing a setting makes it
+      # greener, not redder. Keep this step whenever deny.toml gains a policy.
+      - name: Supply-chain pins and gate settings
+        run: cargo test --locked --test dependency_pin_tests
+
       # Each of these starts what it needs in-process and talks to it over real
       # gRPC or real HTTP/1.1.
       - name: Local data plane
