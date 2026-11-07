@@ -2590,6 +2590,219 @@ fn check_nothing_switches_the_gate_off(conditions: &GateConditions) -> Result<()
     Ok(())
 }
 
+/// The event that has to reach the gate, spelled as it appears under `on:`.
+const GATE_EVENT: &str = "pull_request";
+
+/// The keys that narrow which `pull_request` events start the workflow.
+///
+/// Every one of them subtracts: a workflow with any of these fires on a subset
+/// of what it fired on before. None of them can make it fire on more. That
+/// asymmetry is the whole reason this is a fixed list rather than a judgement
+/// about values — a reader does not have to decide whether `[main]` or
+/// `['src/**']` is the dangerous spelling, because narrowing at all is the
+/// thing being reported.
+const TRIGGER_NARROWING_KEYS: &[&str] = &[
+    "branches",
+    "branches-ignore",
+    "paths",
+    "paths-ignore",
+    "types",
+    "tags",
+    "tags-ignore",
+];
+
+/// `ci.yml`'s `on:` block, as a text reader can see it.
+#[derive(Debug, PartialEq, Eq)]
+struct GateTrigger {
+    /// The event names declared directly under `on:`, in file order.
+    events: Vec<String>,
+    /// The keys nested under `GATE_EVENT`, if that event is declared with a
+    /// body at all. `Some(vec![])` is the shipped shape — declared, no body.
+    gate_event_keys: Option<Vec<String>>,
+}
+
+/// What starts the workflow that holds the gate, read out of `ci.yml`.
+///
+/// One level further out than `deny_gate_conditions`. That one asks whether the
+/// job and step conditions let the gate run; this asks whether the *workflow*
+/// is started at all. A workflow that is never triggered has no jobs, so it has
+/// no `deny` job, so there is nothing for any condition on that job to be read
+/// off — and `GateConditions` would still come back empty and green.
+///
+/// `Err` if `on:` is missing or its body cannot be read, which is fail-closed
+/// for the same reason the rest of this file is: a gate whose trigger this
+/// reader cannot see is a gate none of the promises below are about.
+fn deny_gate_trigger(ci: &str) -> Result<GateTrigger, String> {
+    let lines: Vec<&str> = ci.lines().collect();
+
+    let on_at = sole_line(&lines, "on:", "the workflow's trigger block")?;
+    let body = block_under(&lines, on_at);
+    let Some(event_indent) = body.iter().map(|(_, line)| indent_of(line)).min() else {
+        return Err(
+            "ci.yml's `on:` block has no body, so nothing starts this workflow and the \
+             supply-chain gate inside it never runs. A workflow with no triggers is not a \
+             gate; it is a file."
+                .to_string(),
+        );
+    };
+
+    let mut events = Vec::new();
+    let mut gate_event_keys = None;
+    for (offset, (_, line)) in body.iter().enumerate() {
+        if indent_of(line) != event_indent {
+            continue;
+        }
+        let Some((event, _)) = without_comment(line).trim().split_once(':') else {
+            // A sequence entry (`on: [push, pull_request]` written as a block
+            // list) or anything else this reader has no grammar for. Refusing
+            // is the only honest answer: the events are right there in the file
+            // and this guard cannot name them.
+            return Err(format!(
+                "ci.yml's `on:` block has the line `{}`, which this reader has no grammar \
+                 for. It fails rather than passing: which events start the workflow is the \
+                 single thing this guard is about, and it cannot read them. Write the \
+                 triggers as `  <event>:` mapping keys, which is the form ci.yml uses.",
+                without_comment(line).trim()
+            ));
+        };
+        let event = event.trim().to_string();
+        if event == GATE_EVENT {
+            // Exactly that depth, not deeper: `types:` under `pull_request` is a
+            // narrowing key, while `branches:` under a *different* event is that
+            // event's business and not this one's.
+            let nested = block_under(&lines, body[offset].0);
+            let Some(key_indent) = nested.iter().map(|(_, l)| indent_of(l)).min() else {
+                gate_event_keys = Some(Vec::new());
+                events.push(event);
+                continue;
+            };
+            let mut keys = Vec::new();
+            for (_, nested_line) in &nested {
+                if indent_of(nested_line) != key_indent {
+                    continue;
+                }
+                let bare = without_comment(nested_line).trim();
+                let key = bare.split_once(':').map_or(bare, |(key, _)| key).trim();
+                keys.push(key.to_string());
+            }
+            gate_event_keys = Some(keys);
+        }
+        events.push(event);
+    }
+
+    Ok(GateTrigger {
+        events,
+        gate_event_keys,
+    })
+}
+
+/// `Ok` if every pull request starts the workflow that holds the gate.
+///
+/// The third of three questions about the same gate, and the one left over
+/// after the other two. `check_every_deny_check_runs` reads what the gate's
+/// command names; `check_nothing_switches_the_gate_off` reads whether that
+/// command is reached and whether failing it costs anything. Both of those read
+/// keys *inside* a job that exists. This one reads whether the workflow runs at
+/// all, which is a key one indent further out, in a block neither of them
+/// opens.
+///
+/// Measured on this tree (SAK-218), each arm the real `ci.yml` with its `on:`
+/// block edited and nothing else:
+///
+/// | mutation | what still runs on a pull request | this file |
+/// |---|---|---|
+/// | `pull_request: branches: [main]` | only the bottom layer of a stack | 154 passed |
+/// | `pull_request: paths: ['src/**']` | nothing, for a `deny.toml`-only PR | 154 passed |
+/// | `pull_request:` removed | nothing | 154 passed |
+/// | `pull_request: types: [labeled]` | nothing, until someone labels it | 154 passed |
+/// | whole block replaced by `workflow_dispatch:` | nothing, ever | 154 passed |
+///
+/// The control that says the green is a missing assertion rather than a file
+/// this target cannot see: renaming the gate step in the same file turns seven
+/// of these tests red.
+///
+/// **One assertion.** `pull_request` is declared, and carries none of
+/// `TRIGGER_NARROWING_KEYS`.
+///
+/// Deliberately nothing about the rest of `on:`. Another event, a
+/// `workflow_dispatch`, a `schedule` — each is one more way the gate runs, so a
+/// guard that reddened on them would be failing a tree stricter than the one
+/// shipped. That is the same direction `check_every_deny_check_runs` settled on
+/// when it had to pass a command that named no checks at all, and the mistake
+/// SAK-241 undid in the `permissions` reader. A narrowing key under a *different*
+/// event is likewise not this guard's business: narrowing `push` costs the
+/// post-merge run on `main`, not the pull-request run that gates the merge.
+///
+/// What is asserted about the *runtime*, and on what evidence. `actionlint.yml`
+/// on `main` carries the identical `on:` block to this one, which makes its run
+/// history a one-variable measurement of these two filters in the same file
+/// shape:
+///
+/// | claim | evidence |
+/// |---|---|
+/// | a `branches:` filter suppresses the event on every non-matching ref | `actionlint`'s `push` runs (`branches: [main]`): 3, every one of them on `main` |
+/// | the same workflow's unfiltered event does fire on feature branches | `actionlint`'s `pull_request` runs: 4, on 4 distinct `sak-*` branches |
+/// | direction control — pushes to feature branches do generate runs when nothing filters them out | `fireup local`: 56 `push` runs across 18 branches, feature branches included |
+///
+/// The direction control is what makes the first row mean anything. Without it,
+/// "zero `push` runs on feature branches" reads just as well as "nobody pushed".
+///
+/// `paths:` has no precedent in this repository — no workflow here has ever
+/// carried one — so that row of the first table is the tree-side measurement
+/// only, and GitHub's documentation for the runtime half. Said plainly here
+/// rather than left to look measured.
+///
+/// Why this one matters more here than the filter looks: every change reaches
+/// `main` through a pull request, and overlapping work in this repository is
+/// stacked — 21 layers deep while this was written. `ci.yml`'s own comment
+/// argues for exactly this ("a `branches: [main]` filter would skip exactly the
+/// PRs that most need checking — every layer of a stack but the bottom one").
+/// That argument was prose, and prose is not a reporter: the five mutations
+/// above left this file at 154 passed.
+fn check_every_pull_request_runs_the_gate(trigger: &GateTrigger) -> Result<(), String> {
+    let Some(keys) = &trigger.gate_event_keys else {
+        return Err(format!(
+            "ci.yml's `on:` block declares {:?} but not `{GATE_EVENT}`, so no pull request \
+             starts this workflow. Nothing then creates the `{DENY_JOB}` job, so the \
+             supply-chain gate has no verdict to give on the change being merged — and \
+             every change reaches `main` here through a pull request. Measured (SAK-218): \
+             with `{GATE_EVENT}` removed, this whole file still passed 154 tests, so \
+             nothing here would have told you.",
+            trigger.events
+        ));
+    };
+
+    let narrowing: Vec<&String> = keys
+        .iter()
+        .filter(|key| TRIGGER_NARROWING_KEYS.contains(&key.as_str()))
+        .collect();
+    if narrowing.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "ci.yml narrows its `{GATE_EVENT}` trigger with {narrowing:?}, which subtracts from \
+         the pull requests that start this workflow. The ones it subtracts are not a random \
+         sample. Overlapping work in this repository is stacked — one pull request based on \
+         another rather than on `main` — so `branches: [main]` keeps the gate off every \
+         layer but the bottom one, and a `paths:` filter keeps it off exactly the change \
+         that is only `deny.toml` and `Cargo.lock`. A workflow that does not start has no \
+         `{DENY_JOB}` job, so `check_nothing_switches_the_gate_off` has no condition to \
+         read and comes back green.\n\n\
+         Measured on this repository's own history: `actionlint.yml` on `main` carries the \
+         identical `on:` block to this one, and its `push` event — the one with \
+         `branches: [main]` on it — has run 3 times, every time on `main`, while its \
+         unfiltered `pull_request` event has run on 4 separate `sak-*` branches. The \
+         direction control is `fireup local`, with 56 `push` runs across 18 branches \
+         including feature branches: pushes there do make runs when no filter removes \
+         them.\n\n\
+         Adding an event, or a `workflow_dispatch`, is a tree this guard passes — more ways \
+         to run is not a hole. Only narrowing `{GATE_EVENT}` fails. If the gate genuinely \
+         has to be conditional, that is a decision for a ticket rather than a line this \
+         guard has to guess at."
+    ))
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -2755,6 +2968,17 @@ fn nothing_in_ci_yml_switches_the_deny_gate_off() {
         Err(reason) => panic!("{reason}"),
     };
     if let Err(reason) = check_nothing_switches_the_gate_off(&conditions) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn every_pull_request_starts_the_workflow_holding_the_deny_gate() {
+    let trigger = match deny_gate_trigger(&repo_file(".github/workflows/ci.yml")) {
+        Ok(trigger) => trigger,
+        Err(reason) => panic!("{reason}"),
+    };
+    if let Err(reason) = check_every_pull_request_runs_the_gate(&trigger) {
         panic!("{reason}");
     }
 }
@@ -5426,5 +5650,271 @@ include-build = false
                 "`{inserted}` under `{anchor}` does not switch the gate off and must pass"
             );
         }
+    }
+
+    /// The one live `pull_request:` line in the real `ci.yml`.
+    const GATE_EVENT_LINE: &str = "  pull_request:";
+
+    /// The one live `push:` line, for the arm about a filter on a *different*
+    /// event.
+    const PUSH_EVENT_LINE: &str = "  push:";
+
+    /// The real `ci.yml` with every `TRIGGER_NARROWING_KEYS` line removed.
+    ///
+    /// The base every arm below mutates. On the shipped tree it removes exactly
+    /// one line — `push:`'s `branches: [main]` — and nothing under
+    /// `pull_request`, which has no body.
+    ///
+    /// Normalising first is what keeps each arm measuring the key *it* added,
+    /// and it is the lesson of the first draft of this guard rather than a
+    /// precaution. Built on the raw file, the arms below did redden on a real
+    /// mutation: putting `branches: [main]` on the live `pull_request:` failed
+    /// **four** tests, because three of these controls read the shipped file
+    /// and every one of them had an opinion about it. A suite where one hole
+    /// fails four tests says less, and says it worse, than one where it fails
+    /// the single test whose message is about that hole. That is the same trap
+    /// `ci_yml_base` was written for one ticket earlier.
+    ///
+    /// The test that reads the shipped file unnormalised — and so is the one
+    /// that goes red when a narrowing key really lands there — is
+    /// `every_pull_request_starts_the_workflow_holding_the_deny_gate`.
+    ///
+    /// Normalising means two things, not one: the narrowing keys come out, and
+    /// every line the arms anchor to goes back in if it is not there. Stripping
+    /// alone was not enough, and the second half is a measured correction
+    /// rather than a precaution. With only the filter, the arms that *delete* a
+    /// trigger line still failed three and four tests each — the helpers below
+    /// anchor to those lines and cannot find them. A normalised base has to be
+    /// normal in both directions: free of what an arm adds, and in possession
+    /// of what an arm removes.
+    fn ci_yml_trigger_base() -> String {
+        let mut lines: Vec<String> = repo_file(".github/workflows/ci.yml")
+            .lines()
+            .filter(|line| {
+                let body = without_comment(line).trim();
+                !TRIGGER_NARROWING_KEYS
+                    .iter()
+                    .any(|key| body.starts_with(&format!("{key}:")))
+            })
+            .map(str::to_string)
+            .collect();
+
+        let on_at = lines
+            .iter()
+            .position(|line| without_comment(line).trim() == "on:")
+            .expect("the base is built from a ci.yml that has an `on:` block");
+        for anchor in [GATE_EVENT_LINE, PUSH_EVENT_LINE] {
+            if !lines.iter().any(|line| line == anchor) {
+                lines.insert(on_at + 1, anchor.to_string());
+            }
+        }
+
+        lines
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>()
+    }
+
+    /// The base with `nested` added as the body of `anchor`'s event.
+    ///
+    /// Built from the real file rather than a synthetic workflow, for the same
+    /// reason the SAK-244 arms are: a synthetic `on:` block could differ from
+    /// the shipped one in the single structural way that mattered — the comment
+    /// block sitting between `push:` and `pull_request:`, for one — and nothing
+    /// would say so.
+    ///
+    /// `with_sole_line` asserts one live match before editing, which is what
+    /// keeps this off the prose mentions of `pull_request` elsewhere in the file.
+    fn ci_yml_event_body(anchor: &str, nested: &str) -> String {
+        with_sole_line(
+            &ci_yml_trigger_base(),
+            anchor,
+            &format!("{anchor}\n{nested}"),
+        )
+    }
+
+    fn ci_yml_gate_event_body(nested: &str) -> String {
+        ci_yml_event_body(GATE_EVENT_LINE, nested)
+    }
+
+    /// The reader, before anything is asserted about what it read.
+    ///
+    /// Note what is asked of the real file and what is not: only that its
+    /// trigger block is **readable**. Nothing here says the shipped
+    /// `pull_request:` has no body, even though today it has none, and nothing
+    /// pins the shipped event list — adding an event is a tree this guard has
+    /// to pass. An `assert_eq!` on either would be the SAK-241 mistake, which
+    /// SAK-244 reproduced one ticket ago and caught only on its
+    /// stricter-direction control.
+    ///
+    /// The grammar is pinned on the normalised base instead, where the input is
+    /// fixed and `assert_eq!` is honest.
+    #[test]
+    fn the_gate_trigger_reader_finds_the_live_triggers() {
+        deny_gate_trigger(&repo_file(".github/workflows/ci.yml")).expect(
+            "the shipped trigger block must be readable, or every arm below is failing on \
+             the reader rather than on the trigger it put there",
+        );
+
+        // The base: `pull_request` declared with no body at all.
+        let base = deny_gate_trigger(&ci_yml_trigger_base()).expect("readable");
+        assert_eq!(base.gate_event_keys, Some(Vec::new()));
+        assert!(base.events.iter().any(|event| event == GATE_EVENT));
+
+        // A narrowing key is read with its own name, and the value is not
+        // needed for anything: `[main]` and `['src/**']` both narrow.
+        let read = deny_gate_trigger(&ci_yml_gate_event_body("    branches: [main]")).expect("ok");
+        assert_eq!(read.gate_event_keys, Some(vec!["branches".to_string()]));
+
+        // Several, with a comment on one of them stripped rather than read as
+        // part of the key, and the nested sequence items not read as keys.
+        let read = deny_gate_trigger(&ci_yml_gate_event_body(
+            "    branches: [main]\n    paths:  # only the sources\n      - 'src/**'",
+        ))
+        .expect("ok");
+        assert_eq!(
+            read.gate_event_keys,
+            Some(vec!["branches".to_string(), "paths".to_string()])
+        );
+
+        // Depth is exact, not "at least": a `branches:` under a *different*
+        // event belongs to that event. This is the shipped file's own shape —
+        // `push:` carries one — and the reader must not attribute it here.
+        let read = deny_gate_trigger(&ci_yml_event_body(PUSH_EVENT_LINE, "    branches: [main]"))
+            .expect("ok");
+        assert_eq!(read.gate_event_keys, Some(Vec::new()));
+    }
+
+    /// The hole this closes: the workflow does not start, so the gate inside it
+    /// has no verdict and nothing reports the absence.
+    #[test]
+    fn a_trigger_that_keeps_pull_requests_from_the_gate_fails() {
+        for (nested, expected) in [
+            ("    branches: [main]", "branches"),
+            ("    branches-ignore: ['sak-*']", "branches-ignore"),
+            ("    paths: ['src/**']", "paths"),
+            ("    paths-ignore: ['deny.toml']", "paths-ignore"),
+            ("    types: [labeled]", "types"),
+        ] {
+            let trigger = deny_gate_trigger(&ci_yml_gate_event_body(nested)).expect("readable");
+            let Err(error) = check_every_pull_request_runs_the_gate(&trigger) else {
+                panic!(
+                    "`{nested}` must fail: it subtracts from the pull requests that run the gate"
+                );
+            };
+            assert!(
+                error.contains(expected),
+                "the failure has to name the narrowing key it found, got: {error}"
+            );
+        }
+
+        // The event gone altogether, which is every pull request rather than
+        // some of them. Removing the line is the mutation; the `push:` and
+        // `workflow_dispatch:` triggers stay, so the workflow still exists and
+        // the arm is about this event only.
+        let without_event: String = ci_yml_trigger_base()
+            .lines()
+            .filter(|line| *line != GATE_EVENT_LINE)
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let trigger = deny_gate_trigger(&without_event).expect("readable");
+        let Err(error) = check_every_pull_request_runs_the_gate(&trigger) else {
+            panic!("a ci.yml that does not trigger on `{GATE_EVENT}` must fail");
+        };
+        assert!(
+            error.contains("not `pull_request`"),
+            "the failure has to say which event is missing, got: {error}"
+        );
+
+        // The control, and the arm that says the guard is satisfiable at all:
+        // the same base with nothing added to it passes. Deliberately the base
+        // and not the raw shipped file — that assertion is
+        // `every_pull_request_starts_the_workflow_holding_the_deny_gate`, and
+        // duplicating it here would make a real hole fail two tests.
+        let trigger = deny_gate_trigger(&ci_yml_trigger_base()).expect("readable");
+        assert!(
+            check_every_pull_request_runs_the_gate(&trigger).is_ok(),
+            "the base must pass, or the arms above are failing on something other than \
+             the key they added"
+        );
+    }
+
+    /// The direction control, and the arm without which this guard would be
+    /// rejecting trees that run the gate *more* often than the one shipped.
+    ///
+    /// Adding an event is not a hole. Neither is narrowing an event that is not
+    /// the one gating the merge: `push: branches: [main]` is in the shipped
+    /// file and costs the post-merge run on `main`, not the pull-request run.
+    #[test]
+    fn triggers_that_still_reach_the_gate_pass() {
+        for nested in [
+            // A key under `pull_request` that is not a narrowing key.
+            "    # a comment is not a filter",
+        ] {
+            let trigger = deny_gate_trigger(&ci_yml_gate_event_body(nested)).expect("readable");
+            assert!(
+                check_every_pull_request_runs_the_gate(&trigger).is_ok(),
+                "`{nested}` does not subtract any pull request and must pass"
+            );
+        }
+
+        // More ways to run, each of which this guard must pass.
+        for extra in [
+            "  schedule:\n    - cron: '0 3 * * *'",
+            "  pull_request_target:\n    branches: [main]",
+            "  merge_group:",
+        ] {
+            let widened = ci_yml_event_body(GATE_EVENT_LINE, extra);
+            let trigger = deny_gate_trigger(&widened).expect("readable");
+            assert!(
+                check_every_pull_request_runs_the_gate(&trigger).is_ok(),
+                "`{extra}` is one more way the gate runs, not a hole — a guard that \
+                 reddened on it would be failing a tree stricter than the one shipped"
+            );
+        }
+
+        // A narrowing key on a *different* event. This is the shipped file's
+        // own shape, restored onto the base: narrowing `push` costs the
+        // post-merge run on `main`, not the pull-request run that gates the
+        // merge, so it has to pass. Without this arm, a predicate that merely
+        // reacted to "a narrowing key somewhere under `on:`" would look correct.
+        let trigger =
+            deny_gate_trigger(&ci_yml_event_body(PUSH_EVENT_LINE, "    branches: [main]"))
+                .expect("readable");
+        assert!(
+            check_every_pull_request_runs_the_gate(&trigger).is_ok(),
+            "`push: branches: [main]` is the shipped tree and must pass"
+        );
+    }
+
+    /// Fails closed on a trigger block it cannot read.
+    #[test]
+    fn a_trigger_block_this_reader_cannot_read_fails_closed() {
+        // No `on:` at all.
+        assert!(deny_gate_trigger("name: CI\njobs:\n  deny:\n    runs-on: x\n").is_err());
+
+        // `on:` with nothing under it.
+        assert!(deny_gate_trigger("name: CI\non:\njobs:\n  deny:\n").is_err());
+
+        // The flow-sequence form, which this reader has no grammar for. It
+        // refuses rather than reading zero events out of it and passing.
+        assert!(deny_gate_trigger("name: CI\non:\n  - push\n  - pull_request\n").is_err());
+
+        // Two `on:` blocks: which one governs is not something a reader can
+        // tell, and YAML duplicate keys are not an error everything agrees on.
+        assert!(deny_gate_trigger("on:\n  push:\non:\n  pull_request:\n").is_err());
+
+        // A commented-out trigger block is not a trigger block.
+        let commented: String = ci_yml_trigger_base()
+            .lines()
+            .map(|line| {
+                if line == "on:" {
+                    "# on:\n".to_string()
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect();
+        assert!(deny_gate_trigger(&commented).is_err());
     }
 }
