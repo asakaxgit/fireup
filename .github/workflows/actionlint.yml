@@ -37,6 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          bogus-input: x
 
       # Pinned, with the checksum published alongside the release, because this
       # step fetches and executes a binary. Bumping the version means changing
