@@ -2081,6 +2081,16 @@ struct DenyStep {
     /// pre-`check` position runs. So a guard reading `arguments` alone cannot
     /// see any of them, which is exactly the state this file was in.
     options: Vec<String>,
+    /// `true` if a `set … pipefail` line runs earlier in the same `run:` body.
+    ///
+    /// Read, not assumed. GitHub prints the shell it gave every step, and for
+    /// this workflow -- which declares no `shell:` -- run 42362531653 says
+    /// `shell: /usr/bin/bash -e {0}` on all ten of them. That is `-e` with no
+    /// `-o pipefail`, so a pipe takes the status of its *last* stage and the
+    /// gate's verdict is thrown away. This step's body has no `set` line at
+    /// all; the `Install cargo-deny` step's has `set -euo pipefail`, which is
+    /// where that protection does exist.
+    pipefail: bool,
 }
 
 /// The `deny` job's `cargo-deny … check` command, read out of `ci.yml`.
@@ -2225,6 +2235,13 @@ fn deny_step_checks(ci: &str) -> Result<DenyStep, String> {
         })?;
 
     Ok(DenyStep {
+        pipefail: logical
+            .iter()
+            .take_while(|line| line.as_str() != command.as_str())
+            .any(|line| {
+                let text = line.trim_start();
+                text.starts_with("set ") && text.contains("pipefail")
+            }),
         arguments: words[check_at + 1..]
             .iter()
             .map(|word| word.to_string())
@@ -2318,7 +2335,7 @@ fn redirecting_options(step: &DenyStep) -> Vec<String> {
 /// shape as (3), (4) and (6) in the header: cargo-deny cannot report it,
 /// because the thing that changed is its own invocation.
 ///
-/// **Two assertions, and deliberately only two.**
+/// **Three assertions, and deliberately only three.**
 ///
 /// 1. *Every* check in `DENY_CHECKS` is named, **or none is.** Given no check
 ///    names at all cargo-deny runs every check it has — measured, and it is
@@ -2326,6 +2343,8 @@ fn redirecting_options(step: &DenyStep) -> Vec<String> {
 ///    command, so a guard demanding the four names would be demanding the
 ///    longer spelling of a stronger gate.
 /// 2. The command's exit is not sent to `||`.
+/// 3. The command's exit is not sent to a **pipe**, unless the body turns
+///    `pipefail` back on.
 ///
 /// Deliberately **not** asserted: an unfamiliar extra check name. A check this
 /// list has not heard of is the gate getting stricter, and a guard that
@@ -2335,12 +2354,32 @@ fn redirecting_options(step: &DenyStep) -> Vec<String> {
 /// arguments and classifies nothing else: it never has to decide whether a
 /// word is a positional check name or some flag's value.
 ///
-/// `||` and nothing else, for assertion 2, because that is what measurement
-/// said rather than what looked likely. With `deny.toml`'s licence allowlist
-/// broken, the step exits 4 on its own; `|| true` after it exits **0**, while
-/// `; true`, `&& echo done` and `| tee /dev/null` all still exit 4 — `-e`
-/// leaves before the `;`, and the step's `-o pipefail` covers the pipe. An
-/// assertion rejecting a `;` or a pipe would be red on a command that works.
+/// Assertion 3 is a correction, not an addition (SAK-253). This doc used to
+/// say `||` "and nothing else", on the strength of arms replayed under
+/// `bash -e -o pipefail` — and attributed the pipe's safety to "the step's
+/// `-o pipefail`", a line this step does not have. The runner's shell is
+/// `bash -e` with **no** `pipefail`: measured from the `shell:` line GitHub
+/// prints for every step of run 42362531653. Re-measured with `deny.toml`'s
+/// licence allowlist broken, one variable being the shell:
+///
+/// | command tail | `bash -e` (the runner) | `bash -e -o pipefail` |
+/// |---|---|---|
+/// | *(none — shipped)* | 4 | 4 |
+/// | `\| tee /dev/null` | **0** | 4 |
+/// | `\| cat` | **0** | 4 |
+/// | `\| tee out.log` | **0** | 4 |
+/// | `> /dev/null` | 4 | 4 |
+/// | `; true` | 4 | 4 |
+/// | `\|\| true` | 0 | 0 |
+///
+/// With the shipped `deny.toml` every one of those is 0, so the red above is
+/// the broken allowlist and the difference between the columns is the shell.
+/// `;`, `&&` and a redirect are still allowed, still for the measured reason:
+/// `-e` leaves before the `;`. And a pipe under a body that opens with
+/// `set -o pipefail`, `set -eo pipefail` or `set -euo pipefail` is allowed,
+/// because all three were measured to keep the 4 — the assertion has to be
+/// satisfiable by something other than deleting the pipe, or it is a guard
+/// teaching people that a working command is broken.
 ///
 /// Also not asserted, and worth a ticket of its own rather than a guess here:
 /// `continue-on-error: true` on this step would discard the verdict too. It is
@@ -2381,9 +2420,27 @@ fn check_every_deny_check_runs(step: &DenyStep) -> Result<(), String> {
              the job reports green on a tree cargo-deny has just failed. Measured \
              (SAK-243) with deny.toml's licence allowlist broken: the command alone exits \
              4, and with `|| true` after it exits 0. If something after the gate has to \
-             run either way, use `;` — that keeps the failure (`-e` leaves before the \
-             `;`), as does a pipe (`-o pipefail`); both were measured and both pass this \
-             guard.",
+             run either way, use `;` — that keeps the failure, measured, because `-e` \
+             leaves before the `;`. Not a pipe: this workflow declares no `shell:`, so \
+             the runner gives it `bash -e` with no `-o pipefail` (run 42362531653), and \
+             a pipe discards the exit too — the assertion below rejects one unless the \
+             `run:` body opens with `set -o pipefail`.",
+            step.command
+        ));
+    }
+
+    if step.command.contains('|') && !step.pipefail {
+        return Err(format!(
+            "the `{DENY_STEP}` step in ci.yml pipes the gate's output: `{}`, and its \
+             `run:` body does not turn `pipefail` on. The step then exits with the \
+             *last* stage's status and cargo-deny's verdict is discarded, so the job \
+             reports green on a tree the gate has just failed. This workflow declares no \
+             `shell:`, so GitHub runs every step under `/usr/bin/bash -e {{0}}` — \
+             measured from the `shell:` line of run 42362531653 — which is `-e` without \
+             `-o pipefail`. Measured (SAK-253) with deny.toml's licence allowlist \
+             broken: the command alone exits 4; `| tee /dev/null` exits 0; the same pipe \
+             under a shell with `-o pipefail` exits 4. Put `set -o pipefail` above the \
+             command in the same body — measured, and accepted here — or drop the pipe.",
             step.command
         ));
     }
@@ -6009,23 +6066,41 @@ include-build = false
         )
         .expect_err("any `||` after the gate must fail");
         assert!(error.contains("discards the verdict"), "{error}");
+
+        // The *advice* in that message is why SAK-253 had to reopen this guard:
+        // the old one read "as does a pipe (`-o pipefail`)", crediting a `set`
+        // line this step does not have. No test read the prose, so nothing
+        // reported it. These two do — one for the wrong recommendation, one for
+        // the sentence finishing at all.
+        assert!(
+            !error.contains("as does a pipe"),
+            "the `||` message must not offer a bare pipe as a safe alternative: {error}"
+        );
+        assert!(
+            error.contains("set -o pipefail"),
+            "the `||` message must name the one spelling that does keep the gate's exit \
+             through a pipe: {error}"
+        );
     }
 
-    /// The direction control for the arm above, and the one that measurement
-    /// corrected a wrong guess about.
+    /// The direction control for the arm above: the trailing constructs that
+    /// really do keep the gate's exit.
     ///
-    /// `;`, `&&` and a pipe all *keep* the gate's exit: with `deny.toml`'s
-    /// licence allowlist broken the step exits 4 under every one of them, and 0
-    /// only under `||`. An assertion that rejected a trailing `;` or a pipe
-    /// would be red on a command that works, which is the failure mode this
-    /// whole ticket is trying not to introduce.
+    /// With `deny.toml`'s licence allowlist broken the step exits 4 under each
+    /// of these on the runner's own shell (`bash -e`, run 42362531653), so an
+    /// assertion rejecting them would be red on a command that works -- the
+    /// failure mode this whole ticket is trying not to introduce.
+    ///
+    /// A pipe used to be on this list. It is not any more, and the arm below
+    /// is where it went: that entry was measured under a replay harness with
+    /// `-o pipefail`, which the runner does not give this workflow (SAK-253).
     #[test]
     fn the_trailing_constructs_that_keep_the_exit_status_pass() {
         for trailing in [
             "; true",
             "&& echo done",
-            "| tee /dev/null",
             "&& echo 'supply chain ok'",
+            "> /dev/null",
         ] {
             let step = deny_step_checks(&deny_job_with(&format!(
                 "{SHIPPED_DENY_COMMAND} {trailing}"
@@ -6038,13 +6113,56 @@ include-build = false
             );
         }
 
-        // And the word boundary that makes the pipe arm work: an operator ends
-        // a word, so a name cannot hide against one.
+        // And the word boundary the arms rely on: an operator ends a word, so
+        // a check name cannot hide against one.
         let step = deny_step_checks(&deny_job_with(
-            "cargo-deny --locked check advisories licenses bans sources|tee /dev/null",
+            "cargo-deny --locked check advisories licenses bans sources;echo done",
         ))
         .expect("readable");
         assert!(check_every_deny_check_runs(&step).is_ok(), "{step:?}");
+    }
+
+    /// A pipe discards the gate's verdict on the shell the runner actually
+    /// gives this workflow, and the only thing that brings it back is a `set`
+    /// line in the same body.
+    ///
+    /// Three arms, because two of them are what make the first one a finding
+    /// rather than a preference. The pipe is rejected; the same pipe under
+    /// `set -o pipefail` is accepted, so the assertion is satisfiable without
+    /// deleting it; and a redirect -- which is not a pipe and never discarded
+    /// anything -- stays accepted, so this is about the operator and not about
+    /// punctuation in general.
+    #[test]
+    fn piping_the_gates_output_without_pipefail_is_caught() {
+        for trailing in [
+            "| tee /dev/null",
+            "| cat",
+            "|tee out.log",
+            "| tee out.log | cat",
+        ] {
+            let step = deny_step_checks(&deny_job_with(&format!(
+                "{SHIPPED_DENY_COMMAND} {trailing}"
+            )))
+            .expect("readable");
+            let error = check_every_deny_check_runs(&step)
+                .expect_err("a pipe with no pipefail discards the verdict");
+            assert!(error.contains("does not turn `pipefail` on"), "{error}");
+        }
+
+        for body in ["set -o pipefail", "set -eo pipefail", "set -euo pipefail"] {
+            let step = deny_step_checks(&deny_job_with(&format!(
+                "{body}\n{SHIPPED_DENY_COMMAND} | tee /dev/null"
+            )))
+            .expect("readable");
+            assert!(
+                step.pipefail,
+                "`{body}` should be read as turning pipefail on"
+            );
+            assert!(
+                check_every_deny_check_runs(&step).is_ok(),
+                "`{body}` keeps the gate's exit through a pipe (measured) and must pass"
+            );
+        }
     }
 
     /// Every spelling of `-A`/`-W` that cargo-deny 0.20.2 accepts, and each one
@@ -8089,5 +8207,462 @@ jobs:
             checkout_steps(&broken)
                 .expect_err(&format!("`{what}` must fail closed, not read as clean"));
         }
+    }
+}
+
+/// The libtest arguments that narrow which tests in a target actually run.
+///
+/// Each was measured on this tree against a `deny.toml` widened so that one
+/// assertion in *this* target fails -- these are cargo's and libtest's own
+/// semantics, so they do the same to the sibling target this guard watches.
+/// The shipped command exits 101 and reports it; each of these leaves the step
+/// at **exit 0** (SAK-253):
+///
+/// | command tail | step exit | test result line |
+/// |---|---|---|
+/// | *(none — shipped)* | **101** | `FAILED. 182 passed; 1 failed` |
+/// | `-- --skip deny_` | 0 | `ok. 162 passed; 0 failed; 21 filtered out` |
+/// | `-- --exact no_such_test` | 0 | `ok. 0 passed; 0 failed; 183 filtered out` |
+/// | `-- --ignored` | 0 | `ok. 0 passed; 0 failed; 183 filtered out` |
+/// | `-- --list` | 0 | *(no test result line at all)* |
+///
+/// `--exact` is on the list even though it needs a name beside it to be
+/// useful, because the useless spelling is the dangerous one: `--exact` with a
+/// name no test has selects **nothing** and still reads `ok`.
+const TEST_FILTERING_ARGS: &[&str] = &["--skip", "--exact", "--ignored", "--list"];
+
+/// libtest arguments whose value is the *next* word rather than glued on with
+/// `=`, so that a reader looking for a bare positional filter does not mistake
+/// the `1` in `--test-threads 1` for one.
+///
+/// Both spellings of that flag were measured and both keep the step at exit
+/// 101, so both have to stay green.
+const LIBTEST_ARGS_WITH_A_VALUE: &[&str] = &[
+    "--test-threads",
+    "--logfile",
+    "--color",
+    "--format",
+    "--shuffle-seed",
+    "-Z",
+];
+
+/// The command a reporter step hands to the shell, plus whether that body
+/// turns `pipefail` on above it.
+#[derive(Debug, PartialEq, Eq)]
+struct ReporterCommand {
+    /// The one logical command that runs the target: `\`-continuations joined,
+    /// comment stripped. Kept as text because two of the questions below are
+    /// about shell operators rather than about words.
+    command: String,
+    /// `true` if a `set … pipefail` line runs earlier in the same `run:` body.
+    ///
+    /// Read, not assumed. The runner gives this workflow `/usr/bin/bash -e
+    /// {0}` — measured from the `shell:` line GitHub prints for every step of
+    /// run 42362531653 — and that is `-e` **without** `-o pipefail`, so a pipe
+    /// discards the command's exit status unless the body asks for it back.
+    pipefail: bool,
+}
+
+/// The command on the `ci.yml` step that runs `target`.
+///
+/// Anchored on the command for the reason `sibling_reporter_conditions` gives:
+/// renaming a
+/// step does not stop it running. `Err` in every case where the reader cannot
+/// say which command runs the target, for the reason it gives too — the
+/// reporter gone is worse than anything written on it.
+fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
+    let lines: Vec<&str> = ci.lines().collect();
+    let needle = format!("--test {target}");
+
+    let found: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| without_comment(line).contains(&needle))
+        .map(|(at, _)| at)
+        .collect();
+    let at = match found[..] {
+        [at] => at,
+        [] => {
+            return Err(format!(
+                "ci.yml runs no `{needle}`, so nothing in CI reports the {target} \
+                 assertions."
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "ci.yml has {} steps running `{needle}`; which of them is the reporter \
+                 is not something this reader can tell.",
+                found.len()
+            ))
+        }
+    };
+
+    let mut start = None;
+    for above in (0..=at).rev() {
+        if without_comment(lines[above]).trim_start().starts_with("- ") {
+            start = Some(above);
+            break;
+        }
+    }
+    let Some(start) = start else {
+        return Err(format!(
+            "ci.yml's `{needle}` is not inside a step -- no `- ` line opens a block \
+             above it, and this reader only understands the step list form."
+        ));
+    };
+
+    // The `run:` that holds it: either the needle's own line, or a block
+    // scalar opened above it inside the same step.
+    let run_at = (start..=at)
+        .rev()
+        .find(|above| {
+            without_comment(lines[*above])
+                .trim_start()
+                .starts_with("run:")
+        })
+        .ok_or_else(|| {
+            format!("ci.yml's `{needle}` is not under a `run:` key this reader can find.")
+        })?;
+
+    let run_line = without_comment(lines[run_at]);
+    let run_body = run_line.trim_start();
+    let run_indent = run_line.len() - run_body.len();
+    let inline = run_body.strip_prefix("run:").unwrap_or_default().trim();
+
+    let mut raw: Vec<&str> = Vec::new();
+    if inline.starts_with('|') || inline.starts_with('>') {
+        for next in &lines[run_at + 1..] {
+            let bare = without_comment(next);
+            let body = bare.trim_start();
+            if body.is_empty() {
+                continue;
+            }
+            if bare.len() - body.len() <= run_indent {
+                break;
+            }
+            raw.push(body);
+        }
+    } else if !inline.is_empty() {
+        raw.push(inline);
+    }
+    if raw.is_empty() {
+        return Err(format!(
+            "the step running `{needle}` in ci.yml has an empty `run:` body."
+        ));
+    }
+
+    // Join `\`-continuations: one logical command per entry.
+    let mut logical: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in raw {
+        match line.strip_suffix('\\') {
+            Some(head) => {
+                current.push_str(head.trim_end());
+                current.push(' ');
+            }
+            None => {
+                current.push_str(line);
+                logical.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    if !current.is_empty() {
+        logical.push(current);
+    }
+
+    let running: Vec<usize> = logical
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(&needle))
+        .map(|(at, _)| at)
+        .collect();
+    // No control covers the `_` arm below, and that is deliberate rather than
+    // an oversight: `found` above counts the *lines* carrying the needle and
+    // already refuses more than one, so by here the body holds exactly one.
+    // The arm stays because it fails closed if that ever stops being true --
+    // measured by disabling it (SAK-253), and every control stayed green,
+    // which is how we know it is unreachable rather than unguarded.
+    let command_at = match running[..] {
+        [one] => one,
+        _ => {
+            return Err(format!(
+                "the step's `run:` body has {} commands running `{needle}`; this reader \
+                 reports on one or on none.",
+                running.len()
+            ))
+        }
+    };
+
+    Ok(ReporterCommand {
+        pipefail: logical[..command_at].iter().any(|line| {
+            let text = line.trim_start();
+            text.starts_with("set ") && text.contains("pipefail")
+        }),
+        command: logical[command_at].clone(),
+    })
+}
+
+/// `Ok` if that command runs the whole target and its verdict survives.
+///
+/// Three assertions, each for a measured fail-open — the step stays at exit 0
+/// while an assertion in the target is failing:
+///
+/// 1. The exit is not handed to `||`.
+/// 2. The exit is not handed to a **pipe**, unless the body turns `pipefail`
+///    back on. See `ReporterCommand::pipefail`: the runner's shell is `bash -e`
+///    with no `pipefail`, so `| tee` exits 0 on a failing command.
+/// 3. Nothing narrows the set of tests that run: no `--no-run`, none of
+///    `TEST_FILTERING_ARGS`, and no bare positional filter after `--`.
+///
+/// Deliberately **not** asserted, all measured on the widened tree and all
+/// still exit 101, so a guard reddening them would be reddening a command that
+/// works: `--all-features`, `--frozen`, `--no-fail-fast`, `; true`,
+/// `> /dev/null`, `-- --nocapture`, `-- --test-threads=1`, `-- --test-threads 1`,
+/// `-- --include-ignored` and an unfamiliar `-- --format=terse`. An unknown
+/// libtest flag passes on purpose: it is as likely to widen as to narrow, and
+/// the three families above are every documented way libtest subtracts.
+fn check_the_reporter_runs_every_test(
+    reporter: &ReporterCommand,
+    target: &str,
+) -> Result<(), String> {
+    let command = &reporter.command;
+
+    if command.contains("||") {
+        return Err(format!(
+            "ci.yml's `{target}` step sends that target's exit status to `||`: \
+             `{command}`. The tests still run and still print `FAILED`, and the step \
+             exits 0 anyway. Measured (SAK-253) with one assertion in the target \
+             failing: the command alone exits 101, and with `|| true` after it exits 0 \
+             while the log still says `182 passed; 1 failed`. Use `;` if something has \
+             to run either way -- that keeps the failure, measured."
+        ));
+    }
+
+    if command.contains('|') && !reporter.pipefail {
+        return Err(format!(
+            "ci.yml's `{target}` step pipes that target's output: `{command}`, and the \
+             body does not turn `pipefail` on. This workflow declares no `shell:`, so \
+             GitHub runs every step under `/usr/bin/bash -e {{0}}` -- measured from the \
+             `shell:` line of run 42362531653 -- and that is `-e` without `-o pipefail`, \
+             so the step takes the *last* command's status and the test failure is \
+             discarded. Measured (SAK-253) with one assertion failing: the command alone \
+             exits 101; `| tee /dev/null` exits 0; the same pipe under a shell with \
+             `-o pipefail` exits 101. Add `set -o pipefail` above it in the same `run:` \
+             body -- measured, and accepted here -- or drop the pipe."
+        ));
+    }
+
+    let words: Vec<&str> = command
+        .split_whitespace()
+        .filter(|word| *word != "\\")
+        .collect();
+
+    if words.iter().any(|word| *word == "--no-run") {
+        return Err(format!(
+            "ci.yml's `{target}` step runs cargo test with `--no-run`: `{command}`. That \
+             compiles the target and runs none of it, and the step exits 0 with no test \
+             result line at all. Measured (SAK-253): with one assertion in the target \
+             failing, the shipped command exits 101 and this exits 0."
+        ));
+    }
+
+    let Some(separator) = words.iter().position(|word| *word == "--") else {
+        return Ok(());
+    };
+    let mut at = separator + 1;
+    while at < words.len() {
+        let word = words[at];
+        let name = word.split('=').next().unwrap_or(word);
+
+        if TEST_FILTERING_ARGS.contains(&name) {
+            return Err(format!(
+                "ci.yml's `{target}` step narrows which tests run with `{word}`: \
+                 `{command}`. The tests it filters out cannot report anything, and the \
+                 step exits 0 reading `ok`. Measured (SAK-253) with one assertion in the \
+                 target failing: `-- --skip deny_` exits 0 at `162 passed; 21 filtered \
+                 out`, `-- --exact no_such_test` and `-- --ignored` exit 0 at `0 passed; \
+                 183 filtered out`. Narrowing arguments are {TEST_FILTERING_ARGS:?}."
+            ));
+        }
+
+        if !word.starts_with('-') {
+            return Err(format!(
+                "ci.yml's `{target}` step passes `{word}` as a positional test filter: \
+                 `{command}`. Only tests whose name contains it then run. Measured \
+                 (SAK-253) with one assertion failing: `-- the_committed_lock` exits 0 \
+                 at `2 passed; 181 filtered out`, and `-- negative_controls` exits 0 at \
+                 `150 passed; 33 filtered out` -- 150 green tests and the one that had \
+                 something to say filtered away."
+            ));
+        }
+
+        if LIBTEST_ARGS_WITH_A_VALUE.contains(&name) && !word.contains('=') {
+            at += 1;
+        }
+        at += 1;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn nothing_in_ci_yml_narrows_this_files_own_reporter_guard() {
+    let ci = repo_file(".github/workflows/ci.yml");
+    let reporter = match reporter_command(&ci, SIBLING_REPORTER_TARGET) {
+        Ok(reporter) => reporter,
+        Err(why) => panic!("{why}"),
+    };
+    if let Err(why) = check_the_reporter_runs_every_test(&reporter, SIBLING_REPORTER_TARGET) {
+        panic!("{why}");
+    }
+}
+
+#[cfg(test)]
+mod reporter_command_controls {
+    use super::*;
+
+    /// A `ci.yml` whose reporter step runs `tail`, reduced to the parts this
+    /// reader looks at.
+    ///
+    /// Synthetic rather than the real file so that one mutation reddens one
+    /// test: an arm built by editing the real file reddens every control that
+    /// also reads it.
+    fn ci_running(tail: &str) -> String {
+        format!(
+            "name: CI\non:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+             steps:\n      - uses: actions/checkout@v4\n\n      - name: Unit tests\n        \
+             run: cargo test --locked --lib\n\n      - name: Supply-chain pins\n        \
+             run: cargo test --locked --test fidelity_matrix_tests{tail}\n"
+        )
+    }
+
+    fn verdict(tail: &str) -> Result<(), String> {
+        let ci = ci_running(tail);
+        let reporter = reporter_command(&ci, SIBLING_REPORTER_TARGET).expect("located");
+        check_the_reporter_runs_every_test(&reporter, SIBLING_REPORTER_TARGET)
+    }
+
+    #[test]
+    fn the_shipped_reporter_command_is_read_and_passes() {
+        let ci = repo_file(".github/workflows/ci.yml");
+        let reporter = reporter_command(&ci, SIBLING_REPORTER_TARGET).expect("the real ci.yml");
+        assert!(
+            reporter.command.contains("cargo test"),
+            "the reader found `{}` rather than a cargo test command, so the assertions \
+             below describe a command that is not the one CI runs",
+            reporter.command
+        );
+        assert_eq!(verdict(""), Ok(()));
+    }
+
+    #[test]
+    fn swallowing_the_verdict_is_caught() {
+        assert!(verdict(" || true").is_err());
+        assert!(verdict(" ||true").is_err());
+        assert!(verdict(" | tee /dev/null").is_err());
+        assert!(verdict(" | cat").is_err());
+    }
+
+    #[test]
+    fn a_pipe_under_a_body_that_restores_pipefail_passes() {
+        // The one spelling that measurably keeps the failure on the runner's
+        // own shell. Without this arm the pipe assertion would have no way to
+        // be satisfied except by deleting the pipe, which is a guard telling
+        // people a working command is broken.
+        let ci = "name: CI\njobs:\n  test:\n    steps:\n      - name: Supply-chain pins\n        \
+                  run: |\n          set -o pipefail\n          cargo test --locked --test \
+                  fidelity_matrix_tests | tee out.log\n";
+        let reporter = reporter_command(ci, SIBLING_REPORTER_TARGET).expect("located");
+        assert!(reporter.pipefail);
+        assert_eq!(
+            check_the_reporter_runs_every_test(&reporter, SIBLING_REPORTER_TARGET),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_pipefail_body_does_not_excuse_a_double_pipe() {
+        // The control that makes the `||` assertion its own. `|| true` contains
+        // a `|`, so with a bare pipe already rejected the pipe assertion covers
+        // it -- until the body turns `pipefail` on, at which point the pipe
+        // assertion passes it and only the `||` assertion is left. Measured:
+        // `-o pipefail` does nothing for `||` at all (exit 0 under both
+        // shells), so this has to be rejected whatever the body says.
+        let ci = "name: CI\njobs:\n  test:\n    steps:\n      - name: Supply-chain pins\n        \
+                  run: |\n          set -o pipefail\n          cargo test --locked --test \
+                  TARGET || true\n";
+        let ci = ci.replace("TARGET", SIBLING_REPORTER_TARGET);
+        let reporter = reporter_command(&ci, SIBLING_REPORTER_TARGET).expect("located");
+        assert!(reporter.pipefail);
+        let error = check_the_reporter_runs_every_test(&reporter, SIBLING_REPORTER_TARGET)
+            .expect_err("`|| true` discards the verdict with or without pipefail");
+        assert!(
+            error.contains("sends that target's exit status to `||`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn running_none_of_the_target_is_caught() {
+        assert!(verdict(" --no-run").is_err());
+    }
+
+    #[test]
+    fn narrowing_which_tests_run_is_caught() {
+        assert!(verdict(" -- --skip deny_").is_err());
+        assert!(verdict(" -- --exact no_such_test").is_err());
+        assert!(verdict(" -- --ignored").is_err());
+        assert!(verdict(" -- --list").is_err());
+        assert!(verdict(" -- the_committed_lock").is_err());
+        assert!(verdict(" -- --skip=deny_").is_err());
+    }
+
+    #[test]
+    fn commands_that_still_run_everything_pass() {
+        // Every one of these was measured on a widened tree and still exits
+        // 101. A guard reddening any of them would be reddening a command that
+        // reports exactly what it is supposed to report.
+        for tail in [
+            " --all-features",
+            " --no-fail-fast",
+            " ; true",
+            " > /dev/null",
+            " -- --nocapture",
+            " -- --test-threads=1",
+            " -- --test-threads 1",
+            " -- --include-ignored",
+            " -- --format=terse",
+            " -- --color always",
+        ] {
+            assert_eq!(verdict(tail), Ok(()), "tail `{tail}` should pass");
+        }
+    }
+
+    #[test]
+    fn a_continued_command_is_read_as_one() {
+        let ci = "name: CI\njobs:\n  test:\n    steps:\n      - name: Supply-chain pins\n        \
+                  run: |\n          cargo test --locked --test fidelity_matrix_tests \\\n          \
+                  || true\n";
+        let reporter = reporter_command(ci, SIBLING_REPORTER_TARGET).expect("located");
+        assert!(check_the_reporter_runs_every_test(&reporter, SIBLING_REPORTER_TARGET).is_err());
+    }
+
+    #[test]
+    fn an_unlocatable_command_fails_closed() {
+        let gone = "jobs:\n  test:\n    steps:\n      - name: Unit tests\n        run: cargo \
+                    test --locked --lib\n";
+        assert!(reporter_command(gone, SIBLING_REPORTER_TARGET).is_err());
+
+        let twice = format!(
+            "{}      - name: Again\n        run: cargo test --locked --test \
+             fidelity_matrix_tests\n",
+            ci_running("")
+        );
+        assert!(reporter_command(&twice, SIBLING_REPORTER_TARGET).is_err());
+
+        let commented = "jobs:\n  test:\n    steps:\n      - name: Pins\n        # run: cargo \
+                         test --locked --test fidelity_matrix_tests\n        run: cargo test \
+                         --locked --lib\n";
+        assert!(reporter_command(commented, SIBLING_REPORTER_TARGET).is_err());
     }
 }
