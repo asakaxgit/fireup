@@ -670,6 +670,87 @@ fn check_yanked_is_denied(deny: &str) -> Result<(), String> {
     }
 }
 
+/// `Err` unless `[licenses] include-dev` is on **and** nothing has dropped dev
+/// dependencies out of the graph beside it.
+///
+/// Two assertions, and they report different regressions, so they carry
+/// different evidence rather than one message with the key name substituted in.
+/// `[graph] exclude-dev = true` removes dev dependencies before the licence
+/// check runs, which reopens the hole with `include-dev = true` still sitting in
+/// the file untouched — exactly the shape `disable-yank-checking` has against
+/// `yanked` (SAK-231).
+fn check_dev_licenses_are_checked(deny: &str) -> Result<(), String> {
+    match setting(deny, "include-dev").as_deref() {
+        Some("true") => {}
+        Some(value) => {
+            return Err(format!(
+                "deny.toml sets `[licenses] include-dev = {value}`, so the licence allow list \
+                 governs only what Fireup ships and says nothing about what its test suite \
+                 pulls in. Measured on this tree (SAK-234) with the MPL-2.0 `smartstring` \
+                 1.0.1 added to `[dev-dependencies]`, reached only as `(dev) fireup`: `true` \
+                 exits 4 with `error[rejected]` and `licenses FAILED`, and the same tree at \
+                 this value exits 0 with `licenses ok`. Set it to true."
+            ));
+        }
+        None => {
+            return Err(
+                "deny.toml has no `[licenses] include-dev`, which is cargo-deny's default and \
+                 means dev dependencies are not licence-checked at all. Measured on this tree \
+                 (SAK-234) with the MPL-2.0 `smartstring` 1.0.1 added to `[dev-dependencies]`: \
+                 with this line deleted, `cargo deny check licenses` reported `licenses ok` and \
+                 exited 0 — a copyleft licence the allow list excludes passed the gate with no \
+                 diagnostic. Set it to true."
+                    .into(),
+            );
+        }
+    }
+
+    match setting(deny, "exclude-dev").as_deref() {
+        None | Some("false") => Ok(()),
+        Some(value) => Err(format!(
+            "deny.toml sets `[graph] exclude-dev = {value}`, which drops dev dependencies from \
+             the graph before the licence check ever sees them — so `include-dev` above is still \
+             set and still means nothing. This is the regression that does not show up in the \
+             `include-dev` line: measured on this tree (SAK-234) with the MPL-2.0 `smartstring` \
+             1.0.1 in `[dev-dependencies]`, `include-dev = true` with this key set exits 0 and \
+             prints no rejection at all, where `include-dev` alone exits 4. Delete the key, or \
+             set it to false."
+        )),
+    }
+}
+
+/// `Err` unless `[sources] unused-allowed-source` is `"deny"`.
+///
+/// This is the one key that makes cargo-deny itself fail on a widened
+/// `allow-registry`. `check_sources_are_crates_io_only` above already fails on
+/// a second registry and is the stronger check of the two — it keeps failing
+/// once a crate really comes from the new registry, which is the moment
+/// `unmatched-source` stops firing. The overlap is deliberate: that one is a
+/// test, and a test can be stopped from running (SAK-221), while this one is
+/// read by the `deny` job itself.
+fn check_unused_allowed_source_is_deny(deny: &str) -> Result<(), String> {
+    match setting(deny, "unused-allowed-source").as_deref() {
+        Some("deny") => Ok(()),
+        Some(level) => Err(format!(
+            "deny.toml sets `[sources] unused-allowed-source = \"{level}\"`, not \"deny\", so \
+             cargo-deny does not fail on an `allow-registry` entry that nothing comes from. \
+             Measured on this tree (SAK-234) with a second entry added to `allow-registry`: \
+             \"deny\" exits 8 with `error[unmatched-source]` and `sources FAILED`, while the \
+             same tree at this value exits 0 with only `warning[unmatched-source]`."
+        )),
+        None => Err(
+            "deny.toml has no `[sources] unused-allowed-source`. cargo-deny's default is \
+             `warn`, so widening `allow-registry` is exit 0 with only \
+             `warning[unmatched-source]` and the `deny` job stays green — measured on this \
+             tree (SAK-234). Without it the only thing reporting a widened source allow list \
+             is `deny_toml_allows_crates_io_as_the_only_source` in this file, and a test can \
+             be stopped from running by editing ci.yml (SAK-221) where this key cannot. Set \
+             it to \"deny\"."
+                .into(),
+        ),
+    }
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -746,6 +827,20 @@ fn deny_toml_allows_crates_io_as_the_only_source() {
 #[test]
 fn deny_toml_refuses_a_yanked_crate_and_leaves_the_check_switched_on() {
     if let Err(reason) = check_yanked_is_denied(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_licence_checks_dev_dependencies_and_leaves_them_in_the_graph() {
+    if let Err(reason) = check_dev_licenses_are_checked(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_fails_on_an_allowed_source_that_nothing_comes_from() {
+    if let Err(reason) = check_unused_allowed_source_is_deny(&repo_file("deny.toml")) {
         panic!("{reason}");
     }
 }
@@ -1409,6 +1504,170 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
                 "`disable-yank-checking = {value}` must not pass"
             );
         }
+    }
+
+    #[test]
+    fn the_dev_licence_policy_the_repository_ships_passes() {
+        assert!(check_dev_licenses_are_checked("include-dev = true\n").is_ok());
+    }
+
+    /// The regression itself, and the one the repository shipped until SAK-234:
+    /// the key simply absent. cargo-deny's default is to skip dev
+    /// dependencies, so the allow list reads as if it governed the whole tree
+    /// while governing only what Fireup ships. Measured on the stack tip with
+    /// the MPL-2.0 `smartstring` 1.0.1 in `[dev-dependencies]`: exit 0 and
+    /// `licenses ok`, where `include-dev = true` exits 4.
+    #[test]
+    fn omitting_the_dev_licence_setting_fails() {
+        let deny = "[licenses]\nallow = [\"MIT\"]\nconfidence-threshold = 0.93\n";
+        let error = check_dev_licenses_are_checked(deny).expect_err("a missing setting must fail");
+        assert!(error.contains("not licence-checked at all"), "{error}");
+    }
+
+    /// Turning it off explicitly is the same hole, written down.
+    #[test]
+    fn switching_the_dev_licence_check_off_fails() {
+        let error =
+            check_dev_licenses_are_checked("include-dev = false\n").expect_err("`false` must fail");
+        assert!(error.contains("error[rejected]"), "{error}");
+    }
+
+    /// The reason this key needs two assertions, and the arm that fails without
+    /// the second one. `include-dev = true` is untouched and the dev
+    /// dependencies are gone from the graph before the check sees them:
+    /// measured on the stack tip, exit 0 with no rejection printed at all.
+    #[test]
+    fn excluding_dev_dependencies_from_the_graph_beside_include_dev_fails() {
+        let deny = "[graph]\nexclude-dev = true\n\n[licenses]\ninclude-dev = true\n";
+        let error = check_dev_licenses_are_checked(deny)
+            .expect_err("a kill switch beside the policy key must fail");
+        assert!(error.contains("exclude-dev"), "{error}");
+        assert!(error.contains("prints no rejection at all"), "{error}");
+    }
+
+    /// The allowed half of that key, measured rather than assumed: an explicit
+    /// `false` exits 4 on the MPL-2.0 dev dependency exactly like the absent
+    /// key, so it must not fail the guard. This is the control for the arm
+    /// above — without it, that test would pass on the key merely being
+    /// present.
+    #[test]
+    fn an_explicit_false_exclude_dev_passes() {
+        let deny = "[graph]\nexclude-dev = false\n\n[licenses]\ninclude-dev = true\n";
+        assert!(check_dev_licenses_are_checked(deny).is_ok());
+    }
+
+    /// Both halves fail closed on a value neither was measured at, rather than
+    /// ignoring it and reporting the config as correct.
+    ///
+    /// (A quoted `"true"` is not in the `include-dev` list and a quoted
+    /// `"false"` is not in the `exclude-dev` one: the reader strips quotes, so
+    /// each reads as its bare keyword. That is the right side to err on —
+    /// cargo-deny rejects a string for a boolean key by itself, so the config
+    /// fails closed without this guard's help.)
+    #[test]
+    fn an_unrecognised_dev_graph_value_fails() {
+        for value in ["1", "on", "yes", ""] {
+            let deny = format!("include-dev = {value}\n");
+            assert!(
+                check_dev_licenses_are_checked(&deny).is_err(),
+                "`include-dev = {value}` must not pass"
+            );
+        }
+        for value in ["1", "true # really", "on", ""] {
+            let deny = format!("include-dev = true\nexclude-dev = {value}\n");
+            assert!(
+                check_dev_licenses_are_checked(&deny).is_err(),
+                "`exclude-dev = {value}` must not pass"
+            );
+        }
+    }
+
+    /// `deny.toml` quotes both of these keys in the prose that explains them —
+    /// the `include-dev` block names `exclude-dev` four times, including in a
+    /// measured arm written as `+ [graph] exclude-dev = true`. None of that may
+    /// be read as the setting, or deleting the live line would still pass.
+    #[test]
+    fn the_comments_about_the_dev_graph_are_not_read_as_the_settings() {
+        let deny = "\
+# `include-dev = true` is what puts dev dependencies in the licence check, and
+# `[graph] exclude-dev = true` would take them back out without touching it.
+confidence-threshold = 0.93
+";
+        assert!(check_dev_licenses_are_checked(deny).is_err());
+
+        // A commented-out good value must not rescue a live weakened one.
+        let deny = "\
+# include-dev = true
+include-dev = false
+";
+        assert!(check_dev_licenses_are_checked(deny).is_err());
+
+        // And a commented-out kill switch is not a live one.
+        let deny = "\
+include-dev = true
+#   + `[graph] exclude-dev = true`          exit 0   <- hole
+";
+        assert!(check_dev_licenses_are_checked(deny).is_ok());
+    }
+
+    #[test]
+    fn the_unused_allowed_source_level_the_repository_ships_passes() {
+        assert!(check_unused_allowed_source_is_deny("unused-allowed-source = \"deny\"\n").is_ok());
+    }
+
+    /// The regression itself, and the quiet one: `"warn"` is the cargo-deny
+    /// default, so this is what the file said before SAK-234 and what deleting
+    /// the line goes back to. Measured on the stack tip with a second entry in
+    /// `allow-registry`: `"deny"` exits 8 with `error[unmatched-source]`, and
+    /// the identical tree without the key exits 0 with only
+    /// `warning[unmatched-source]`.
+    #[test]
+    fn omitting_the_unused_allowed_source_level_fails() {
+        let deny = "[sources]\nunknown-registry = \"deny\"\nunknown-git = \"deny\"\n";
+        let error =
+            check_unused_allowed_source_is_deny(deny).expect_err("a missing level must fail");
+        assert!(error.contains("default is"), "{error}");
+        assert!(error.contains("SAK-221"), "{error}");
+    }
+
+    #[test]
+    fn warning_on_an_unused_allowed_source_fails() {
+        let error = check_unused_allowed_source_is_deny("unused-allowed-source = \"warn\"\n")
+            .expect_err("\"warn\" must fail");
+        assert!(error.contains("error[unmatched-source]"), "{error}");
+    }
+
+    /// `"allow"` is the third level cargo-deny accepts, and the one that drops
+    /// the diagnostic entirely.
+    #[test]
+    fn allowing_an_unused_allowed_source_fails() {
+        assert!(
+            check_unused_allowed_source_is_deny("unused-allowed-source = \"allow\"\n").is_err()
+        );
+    }
+
+    /// The `[sources]` prose names this key in a measured arm written as
+    /// `+ unused-allowed-source = "deny"`, and names the licence-side twin it
+    /// deliberately does not set. Neither may be read as the setting.
+    #[test]
+    fn the_comment_about_the_unused_allowed_source_level_is_not_read_as_the_level() {
+        let deny = "\
+#   + `unused-allowed-source = \"deny\"`      exit 8   `error[unmatched-source]`
+unknown-registry = \"deny\"
+";
+        assert!(check_unused_allowed_source_is_deny(deny).is_err());
+
+        // And a commented-out good value must not rescue a live weakened one.
+        let deny = "\
+# unused-allowed-source = \"deny\"
+unused-allowed-source = \"warn\"
+";
+        assert!(check_unused_allowed_source_is_deny(deny).is_err());
+
+        // The licence-side twin is named in the same block and is a different
+        // key, so it must not be read as this one.
+        let deny = "unused-allowed-license = \"deny\"\n";
+        assert!(check_unused_allowed_source_is_deny(deny).is_err());
     }
 
     /// `deny.toml` explains both of these settings in prose above them, so a

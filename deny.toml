@@ -157,6 +157,55 @@ allow = [
 # Fireup itself is Apache-2.0 (root `LICENSE`), which is in the allow list, so
 # the crate needs no `private` exemption and is checked like any other.
 confidence-threshold = 0.93
+# Dev dependencies are checked too. Without this line cargo-deny skips them, so
+# the allow list above governs only what Fireup ships and says nothing at all
+# about what its test suite pulls in.
+#
+# That is a real hole rather than a theoretical one, and it was measured rather
+# than argued (SAK-234). With `smartstring 1.0.1` added to `[dev-dependencies]` —
+# MPL-2.0, a copyleft licence this allow list deliberately excludes, and reached
+# only as `(dev) fireup`, confirmed with `cargo tree -i` — the three arms were:
+#
+#   today's config (no key)         exit 0   `licenses ok`
+#   `include-dev = true`            exit 4   `error[rejected]` MPL-2.0
+#   + `MPL-2.0` in `allow`          exit 0   `licenses ok`
+#
+# The third arm is the control: the red in the second comes from the licence
+# identifier, not from the key existing. The tree was identical across all three.
+#
+# On the day it was added this changed nothing. The checked set goes from 216
+# crates to 217 — measured with `allow = []`, which rejects every crate the gate
+# actually looks at, rather than with `cargo deny list`, which reports a
+# different set — and the one crate added is `tokio-test 0.4.6`, MIT, already
+# allowed. The CI command exits 0 with no new diagnostic.
+#
+# Why check them at all, when the licence of a test-only crate never reaches a
+# user: because the obligation still reaches us. A copyleft dev dependency has to
+# be complied with by everyone who builds and tests Fireup, which is everyone who
+# contributes to it, and the point of this allow list is that the licence question
+# gets asked when the dependency arrives instead of when someone notices. The
+# symmetric-looking strictness that is *not* worth it is `unused-allowed-license`
+# — see the note on `unused-allowed-source` below for why that one is excluded.
+include-dev = true
+# `[graph] exclude-dev` is the kill switch for the line above, which is why
+# `dependency_pin_tests` asserts two things here and not one. `exclude-dev = true`
+# drops dev dependencies from the graph before the licence check ever sees them,
+# so the hole reopens with `include-dev = true` still sitting here unchanged.
+# Measured on the same tree (SAK-234):
+#
+#   `include-dev = true`                    exit 4
+#   + `[graph] exclude-dev = true`          exit 0   ← hole
+#   + `[graph] exclude-dev = false`         exit 4
+#
+# Same shape as `yanked` / `disable-yank-checking` (SAK-231): the value of the
+# policy key says nothing on its own about whether the policy runs.
+#
+# `[graph] exclude = ["smartstring"]` silences it too (measured: exit 0), and the
+# guard deliberately does not forbid that. It is a different thing — one crate
+# named out loud, visible in the diff as the name of the crate being excused —
+# where `exclude-dev` is a single boolean that excuses every dev dependency at
+# once without naming any of them. Requiring `exclude` to stay empty would be a
+# new policy decision, not a guard on this one.
 
 [bans]
 # "warn", not "deny". The tree legitimately carries duplicate major versions of
@@ -174,6 +223,45 @@ wildcards = "deny"
 deny = []
 
 [sources]
+# An entry in `allow-registry` that nothing in the tree comes from is an error,
+# not a warning. This is what makes cargo-deny itself report a widened source
+# allow list, rather than leaving that entirely to a test.
+#
+# Widening `allow-registry` is the one edit in this file that the tool is
+# otherwise silent about. Measured on this tree (SAK-234), with a second entry
+# `https://example.invalid/index` added:
+#
+#   today's config (no key)                 exit 0   `warning[unmatched-source]`
+#   + `unused-allowed-source = "deny"`      exit 8   `error[unmatched-source]`
+#   key, but no second entry                exit 0   —
+#
+# The third arm is the control: this does not make the shipping tree red, so the
+# red in the second comes from the extra entry and not from the key.
+#
+# Placement is the point. `dependency_pin_tests` already fails on a second
+# registry here (SAK-230), and that is the stronger check — it fails even once a
+# crate really does come from the new registry, where `unmatched-source` by
+# definition stops firing at that moment. But a test can be stopped from running:
+# deleting one step from `ci.yml` silenced the whole file for a while (SAK-221),
+# and nothing in the repository noticed. This key is read by the `deny` job
+# itself, so the job cannot be green while ignoring it. Same reasoning as moving
+# `-D advisory-not-detected` into `unused-ignored-advisory` (SAK-229). The two
+# overlap on purpose; neither is redundant.
+#
+# The licence-side twin, `[licenses] unused-allowed-license`, is deliberately
+# *not* set, and the asymmetry is intentional. An unused `allow` entry there is
+# "nothing needed this permission this week", and identifiers legitimately come
+# and go as dependencies are swapped. It needs no mutation to demonstrate:
+# `BSD-2-Clause` is unused on this tree right now, because SAK-220 removed the
+# `zerocopy` that carried it, and setting that key makes the shipping tree exit 4
+# with `error[license-not-encountered]` (measured, SAK-234). It would have turned
+# an ordinary, correct dependency migration red. The `warning[license-not-encountered]`
+# this check still prints is that exact case, left as a warning on purpose.
+#
+# A registry allow list is different in kind: one entry, a statement about
+# provenance rather than a permission someone might not happen to need, and an
+# unused entry in it is a mistake every time.
+unused-allowed-source = "deny"
 # Everything must come from crates.io. An unknown registry or a git dependency
 # is how an unreviewed, unpinned third party gets into the build, so both are
 # errors with no allow-list entries.
