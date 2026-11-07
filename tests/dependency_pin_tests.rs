@@ -751,6 +751,239 @@ fn check_unused_allowed_source_is_deny(deny: &str) -> Result<(), String> {
     }
 }
 
+/// `Err` unless `[graph] targets` leaves every target in the graph.
+///
+/// `deny.toml` has no `targets` list and the comment above `[graph]` says that
+/// is deliberate. This is the assertion that makes the comment binding, because
+/// adding one line there narrows the graph and makes the `deny` job *greener* —
+/// the direction nothing watching CI ever reports.
+///
+/// Measured on the stack tip (SAK-235) by varying only this key, with the
+/// checked set counted using `allow = []`, which rejects every crate the gate
+/// actually looks at, rather than with `cargo deny list`:
+///
+///   shipping config (no key)                     217 crates
+///   + `targets = ["x86_64-unknown-linux-gnu"]`   173 crates
+///   + `targets = []`                             217 crates
+///
+/// The 44 that disappear are the `windows-*` family, `wasi`, `wasip2`,
+/// `wasm-bindgen*`, `js-sys`, `web-sys`, `r-efi`, `objc2-*`,
+/// `core-foundation-sys`, `redox_syscall`, `libredox`,
+/// `android_system_properties`, `hermit-abi`, `bumpalo`, `shlex` and `cc`.
+///
+/// Unlike `include-dev`, this key hides vulnerabilities and not only licences,
+/// which is why the error below leads with the advisory evidence. Both halves
+/// were measured on a tree held fixed while only `[graph]` moved:
+///
+///   `shlex = "=1.2.0"` (RUSTSEC-2024-0006) as a `cfg(windows)` dependency
+///     shipping config          exit 1   `RUSTSEC-2024-0006` / `advisories FAILED`
+///     + `targets = [linux]`    exit 0   `advisories ok`          <- hole
+///     + `targets = [windows]`  exit 1   control: the crate is still vulnerable
+///
+///   `smartstring = "=1.0.1"` (MPL-2.0) as a `cfg(windows)` dependency
+///     shipping config          exit 4   `error[rejected]` MPL-2.0
+///     + `targets = [linux]`    exit 0   `licenses ok`            <- hole
+///     + `targets = [windows]`  exit 4   control: narrowing is not what did it
+///     + `[linux]` + MPL allowed exit 0  control: green has other causes
+///
+/// The `[windows]` arms are the ones that matter: without them a disappearing
+/// red could just as well mean that restricting the graph at all breaks the
+/// check, rather than that *this* restriction hides *these* crates.
+///
+/// An empty list is accepted because it was measured to be the same as no list
+/// (217 crates either way), which is cargo-deny's documented "all targets".
+///
+/// `[graph] exclude` narrows the graph too — `exclude = ["windows-sys"]` takes
+/// the checked set from 217 to 206 — and is deliberately not forbidden here,
+/// for the reason SAK-234 left it alone: it names the crates it excuses, so it
+/// is visible in a diff as a decision, where `targets` excuses a whole platform
+/// by naming a platform we do support. Requiring `exclude` to stay empty is a
+/// new policy decision, not a guard on this one.
+fn check_graph_covers_every_target(deny: &str) -> Result<(), String> {
+    if setting(deny, "targets").is_none() {
+        return Ok(());
+    }
+
+    match setting_array(deny, "targets") {
+        Some(targets) if targets.is_empty() => Ok(()),
+        Some(targets) => Err(format!(
+            "deny.toml sets `[graph] targets = {targets:?}`, which drops every crate that only \
+             builds for a target outside that list — their advisories and their licences stop \
+             being checked and the `deny` job gets *greener* for it. This hides \
+             vulnerabilities, not just licences: measured on this tree (SAK-235) with the \
+             vulnerable `shlex` 1.2.0 (RUSTSEC-2024-0006) reached as a `cfg(windows)` \
+             dependency, no list exits 1 and names the advisory, \
+             `[\"x86_64-unknown-linux-gnu\"]` exits 0 with `advisories ok`, and \
+             `[\"x86_64-pc-windows-msvc\"]` exits 1 again on the identical tree — so the red \
+             is lost to which target was chosen, not to narrowing as such. Counted with \
+             `allow = []`, the checked set goes from 217 crates to 173. Delete the key: \
+             checking every target is the stricter reading and needs no maintenance. An empty \
+             list is accepted too, and was measured to be the same 217 crates."
+        )),
+        None => Err(
+            "deny.toml has a live `[graph] targets` line that is not an array, so this guard \
+             cannot tell which targets it leaves out and must not report the graph as \
+             unrestricted. cargo-deny rejects the scalar form by itself — measured on this \
+             tree (SAK-235), `targets = \"x86_64-unknown-linux-gnu\"` exits 1 with \
+             `error[wanted]: expected an array` — so today this branch is belt and braces. It \
+             is here so that a form this reader does not understand can never be the thing \
+             that makes the guard pass. Delete the key, or write it as an empty array."
+                .into(),
+        ),
+    }
+}
+
+/// `Err` unless `[advisories] unsound` is set to `"all"`.
+///
+/// `unsound` is the sibling of `unmaintained` and takes the same scope enum,
+/// not a lint level, so the same hole SAK-225 closed for one key was still open
+/// for the other. The difference is that `unmaintained` was at least written
+/// down: `unsound` was absent, and absence is `"workspace"`, so a transitive
+/// unsound advisory was reported nowhere.
+///
+/// Measured (SAK-236) with `anstream` 0.6.7 — RUSTSEC-2024-0404, unsound,
+/// affects `< 0.6.8` — made purely transitive by pinning `clap = "=4.5.0"`, so
+/// `fireup -> clap 4.5.0 -> clap_builder 4.5.0 -> anstream 0.6.7` with no direct
+/// edge. Tree fixed, only this key moved:
+///
+///   no key (what shipped)      exit 0   `advisories ok`                 <- hole
+///   `unsound = "all"`          exit 1   `error[unsound]` RUSTSEC-2024-0404
+///   `unsound = "workspace"`    exit 0   control: identical to no key
+///   `unsound = "transitive"`   exit 1   control: the crate is reachable
+///   `unsound = "none"`         exit 0   control: the kill switch
+///
+/// The `"workspace"` arm is what pins the default; the `"transitive"` arm is
+/// what rules out "that crate was unreachable anyway". Separately, `const-cstr`
+/// 0.3.0 (RUSTSEC-2023-0020) as a *direct* dependency exits 1 with the key still
+/// unset, which rules out `"none"` as the default.
+///
+/// One assertion is enough here, unlike `yanked` (SAK-231) or `include-dev`
+/// (SAK-234): there is no separate kill-switch key, so the value of this key
+/// alone decides the scope. Absence is a failure, because absence is
+/// `"workspace"`.
+fn check_unsound_scope_is_all(deny: &str) -> Result<(), String> {
+    match setting(deny, "unsound").as_deref() {
+        Some("all") => Ok(()),
+        Some(scope) => Err(format!(
+            "deny.toml sets `[advisories] unsound = \"{scope}\"`, not \"all\". Only \"all\" \
+             reports unsoundness in transitive dependencies, and every other value of this key \
+             makes the `deny` job *greener* rather than redder, so nothing else will tell you it \
+             changed. Measured on this tree (SAK-236) with RUSTSEC-2024-0404 (`anstream` 0.6.7) \
+             reached only through `clap 4.5.0 -> clap_builder 4.5.0`: \"all\" and \"transitive\" \
+             exit 1 and name the advisory, while \"workspace\" and \"none\" exit 0 with \
+             `advisories ok` on the identical tree. Unsoundness is memory corruption, and a \
+             transitive one is still a question about a direct dependency we chose."
+        )),
+        None => Err(
+            "deny.toml has no `[advisories] unsound` setting, so it runs at the \
+                     cargo-deny default of \"workspace\" and reports no unsound advisory in any \
+                     transitive dependency. That is the same blind spot SAK-225 closed for \
+                     `unmaintained`, one key to the left and never written down. Measured \
+                     (SAK-236): with RUSTSEC-2024-0404 (`anstream` 0.6.7) purely transitive, no \
+                     key exits 0 with `advisories ok` and is byte-identical to \
+                     `unsound = \"workspace\"`, while `unsound = \"transitive\"` exits 1 on the \
+                     same tree. Set it to \"all\" explicitly."
+                .into(),
+        ),
+    }
+}
+
+/// The official RustSec advisory database, with the spellings that mean it.
+const OFFICIAL_ADVISORY_DB: &str = "https://github.com/rustsec/advisory-db";
+
+/// Reduce an advisory-database URL to a comparable form.
+///
+/// A trailing slash and a `.git` suffix both name the same repository — the
+/// suffix form was measured to work (SAK-236: it exits 1 and names the same
+/// advisory) — so neither may be the reason this guard fails.
+fn same_advisory_db(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/').to_ascii_lowercase();
+    trimmed
+        .strip_suffix(".git")
+        .unwrap_or(&trimmed)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// `Err` unless the advisory database cargo-deny reads is still the official one.
+///
+/// Every other loosening this file guards against leaves the policy visible and
+/// only changes how strictly it is applied. This one leaves every `deny` in
+/// place and changes what the database is willing to mention, which makes it the
+/// only edit here that is invisible both to the `deny` job and to a reader of
+/// the diff — the URL of a fork looks exactly like the URL of the real thing.
+///
+/// SAK-228 established that failing to *fetch* a database fails closed, in three
+/// different ways. What was unmeasured was a database that fetches cleanly and
+/// has been edited. Measured now (SAK-236) against local forks of advisory-db
+/// served over `git daemon`, tree fixed with `shlex = "=1.2.0"`
+/// (RUSTSEC-2024-0006), only this key moving:
+///
+///   official URL (ships)              exit 1   `error[vulnerability]` named
+///   fork with zero advisories         exit 1   fails to load -> fail closed
+///   fork that HAS the advisory        exit 1   control: the fork is really used
+///   same fork, that one file deleted  exit 0   `advisories ok`          <- hole
+///   thinned fork + official URL       exit 1   control: URLs are a union
+///   official URL + `.git`             exit 1   another spelling, still works
+///   key deleted                       exit 1   the default is the official DB
+///   `db-urls = []`                    exit 1   empty is the default too
+///
+/// The two forks differ by exactly one file in `git ls-tree`. The control arm is
+/// what makes the hole legible: without it, the green could mean the fork was
+/// never fetched at all rather than that it was fetched and was quiet.
+///
+/// Hence the three decisions below. Absence passes, because the default is this
+/// database. An empty list passes, because that was measured to be the default
+/// too. A non-empty list must *contain* the official URL rather than equal it,
+/// because several URLs were measured to be a union, so an extra entry can only
+/// add advisories and never remove one.
+///
+/// A live `db-urls` line this reader cannot parse is a failure, for the reason
+/// SAK-235 gave for `targets`: cargo-deny rejects the scalar form by itself
+/// (`error[wanted]: expected an array`, measured), so today this is belt and
+/// braces — it is here so that a form this guard does not understand can never
+/// be the thing that makes it pass.
+fn check_advisory_db_is_the_official_one(deny: &str) -> Result<(), String> {
+    if setting(deny, "db-urls").is_none() {
+        return Ok(());
+    }
+
+    match setting_array(deny, "db-urls") {
+        Some(urls) if urls.is_empty() => Ok(()),
+        Some(urls)
+            if urls
+                .iter()
+                .any(|url| same_advisory_db(url) == same_advisory_db(OFFICIAL_ADVISORY_DB)) =>
+        {
+            Ok(())
+        }
+        Some(urls) => Err(format!(
+            "deny.toml sets `[advisories] db-urls = {urls:?}`, which does not include the \
+             official RustSec database `{OFFICIAL_ADVISORY_DB}`. That one line decides everything \
+             the `advisories` check is able to know, and pointing it elsewhere loosens no policy \
+             at all — every `deny` in this file stays `deny` and the database simply stops \
+             mentioning things. Measured on this tree (SAK-236) with the vulnerable `shlex` 1.2.0 \
+             (RUSTSEC-2024-0006): a fork that still carries the advisory exits 1 and names it, \
+             and the same fork with that one file deleted — a one-file difference in \
+             `git ls-tree` — exits 0 with `advisories ok`. An empty database at least fails \
+             closed; a thinned one is silent, and neither `maximum-db-staleness` nor \
+             `-D advisory-not-detected` notices. Adding URLs alongside the official one is fine \
+             and was measured to be a union; replacing it is not. Deleting the key is fine too, \
+             because the default is this same database."
+        )),
+        None => Err(format!(
+            "deny.toml has a live `[advisories] db-urls` line that is not an array, so this guard \
+             cannot tell which advisory databases the gate reads and must not report the source \
+             as official. cargo-deny rejects the scalar form by itself — measured on this tree \
+             (SAK-236), `db-urls = \"{OFFICIAL_ADVISORY_DB}\"` exits 1 with \
+             `error[wanted]: expected an array` and never runs the check — so today this branch \
+             is belt and braces, for the reason SAK-235 gave for `[graph] targets`: a form this \
+             reader does not understand must never be what makes it pass. Write it as an array, \
+             or delete the key and take the default."
+        )),
+    }
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -841,6 +1074,27 @@ fn deny_toml_licence_checks_dev_dependencies_and_leaves_them_in_the_graph() {
 #[test]
 fn deny_toml_fails_on_an_allowed_source_that_nothing_comes_from() {
     if let Err(reason) = check_unused_allowed_source_is_deny(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_leaves_every_build_target_in_the_graph() {
+    if let Err(reason) = check_graph_covers_every_target(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_reports_unsound_advisories_for_the_whole_graph() {
+    if let Err(reason) = check_unsound_scope_is_all(&repo_file("deny.toml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn deny_toml_reads_the_official_advisory_database() {
+    if let Err(reason) = check_advisory_db_is_the_official_one(&repo_file("deny.toml")) {
         panic!("{reason}");
     }
 }
@@ -1695,5 +1949,280 @@ yanked = \"deny\"
 # disable-yank-checking = true
 ";
         assert!(check_yanked_is_denied(deny).is_ok());
+    }
+
+    #[test]
+    fn the_graph_the_repository_ships_passes() {
+        assert!(check_graph_covers_every_target("[graph]\nall-features = true\n").is_ok());
+    }
+
+    /// The regression itself: one line, and the whole platform-only half of the
+    /// tree stops being checked. Measured on the stack tip with the vulnerable
+    /// `shlex` 1.2.0 as a `cfg(windows)` dependency — no list exits 1 and names
+    /// RUSTSEC-2024-0006, this list exits 0 with `advisories ok`.
+    #[test]
+    fn restricting_the_graph_to_one_target_fails() {
+        let deny = "[graph]\ntargets = [\"x86_64-unknown-linux-gnu\"]\nall-features = true\n";
+        let error = check_graph_covers_every_target(deny).expect_err("a target list must not pass");
+        assert!(error.contains("RUSTSEC-2024-0006"), "{error}");
+        assert!(error.contains("217 crates to 173"), "{error}");
+    }
+
+    /// A list long enough to look thorough still is not every target. These two
+    /// keep the `windows-*` family and drop `wasi`, `wasm-bindgen` and the
+    /// `objc2-*` tree, so the hole is narrower and still open.
+    #[test]
+    fn a_longer_target_list_that_still_leaves_platforms_out_fails() {
+        let deny = "\
+targets = [
+  \"x86_64-unknown-linux-gnu\",
+  \"x86_64-pc-windows-msvc\",
+]
+";
+        assert!(check_graph_covers_every_target(deny).is_err());
+    }
+
+    /// cargo-deny's other spelling for the same key, and it is not cosmetic:
+    /// measured on the stack tip with the MPL-2.0 `smartstring` as a
+    /// `cfg(windows)` dependency, `targets = [{ triple = "…linux-gnu" }]` exits
+    /// 0 with `licenses ok` exactly like the string form. A reader that only
+    /// understood the string form would call this unrestricted.
+    #[test]
+    fn the_table_form_of_a_target_fails_too() {
+        let deny = "targets = [{ triple = \"x86_64-unknown-linux-gnu\" }]\n";
+        let error = check_graph_covers_every_target(deny)
+            .expect_err("the table form narrows the graph the same way");
+        assert!(error.contains("x86_64-unknown-linux-gnu"), "{error}");
+    }
+
+    /// The allowed half, measured rather than assumed: an empty list leaves the
+    /// checked set at 217 crates, the same as no list at all, so it must not
+    /// fail the guard. Without this the test above would pass on the key merely
+    /// being present.
+    #[test]
+    fn an_empty_target_list_passes() {
+        assert!(check_graph_covers_every_target("targets = []\n").is_ok());
+        assert!(check_graph_covers_every_target("targets = [\n]\n").is_ok());
+    }
+
+    /// A live `targets` line this reader cannot parse fails rather than being
+    /// reported as no restriction at all. cargo-deny also rejects this form
+    /// today (`error[wanted]: expected an array`, exit 1, measured), so the
+    /// branch is belt and braces — but a shape the reader does not understand
+    /// must never be the reason it passes.
+    #[test]
+    fn a_target_line_that_is_not_an_array_fails() {
+        let error = check_graph_covers_every_target("targets = \"x86_64-unknown-linux-gnu\"\n")
+            .expect_err("a scalar must not be read as no restriction");
+        assert!(error.contains("not an array"), "{error}");
+    }
+
+    /// `deny.toml` explains in prose why this key is absent, and this change
+    /// adds a measured arms table above `[graph]` that writes the setting out
+    /// four times — including as `+ targets = ["x86_64-unknown-linux-gnu"]`.
+    /// None of that may be read as the setting, or deleting the comment would
+    /// "fix" a file that has the live line in it.
+    #[test]
+    fn the_comments_about_targets_are_not_read_as_the_setting() {
+        let deny = "\
+# No `targets` list on purpose. Restricting the graph to Linux would hide
+# advisories and licences on the Windows/macOS/wasi crates.
+#   + `targets = [\"x86_64-unknown-linux-gnu\"]`   173 crates
+all-features = true
+";
+        assert!(check_graph_covers_every_target(deny).is_ok());
+
+        // And a commented-out key must not rescue a live one beside it.
+        let deny = "\
+# targets = []
+targets = [\"x86_64-unknown-linux-gnu\"]
+";
+        assert!(check_graph_covers_every_target(deny).is_err());
+
+        // Nor may a trailing comment hide a live entry.
+        let deny = "targets = [\"x86_64-unknown-linux-gnu\"]  # just for CI speed\n";
+        assert!(check_graph_covers_every_target(deny).is_err());
+    }
+
+    #[test]
+    fn the_unsound_scope_the_repository_ships_passes() {
+        assert!(check_unsound_scope_is_all("unsound = \"all\"\n").is_ok());
+    }
+
+    /// The regression, and the value the file ran at before SAK-236 without
+    /// ever saying so. Measured: identical to the key being absent.
+    #[test]
+    fn narrowing_the_unsound_scope_to_the_workspace_fails() {
+        let error = check_unsound_scope_is_all("unsound = \"workspace\"\n")
+            .expect_err("\"workspace\" must fail");
+        assert!(
+            error.contains("RUSTSEC-2024-0404") && error.contains("workspace"),
+            "{error}"
+        );
+    }
+
+    /// `"transitive"` is red on the measured tree, but it is still a narrowing:
+    /// it drops the workspace's own crates. The guard wants "all", not "any
+    /// value that happened to be red in one experiment".
+    #[test]
+    fn narrowing_the_unsound_scope_to_transitive_only_fails() {
+        assert!(check_unsound_scope_is_all("unsound = \"transitive\"\n").is_err());
+    }
+
+    /// The kill switch. One word and unsound advisories stop being reported at
+    /// all — measured with `const-cstr` 0.3.0 as a direct dependency, where it
+    /// takes the check from exit 1 to `advisories ok`.
+    #[test]
+    fn disabling_the_unsound_check_fails() {
+        assert!(check_unsound_scope_is_all("unsound = \"none\"\n").is_err());
+    }
+
+    /// The quietest form of the regression and the one that actually shipped:
+    /// the key is simply not there, cargo-deny defaults to `"workspace"`, and
+    /// the file reads as though the question was never asked. This is the arm
+    /// that differs from `unmaintained`, which was at least written down.
+    #[test]
+    fn omitting_the_unsound_setting_entirely_fails() {
+        let deny = "[advisories]\nyanked = \"deny\"\nunmaintained = \"all\"\nignore = []\n";
+        let error = check_unsound_scope_is_all(deny).expect_err("an absent key must fail");
+        assert!(error.contains("workspace"), "{error}");
+    }
+
+    /// `deny.toml` now writes this key out five times in the arms table above
+    /// it, including `unsound = "workspace"` and `unsound = "none"`. None of
+    /// those may be read as the setting, or deleting a comment would "fix" a
+    /// file whose live line is wrong — and documenting the measurement would
+    /// break the guard that the measurement justified.
+    #[test]
+    fn the_comments_about_the_unsound_scope_are_not_read_as_the_scope() {
+        let deny = "\
+#   no key (what shipped)      exit 0   `advisories ok`
+#   `unsound = \"all\"`          exit 1   RUSTSEC-2024-0404
+#   `unsound = \"workspace\"`    exit 0   control: identical to no key
+#   `unsound = \"none\"`         exit 0   control: the kill switch
+unsound = \"all\"
+";
+        assert!(check_unsound_scope_is_all(deny).is_ok());
+
+        // A commented-out good value must not rescue a live bad one.
+        let deny = "# unsound = \"all\"\nunsound = \"workspace\"\n";
+        assert!(check_unsound_scope_is_all(deny).is_err());
+
+        // Nor may a trailing comment hide the live value.
+        let deny = "unsound = \"none\"  # back to all once the backlog is clear\n";
+        assert!(check_unsound_scope_is_all(deny).is_err());
+
+        // And prose alone is not the setting.
+        let deny = "# `unsound` is the sibling scope enum of `unmaintained`.\n";
+        assert!(check_unsound_scope_is_all(deny).is_err());
+    }
+
+    #[test]
+    fn the_advisory_database_the_repository_ships_passes() {
+        let deny = "db-urls = [\"https://github.com/rustsec/advisory-db\"]\n";
+        assert!(check_advisory_db_is_the_official_one(deny).is_ok());
+    }
+
+    /// The hole, as measured: a fork of advisory-db with one advisory file
+    /// deleted takes the check from exit 1 to `advisories ok` while every
+    /// `deny` in the file stays exactly where it was.
+    #[test]
+    fn a_thinned_fork_of_the_advisory_database_fails() {
+        let deny = "db-urls = [\"https://github.com/acme/advisory-db\"]\n";
+        let error = check_advisory_db_is_the_official_one(deny)
+            .expect_err("a fork must not be accepted as the advisory source");
+        assert!(
+            error.contains("RUSTSEC-2024-0006") && error.contains("rustsec/advisory-db"),
+            "{error}"
+        );
+    }
+
+    /// Absence passes, and this is measured rather than assumed: with the key
+    /// deleted the check still exits 1 and names RUSTSEC-2024-0006, because the
+    /// cargo-deny default is this same database. Failing on absence would be
+    /// wrong *and* would make the guard a nuisance.
+    #[test]
+    fn omitting_the_database_url_passes() {
+        let deny = "[advisories]\nyanked = \"deny\"\nunsound = \"all\"\nignore = []\n";
+        assert!(check_advisory_db_is_the_official_one(deny).is_ok());
+    }
+
+    /// An empty list is the default too (measured: exit 1, advisory named), so
+    /// it must not fail. Without this, the guard would be passing on the key
+    /// merely containing something.
+    #[test]
+    fn an_empty_database_url_list_passes() {
+        assert!(check_advisory_db_is_the_official_one("db-urls = []\n").is_ok());
+        assert!(check_advisory_db_is_the_official_one("db-urls = [\n]\n").is_ok());
+    }
+
+    /// Several URLs are a union, measured: the thinned fork beside the official
+    /// one still exits 1 and names the advisory. So an extra entry can only add
+    /// advisories, and requiring `== [official]` would forbid a harmless thing.
+    #[test]
+    fn an_extra_database_url_beside_the_official_one_passes() {
+        let deny = "db-urls = [\"https://github.com/acme/advisory-db\", \
+                    \"https://github.com/rustsec/advisory-db\"]\n";
+        assert!(check_advisory_db_is_the_official_one(deny).is_ok());
+
+        // Including when the array is reformatted across lines, which is how a
+        // second entry would most naturally arrive.
+        let deny = "db-urls = [\n  \"https://github.com/acme/advisory-db\",\n  \
+                    \"https://github.com/rustsec/advisory-db\",\n]\n";
+        assert!(check_advisory_db_is_the_official_one(deny).is_ok());
+    }
+
+    /// The spellings that name the same repository. The `.git` suffix was
+    /// measured to work (exit 1, same advisory), so none of these may be the
+    /// reason the guard fails.
+    #[test]
+    fn the_other_spellings_of_the_official_database_pass() {
+        for url in [
+            "https://github.com/rustsec/advisory-db.git",
+            "https://github.com/rustsec/advisory-db/",
+            "https://github.com/rustsec/advisory-db.git/",
+            "https://github.com/RustSec/advisory-db",
+        ] {
+            let deny = format!("db-urls = [\"{url}\"]\n");
+            assert!(
+                check_advisory_db_is_the_official_one(&deny).is_ok(),
+                "{url} names the official database"
+            );
+        }
+    }
+
+    /// A live line this reader cannot parse fails closed rather than being
+    /// reported as the official source. cargo-deny rejects the scalar form
+    /// itself today (`error[wanted]: expected an array`, measured), so this is
+    /// belt and braces — same reasoning as the `targets` scalar branch.
+    #[test]
+    fn a_database_url_line_that_is_not_an_array_fails() {
+        let deny = "db-urls = \"https://github.com/rustsec/advisory-db\"\n";
+        let error = check_advisory_db_is_the_official_one(deny)
+            .expect_err("a scalar must not be read as the official database");
+        assert!(error.contains("not an array"), "{error}");
+    }
+
+    /// `deny.toml` quotes this URL in prose above the live line, and the arms
+    /// table describes forks of it. None of that may stand in for the setting,
+    /// in either direction.
+    #[test]
+    fn the_comments_about_the_database_are_not_read_as_the_setting() {
+        // Prose mentioning the official URL must not rescue a live fork.
+        let deny = "\
+# Where the advisories come from: https://github.com/rustsec/advisory-db
+#   official URL (ships)    exit 1   `error[vulnerability]` named
+db-urls = [\"https://github.com/acme/advisory-db\"]
+";
+        assert!(check_advisory_db_is_the_official_one(deny).is_err());
+
+        // A commented-out key must not count as the key being present either —
+        // absence is legal, so this has to pass for the right reason.
+        let deny = "# db-urls = [\"https://github.com/acme/advisory-db\"]\nignore = []\n";
+        assert!(check_advisory_db_is_the_official_one(deny).is_ok());
+
+        // Nor may a trailing comment hide a live fork.
+        let deny = "db-urls = [\"https://github.com/acme/advisory-db\"]  # mirror, faster\n";
+        assert!(check_advisory_db_is_the_official_one(deny).is_err());
     }
 }
