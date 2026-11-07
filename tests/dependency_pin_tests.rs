@@ -129,13 +129,16 @@
 //! and the two fields it wants (`name`, `version`) are the first two lines of
 //! every `[[package]]` block in the v3/v4 lock format.
 //!
-//! Not all of them are in `Cargo.lock` or `deny.toml` any more. Two now read
+//! Not all of them are in `Cargo.lock` or `deny.toml` any more. Three now read
 //! `.github/workflows/ci.yml`, because that is where the rest of this gate's
-//! behaviour is written down: SAK-239 needs the `grep` the `deny` job runs, and
-//! SAK-240 needs the scope of the token every job in that workflow is handed.
-//! Those checks live here rather than in a workflow test of their own for the
-//! reason the bottom of this header gives — this is the one test target CI
-//! actually names.
+//! behaviour is written down: SAK-239 needs the `grep` the `deny` job runs,
+//! SAK-240 needs the scope of the token every job in that workflow is handed,
+//! and SAK-243 needs the gate command itself — the list of check names in it is
+//! what decides which of the `deny.toml` settings above are in force at all,
+//! and a name dropped from that line switches a whole check off with no
+//! diagnostic and a zero exit. Those checks live here rather than in a workflow
+//! test of their own for the reason the bottom of this header gives — this is
+//! the one test target CI actually names.
 //!
 //! The checks are written as functions over parsed text, not as assertions over
 //! the real file, so that the "and it really does fail" half can be committed
@@ -2040,6 +2043,276 @@ fn check_workflow_token_is_read_only(ci: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The name of the step in `ci.yml`'s `deny` job that runs the gate itself.
+const DENY_STEP: &str = "cargo deny check";
+
+/// The checks that step names today, and that `deny.toml` configures.
+///
+/// Everything this file asserts about `deny.toml` is a setting for one of
+/// these four. A name missing from the command is that whole column of
+/// settings switched off.
+const DENY_CHECKS: &[&str] = &["advisories", "licenses", "bans", "sources"];
+
+/// Shell characters that end a word, so that `sources||true` is still two.
+const SHELL_OPERATORS: &[char] = &['|', '&', ';', '(', ')', '<', '>'];
+
+/// The `deny` job's gate command, as much of it as this guard reads.
+#[derive(Debug, PartialEq, Eq)]
+struct DenyStep {
+    /// The command as one logical line: `\`-continuations joined, comment
+    /// stripped. Kept as text because the `||` question is about an operator,
+    /// not about a word.
+    command: String,
+    /// The words after the `check` subcommand, cut at whitespace *and* at the
+    /// shell operators above. Not a parse of cargo-deny's command line — it
+    /// deliberately does not try to tell a positional check name from a flag's
+    /// value, because it does not have to: see `check_every_deny_check_runs`.
+    arguments: Vec<String>,
+}
+
+/// The `deny` job's `cargo-deny … check` command, read out of `ci.yml`.
+///
+/// Read rather than written down a second time for the same reason
+/// `log_step_pattern` is: the command *is* the contract. `deny.toml` is a pile
+/// of settings, and which of them are in force is decided here and nowhere
+/// else.
+///
+/// `Err` if the step is gone, if there is not exactly one of it, or if its
+/// `run:` body is not a single `cargo-deny … check` this reader understands.
+/// Each of those voids the promise the guard below keeps, so none may read as a
+/// pass — the same fail-closed call `log_step_pattern` and
+/// `check_graph_covers_every_target` make.
+fn deny_step_checks(ci: &str) -> Result<DenyStep, String> {
+    let lines: Vec<&str> = ci.lines().collect();
+    let needle = format!("- name: {DENY_STEP}");
+    let named: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| without_comment(line).trim() == needle)
+        .map(|(at, _)| at)
+        .collect();
+    let at = match named[..] {
+        [at] => at,
+        [] => {
+            return Err(format!(
+                "ci.yml has no `- name: {DENY_STEP}` step. That step is the only thing in \
+                 this repository that runs cargo-deny, which makes every assertion in this \
+                 file about deny.toml a statement about a tool nobody invokes. Note what \
+                 this guard cannot do: deleting the step takes the gate away entirely, and \
+                 all a test can do about that is refuse to pass (SAK-221). If the step was \
+                 renamed, point DENY_STEP at its new name."
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "ci.yml has {} steps named `{DENY_STEP}`. Which one is the gate — and \
+                 therefore which check list is in force — is not something a reader can \
+                 tell, so this fails rather than reporting on whichever came first.",
+                named.len()
+            ));
+        }
+    };
+
+    // The step is everything up to the next item in the `steps:` sequence.
+    // `- name:` is not enough on its own: a `- uses:` step has no name.
+    let step: Vec<&str> = lines[at + 1..]
+        .iter()
+        .copied()
+        .take_while(|line| {
+            let body = without_comment(line).trim();
+            body != "-" && !body.starts_with("- ")
+        })
+        .collect();
+
+    let run_at = step
+        .iter()
+        .position(|line| without_comment(line).trim_start().starts_with("run:"))
+        .ok_or_else(|| format!("the `{DENY_STEP}` step in ci.yml has no `run:` body"))?;
+    let run_line = without_comment(step[run_at]);
+    let run_body = run_line.trim_start();
+    let run_indent = run_line.len() - run_body.len();
+    let inline = run_body.strip_prefix("run:").unwrap_or_default().trim();
+
+    // Either `run: <command>` on the one line, or a block scalar whose body is
+    // the deeper-indented lines under it — which is the form ci.yml uses, and
+    // the reason this reader cannot be the one-liner `log_step_pattern` is.
+    let mut raw: Vec<&str> = Vec::new();
+    if inline.starts_with('|') || inline.starts_with('>') {
+        for next in &step[run_at + 1..] {
+            let bare = without_comment(next);
+            let body = bare.trim_start();
+            if body.is_empty() {
+                continue;
+            }
+            if bare.len() - body.len() <= run_indent {
+                break;
+            }
+            raw.push(body);
+        }
+    } else if !inline.is_empty() {
+        raw.push(inline);
+    }
+    if raw.is_empty() {
+        return Err(format!(
+            "the `{DENY_STEP}` step in ci.yml has an empty `run:` body, so the gate runs \
+             nothing and the step exits 0."
+        ));
+    }
+
+    // Join `\`-continuations: the shipped command is spread over three source
+    // lines and is one command.
+    let mut logical: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in raw {
+        match line.strip_suffix('\\') {
+            Some(head) => {
+                current.push_str(head.trim_end());
+                current.push(' ');
+            }
+            None => {
+                current.push_str(line);
+                logical.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    if !current.is_empty() {
+        logical.push(current);
+    }
+
+    let invocations: Vec<&String> = logical
+        .iter()
+        .filter(|line| line.contains("cargo-deny") || line.contains("cargo deny"))
+        .collect();
+    if invocations.len() != 1 {
+        return Err(format!(
+            "the `{DENY_STEP}` step in ci.yml does not run exactly one cargo-deny command \
+             — this reader found {} in `{}`. An unfamiliar body fails rather than being \
+             assumed equivalent: this guard's whole job is to read which checks that \
+             command runs, and it cannot read a command it did not find.",
+            invocations.len(),
+            logical.join(" ; ")
+        ));
+    }
+    let command = invocations[0].clone();
+
+    let words: Vec<&str> = command
+        .split(|c: char| c.is_whitespace() || SHELL_OPERATORS.contains(&c))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let check_at = words
+        .iter()
+        .position(|word| *word == "check")
+        .ok_or_else(|| {
+            format!(
+                "the `{DENY_STEP}` step in ci.yml runs cargo-deny with no `check` \
+                 subcommand: `{command}`. Without `check` there is no check list to read, \
+                 and whatever that command does it is not running this repository's \
+                 supply-chain policy."
+            )
+        })?;
+
+    Ok(DenyStep {
+        arguments: words[check_at + 1..]
+            .iter()
+            .map(|word| word.to_string())
+            .collect(),
+        command,
+    })
+}
+
+/// `Ok` if the `deny` job's command runs every check `deny.toml` configures,
+/// and if its verdict survives.
+///
+/// Drop one name from that command and that check's entire policy stops
+/// running: `deny.toml` is unchanged so cargo-deny has nothing to say, there is
+/// no diagnostic, and the step exits 0. Measured on this tree (SAK-243), each
+/// against a `deny.toml`/`Cargo.toml` mutation the check in question catches:
+///
+/// | check | mutation | full list | list minus it |
+/// |---|---|---|---|
+/// | `licenses` | drop `"MIT"` from `allow` | exit 4, 48 errors | exit 0, 0 errors |
+/// | `advisories` | an `ignore` entry matching nothing | exit 1, 1 error | exit 0 |
+/// | `bans` | `tonic = "*"` | exit 2, 1 error | exit 0 |
+/// | `sources` | `allow-registry = []` | exit 8, 216 errors | exit 0 |
+///
+/// The only trace in the log is one word missing from a summary line that
+/// still reads `ok` (`advisories ok, bans ok, sources ok`). This is the same
+/// shape as (3), (4) and (6) in the header: cargo-deny cannot report it,
+/// because the thing that changed is its own invocation.
+///
+/// **Two assertions, and deliberately only two.**
+///
+/// 1. *Every* check in `DENY_CHECKS` is named, **or none is.** Given no check
+///    names at all cargo-deny runs every check it has — measured, and it is
+///    why "none" has to pass: omitting the list is *stricter* than the shipping
+///    command, so a guard demanding the four names would be demanding the
+///    longer spelling of a stronger gate.
+/// 2. The command's exit is not sent to `||`.
+///
+/// Deliberately **not** asserted: an unfamiliar extra check name. A check this
+/// list has not heard of is the gate getting stricter, and a guard that
+/// reddened on it would teach people to shorten the command — the exact
+/// mistake SAK-241 undid in `the_permissions_reader_finds_exactly_the_live_keys`.
+/// That is also why assertion 1 only looks for these four words among the
+/// arguments and classifies nothing else: it never has to decide whether a
+/// word is a positional check name or some flag's value.
+///
+/// `||` and nothing else, for assertion 2, because that is what measurement
+/// said rather than what looked likely. With `deny.toml`'s licence allowlist
+/// broken, the step exits 4 on its own; `|| true` after it exits **0**, while
+/// `; true`, `&& echo done` and `| tee /dev/null` all still exit 4 — `-e`
+/// leaves before the `;`, and the step's `-o pipefail` covers the pipe. An
+/// assertion rejecting a `;` or a pipe would be red on a command that works.
+///
+/// Also not asserted, and worth a ticket of its own rather than a guess here:
+/// `continue-on-error: true` on this step would discard the verdict too. It is
+/// a visible new key in a diff rather than a word going missing from a long
+/// line, and it has not been measured on this tree.
+fn check_every_deny_check_runs(step: &DenyStep) -> Result<(), String> {
+    let named: Vec<&str> = DENY_CHECKS
+        .iter()
+        .copied()
+        .filter(|check| step.arguments.iter().any(|argument| argument == check))
+        .collect();
+
+    if !named.is_empty() && named.len() != DENY_CHECKS.len() {
+        let missing: Vec<&str> = DENY_CHECKS
+            .iter()
+            .copied()
+            .filter(|check| !named.contains(check))
+            .collect();
+        return Err(format!(
+            "the `{DENY_STEP}` step in ci.yml names {} but not {}: `{}`. A check \
+             cargo-deny is not told to run is a policy that does not run — deny.toml \
+             still configures it, cargo-deny still prints `ok` for the checks it did run, \
+             and the step still exits 0. Measured (SAK-243): with `licenses` dropped from \
+             that list and `\"MIT\"` dropped from deny.toml's allow list, the step exits 0 \
+             with no errors, where the full list exits 4 with 48. Either name every check \
+             in that command, or name none of them — cargo-deny with no check names runs \
+             every check it has, which is stricter than the list above and passes here.",
+            named.join(", "),
+            missing.join(", "),
+            step.command
+        ));
+    }
+
+    if step.command.contains("||") {
+        return Err(format!(
+            "the `{DENY_STEP}` step in ci.yml sends the gate's exit status to `||`: `{}`. \
+             That discards the verdict and the step exits 0 however the checks went, so \
+             the job reports green on a tree cargo-deny has just failed. Measured \
+             (SAK-243) with deny.toml's licence allowlist broken: the command alone exits \
+             4, and with `|| true` after it exits 0. If something after the gate has to \
+             run either way, use `;` — that keeps the failure (`-e` leaves before the \
+             `;`), as does a pipe (`-o pipefail`); both were measured and both pass this \
+             guard.",
+            step.command
+        ));
+    }
+
+    Ok(())
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -2183,6 +2456,17 @@ fn every_accepted_advisory_is_visible_in_the_deny_jobs_log() {
 #[test]
 fn ci_yml_declares_a_read_only_token_for_every_job() {
     if let Err(reason) = check_workflow_token_is_read_only(&repo_file(".github/workflows/ci.yml")) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn the_deny_job_runs_every_check_deny_toml_configures() {
+    let step = match deny_step_checks(&repo_file(".github/workflows/ci.yml")) {
+        Ok(step) => step,
+        Err(reason) => panic!("{reason}"),
+    };
+    if let Err(reason) = check_every_deny_check_runs(&step) {
         panic!("{reason}");
     }
 }
@@ -4269,6 +4553,273 @@ include-build = false
         assert_eq!(
             keys[0].entries,
             vec!["contents: read".to_string(), "packages: none".to_string()]
+        );
+    }
+
+    /// The command `ci.yml` ships, written the way it is written there: one
+    /// `cargo-deny` spread over three lines by `\`-continuations.
+    const SHIPPED_DENY_COMMAND: &str = "cargo-deny --locked check \\\n  \
+                                        -D advisory-not-detected \\\n  \
+                                        advisories licenses bans sources";
+
+    /// A `deny` job whose gate step runs `command`, in the shape `ci.yml` uses:
+    /// the last step of the job, a `run: |` block, with another named step
+    /// ahead of it so that an arm can tell "found the gate" from "found a step".
+    ///
+    /// `command` is literal shell source, so an arm can hand this a body no
+    /// author would choose on purpose. Those are the arms that decide whether
+    /// the reader fails closed.
+    fn deny_job_with(command: &str) -> String {
+        let body: String = command
+            .lines()
+            .map(|line| format!("          {line}\n"))
+            .collect();
+        format!(
+            "name: CI\n\non:\n  pull_request:\n\npermissions:\n  contents: read\n\n\
+             jobs:\n  deny:\n    runs-on: ubuntu-latest\n    steps:\n      \
+             - uses: actions/checkout@v4\n      - name: {LOG_STEP}\n        \
+             run: grep -n 'id = \"RUSTSEC' deny.toml\n      - name: {DENY_STEP}\n        \
+             run: |\n{body}"
+        )
+    }
+
+    /// The reader itself, before anything is asserted about what it read.
+    ///
+    /// Here for the reason `the_permissions_reader_finds_exactly_the_live_keys`
+    /// gives: every failing arm below is only as good as this parse. A reader
+    /// that found no check names in any input would still fail the dropped-name
+    /// arms — for entirely the wrong reason — and the passing arms would be the
+    /// only thing left able to tell the difference.
+    ///
+    /// Note how little is asked of the real file, deliberately (SAK-241): only
+    /// that the reader can see its gate command at all. Nothing here says which
+    /// checks that command names — `check_every_deny_check_runs` is the one
+    /// place that decides, and it has to stay the one place. Measured while
+    /// writing this: an arm that also looped over `DENY_CHECKS` against the live
+    /// file made every dropped-name arm fail *twice*, the second time with
+    /// "the live command must name `licenses`" — a worse message than the real
+    /// one — and, worse, it failed the all-names-dropped tree, which the policy
+    /// passes on purpose because omitting the list runs every check. That is
+    /// the guard demanding redundancy, the thing this ticket set out not to
+    /// build. The grammar — block scalars, `\`-continuations, where a step ends
+    /// — is pinned exactly by the synthetic inputs below instead, where the
+    /// expected text is fixed because the input is.
+    #[test]
+    fn the_deny_step_reader_finds_the_live_gate_command() {
+        let live = deny_step_checks(&repo_file(".github/workflows/ci.yml"))
+            .expect("the shipped deny step must be readable");
+        assert!(
+            live.command.contains("cargo-deny") && live.command.contains("check"),
+            "{live:?}"
+        );
+
+        // The synthetic shape the arms below use, pinned exactly: three source
+        // lines joined into one logical command, nothing before `check` kept,
+        // and the flag's value kept as a word like any other — the reader does
+        // not try to tell a flag's value from a positional, and does not need
+        // to, because `advisory-not-detected` is not one of the four names.
+        let step = deny_step_checks(&deny_job_with(SHIPPED_DENY_COMMAND)).expect("readable");
+        assert_eq!(
+            step.command,
+            "cargo-deny --locked check -D advisory-not-detected advisories licenses bans sources"
+        );
+        assert_eq!(
+            step.arguments,
+            vec![
+                "-D".to_string(),
+                "advisory-not-detected".to_string(),
+                "advisories".to_string(),
+                "licenses".to_string(),
+                "bans".to_string(),
+                "sources".to_string(),
+            ]
+        );
+
+        // A one-line `run:` is read too, and the gate is the step named
+        // DENY_STEP rather than whichever step came first.
+        let step = deny_step_checks(
+            "jobs:\n  deny:\n    steps:\n      - name: Accepted advisory exceptions\n        \
+             run: grep -n 'id = \"RUSTSEC' deny.toml\n      - name: cargo deny check\n        \
+             run: cargo-deny check advisories licenses bans sources\n",
+        )
+        .expect("a one-line run: body is readable");
+        assert_eq!(step.arguments.len(), 4);
+    }
+
+    /// The hole this ticket is about: one name gone, and the whole of that
+    /// check's policy with it. Four arms, because a guard that happened to read
+    /// only the first or the last name would pass three of them.
+    #[test]
+    fn dropping_one_check_name_fails_and_names_the_check() {
+        for dropped in DENY_CHECKS {
+            let kept: Vec<&str> = DENY_CHECKS
+                .iter()
+                .copied()
+                .filter(|check| check != dropped)
+                .collect();
+            let command = format!(
+                "cargo-deny --locked check \\\n  -D advisory-not-detected \\\n  {}",
+                kept.join(" ")
+            );
+            let step = deny_step_checks(&deny_job_with(&command)).expect("readable");
+            let Err(error) = check_every_deny_check_runs(&step) else {
+                panic!("a command that no longer names `{dropped}` must fail");
+            };
+            assert!(
+                error.contains(dropped),
+                "the failure has to name the dropped check, got: {error}"
+            );
+        }
+
+        // The control, and the arm that says the guard is satisfiable at all:
+        // the command as shipped passes.
+        let step = deny_step_checks(&deny_job_with(SHIPPED_DENY_COMMAND)).expect("readable");
+        assert!(
+            check_every_deny_check_runs(&step).is_ok(),
+            "the shipped command must pass, or the arms above are failing on something \
+             other than the missing name"
+        );
+    }
+
+    /// The arm that keeps this guard from demanding redundancy.
+    ///
+    /// Given no check names cargo-deny runs **every** check it has — measured,
+    /// and every control in the ticket's first table agrees with the full list.
+    /// So omitting the names is the *stronger* gate, and failing it would be
+    /// failing a tree that is safer than the one shipped.
+    #[test]
+    fn naming_no_checks_at_all_passes_because_that_runs_them_all() {
+        let step = deny_step_checks(&deny_job_with(
+            "cargo-deny --locked check \\\n  -D advisory-not-detected",
+        ))
+        .expect("readable");
+        assert!(
+            step.arguments
+                .iter()
+                .all(|argument| !DENY_CHECKS.contains(&argument.as_str())),
+            "{step:?}"
+        );
+        assert!(
+            check_every_deny_check_runs(&step).is_ok(),
+            "a command with no check names runs every check cargo-deny has, which is \
+             stricter than the shipped list and must not be reported as a hole"
+        );
+    }
+
+    /// The second lever in the same step. `|| true` turns exit 4 into exit 0.
+    #[test]
+    fn sending_the_gates_exit_to_or_fails() {
+        let error = check_every_deny_check_runs(
+            &deny_step_checks(&deny_job_with(&format!("{SHIPPED_DENY_COMMAND} || true")))
+                .expect("readable"),
+        )
+        .expect_err("`|| true` after the gate must fail");
+        assert!(error.contains("||"), "{error}");
+
+        // Including the form that does not look like a bypass at all.
+        let error = check_every_deny_check_runs(
+            &deny_step_checks(&deny_job_with(&format!(
+                "{SHIPPED_DENY_COMMAND} || echo 'supply chain check skipped'"
+            )))
+            .expect("readable"),
+        )
+        .expect_err("any `||` after the gate must fail");
+        assert!(error.contains("discards the verdict"), "{error}");
+    }
+
+    /// The direction control for the arm above, and the one that measurement
+    /// corrected a wrong guess about.
+    ///
+    /// `;`, `&&` and a pipe all *keep* the gate's exit: with `deny.toml`'s
+    /// licence allowlist broken the step exits 4 under every one of them, and 0
+    /// only under `||`. An assertion that rejected a trailing `;` or a pipe
+    /// would be red on a command that works, which is the failure mode this
+    /// whole ticket is trying not to introduce.
+    #[test]
+    fn the_trailing_constructs_that_keep_the_exit_status_pass() {
+        for trailing in [
+            "; true",
+            "&& echo done",
+            "| tee /dev/null",
+            "&& echo 'supply chain ok'",
+        ] {
+            let step = deny_step_checks(&deny_job_with(&format!(
+                "{SHIPPED_DENY_COMMAND} {trailing}"
+            )))
+            .expect("readable");
+            assert!(
+                check_every_deny_check_runs(&step).is_ok(),
+                "`{trailing}` leaves the gate's exit status intact (measured) and must not \
+                 be reported as a bypass"
+            );
+        }
+
+        // And the word boundary that makes the pipe arm work: an operator ends
+        // a word, so a name cannot hide against one.
+        let step = deny_step_checks(&deny_job_with(
+            "cargo-deny --locked check advisories licenses bans sources|tee /dev/null",
+        ))
+        .expect("readable");
+        assert!(check_every_deny_check_runs(&step).is_ok(), "{step:?}");
+    }
+
+    /// Fails closed, rather than passing, on anything it cannot read.
+    ///
+    /// Every arm here is a tree with no working gate in it. A reader that
+    /// returned "no names found" for these would hand them straight to
+    /// assertion 1, which passes an empty set by design — so the fail-closed
+    /// behaviour has to live in the reader, and this is the arm that says it
+    /// does.
+    #[test]
+    fn a_step_this_reader_cannot_understand_fails_closed() {
+        // The gate deleted outright. Nothing a test can do but refuse to pass.
+        assert!(
+            deny_step_checks(&deny_job_with(SHIPPED_DENY_COMMAND).replace(
+                &format!("- name: {DENY_STEP}"),
+                "- name: something else entirely"
+            ))
+            .is_err()
+        );
+
+        // Two steps by that name: which list is in force is unreadable.
+        let twice = format!(
+            "{}      - name: {DENY_STEP}\n        run: |\n          {SHIPPED_DENY_COMMAND}\n",
+            deny_job_with(SHIPPED_DENY_COMMAND)
+        );
+        assert!(deny_step_checks(&twice).is_err());
+
+        // A body that is not a cargo-deny invocation, an empty one, two of
+        // them, and one with no `check` subcommand.
+        for body in [
+            "echo 'supply chain: trust me'",
+            "cargo-deny --version",
+            "cargo-deny check advisories\ncargo-deny check licenses",
+        ] {
+            assert!(
+                deny_step_checks(&deny_job_with(body)).is_err(),
+                "an unfamiliar body must fail closed: {body}"
+            );
+        }
+        assert!(deny_step_checks(
+            "jobs:\n  deny:\n    steps:\n      - name: cargo deny check\n        run: |\n"
+        )
+        .is_err());
+        assert!(deny_step_checks(
+            "jobs:\n  deny:\n    steps:\n      - name: cargo deny check\n        \
+             runs-on: ubuntu-latest\n"
+        )
+        .is_err());
+
+        // A commented-out gate is not a gate. `ci.yml` carries the words
+        // `cargo deny check` in prose above this very step, so a reader that
+        // matched anywhere in a line would find the comment and report on a
+        // command that does not run.
+        assert!(
+            deny_step_checks(&deny_job_with(SHIPPED_DENY_COMMAND).replace(
+                &format!("- name: {DENY_STEP}"),
+                &format!("# - name: {DENY_STEP}")
+            ))
+            .is_err()
         );
     }
 }
