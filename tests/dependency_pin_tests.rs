@@ -7304,3 +7304,617 @@ fn nothing_in_ci_yml_switches_off_this_files_own_reporter_guard() {
         }
     }
 }
+
+/// The action every job in `ci.yml` uses to put the tree on disk.
+const CHECKOUT_ACTION: &str = "actions/checkout";
+
+/// `actions/checkout` inputs that change *which tree* a job then checks.
+///
+/// Each of these leaves a workflow that lints clean and runs to a green
+/// conclusion while the gate -- and this file's own guards -- read a tree
+/// nobody proposed. Measured on the real `ci.yml` (SAK-251):
+///
+/// | input | actionlint | dependency_pin_tests | the gate |
+/// |---|---|---|---|
+/// | none (shipped) | ok | ok 173 | exit 0 |
+/// | `ref: 5d015dc` on the `deny` job | **ok** | **ok 173** | reads another tree |
+/// | `repository: someone/else` on the `deny` job | **ok** | **ok 173** | reads another repo |
+/// | `github-server-url: https://ghe.example.com` | **ok** | **ok 180** | reads another server |
+/// | `bogus-input: x` | **rc 1** | -- | -- |
+///
+/// The `bogus-input` row is the control: actionlint does validate this block,
+/// so the clean rows are a shippable workflow rather than one that fails to
+/// parse. Compare `continue-on-error: 'false'`, which actionlint rejects and
+/// `unquote_condition` therefore tolerates.
+///
+/// `github-server-url` was found by asking actionlint for the list rather than
+/// by reading the ones this hole was reported with: rejecting `bogus-input`
+/// prints every input `actions/checkout@v4` accepts, and that enumeration is
+/// what the three rows above and the fifteen in the exclusion list below are
+/// measured against. It is the same key as `repository:` one level out -- the
+/// repository path stays `${{ github.repository }}` and the *server* it is
+/// fetched from moves -- and the `ok 180` row is against the guard as first
+/// committed, which read only `ref` and `repository`.
+///
+/// What makes the verdict follow the tree, same binary and same pins, only the
+/// checkout differing:
+///
+/// | tree | the gate's step |
+/// |---|---|
+/// | the proposed one, `"MIT"` dropped from `allow` | exit 4, 48 `rejected` |
+/// | the one a `ref:` points at | **exit 0, `licenses ok`** |
+///
+/// and the same one variable against this file's own guards, with
+/// `unsound = "all"` dropped: **1 failed** in the proposed tree, **ok 173** in
+/// the tree the `ref:` points at.
+///
+/// Deliberately *not* listed. The other fifteen inputs in actionlint's list,
+/// each measured on the real `ci.yml` rather than assumed -- all fifteen are
+/// `actionlint` ok and `180 passed`, so what separates them from the three
+/// above is the direction, not the silence:
+///
+/// - `fetch-depth`, `fetch-tags`, `filter`, `lfs`, `clean`, `show-progress`,
+///   `set-safe-directory`, `sparse-checkout-cone-mode`, `submodules`,
+///   `persist-credentials` -- neutral or stricter. `persist-credentials: false`
+///   narrows the token this job hands to the third-party binary it runs, so a
+///   guard reddening on it would be failing a tree safer than the one shipped,
+///   which is the mistake SAK-241 undid in the `permissions` reader. (`clean`
+///   is neutral because both jobs are `runs-on: ubuntu-latest`: there is no
+///   workspace to leave dirty. On a self-hosted runner it would need its own
+///   look, which is why the reason is written down rather than the verdict.)
+/// - `token`, `ssh-key`, `ssh-user`, `ssh-known-hosts`, `ssh-strict` -- the
+///   credential and transport, not the tree. They change how the same
+///   `repository` at the same `ref` is fetched. `token` is the one worth
+///   naming: handing the checkout a different credential is a real question,
+///   but it is SAK-240's question about what the job can *do*, not this one's
+///   about which bytes it reads.
+/// - `path` and `sparse-checkout` -- fail-closed, not silent. Both leave files
+///   the gate needs missing: `path` moves the tree into a subdirectory while
+///   the step's working directory stays the workspace root, which is the
+///   measured "no manifest" case -- with `deny.toml` simply absent the gate
+///   exits 4 with 216 errors, and with `.github/` absent this target reports 37
+///   failures. A direction that is loud needs no guard (SAK-247's `--locked`).
+///
+/// So the list is the inputs whose failure direction is **fail-open**, and only
+/// those. Three fail-open, two loud, fifteen neutral is every input the action
+/// has; the exclusions are enumerated rather than summarised so that a new
+/// input in `actions/checkout@v5` is visibly not yet classified.
+const CHECKOUT_REDIRECTING_INPUTS: &[&str] = &["ref", "repository", "github-server-url"];
+
+/// One live `actions/checkout` step in `ci.yml`.
+#[derive(Debug, PartialEq, Eq)]
+struct CheckoutStep {
+    /// The job it belongs to, in the words the failure message uses.
+    job: String,
+    /// Its `with:` input names, comments stripped. Every one of them, not just
+    /// the redirecting ones, so a reader that silently found nothing is
+    /// distinguishable from a step that really declares nothing.
+    inputs: Vec<String>,
+}
+
+/// Every live `actions/checkout` step in `ci.yml`, with the inputs it declares.
+///
+/// Reads both spellings of a step, because a reader that knew only the shipped
+/// one would be fail-open on the other:
+///
+/// ```yaml
+/// - uses: actions/checkout@v4          # what ci.yml ships
+///
+/// - name: Checkout                     # equally valid, and `with:` sits in
+///   uses: actions/checkout@v4          # exactly the same place
+///   with:
+///     ref: whatever
+/// ```
+///
+/// so the step is located by walking back from the `uses:` line to the `- `
+/// that opens it, and the inputs are read as siblings of that line rather than
+/// at a depth guessed from the shipped file's layout.
+///
+/// `Err` when `jobs:` cannot be found, when a `uses:` line is not inside any
+/// step, or when the file declares no checkout at all. Fail-closed for the
+/// reason `deny_gate_conditions` is: every promise below is about checkouts
+/// this reader located, so a reader that located none must refuse to pass
+/// rather than report a clean file.
+fn checkout_steps(ci: &str) -> Result<Vec<CheckoutStep>, String> {
+    let lines: Vec<&str> = ci.lines().collect();
+    let jobs_at = sole_line(&lines, "jobs:", "the workflow's jobs")?;
+    let jobs_body = block_under(&lines, jobs_at);
+    let Some(job_indent) = jobs_body.iter().map(|(_, line)| indent_of(line)).min() else {
+        return Err(
+            "ci.yml's `jobs:` has no body, so there are no checkouts to read and \
+                    nothing below is about the gate as it ships."
+                .to_string(),
+        );
+    };
+
+    // Which job each line belongs to, by the nearest job key above it.
+    let mut job_of: Vec<(usize, String)> = Vec::new();
+    for (at, line) in &jobs_body {
+        if indent_of(line) == job_indent {
+            let name = without_comment(line)
+                .trim()
+                .trim_end_matches(':')
+                .to_string();
+            job_of.push((*at, name));
+        }
+    }
+
+    let mut steps = Vec::new();
+    for (at, line) in &jobs_body {
+        if !without_comment(line).contains(CHECKOUT_ACTION) {
+            continue;
+        }
+        // Walk back to the `- ` that opens this step. `uses:` may be its first
+        // key or a later one.
+        let opens_step = |at: usize| without_comment(lines[at]).trim_start().starts_with("- ");
+        let mut root = *at;
+        while root > jobs_at && !opens_step(root) {
+            root -= 1;
+        }
+        if !opens_step(root) {
+            return Err(format!(
+                "ci.yml line {} uses `{CHECKOUT_ACTION}` but is not inside a step this \
+                 reader can find the start of, so it cannot tell which inputs belong to \
+                 it. It fails rather than passing: an unread checkout is one that could \
+                 be pointing the gate at another tree.",
+                at + 1
+            ));
+        }
+
+        let key_indent = indent_of(lines[root]) + 2;
+        let mut inputs = Vec::new();
+        for (with_at, with_line) in block_under(&lines, root) {
+            if indent_of(with_line) != key_indent {
+                continue;
+            }
+            if without_comment(with_line).trim() != "with:" {
+                continue;
+            }
+            for (_, input_line) in block_under(&lines, with_at) {
+                let body = without_comment(input_line).trim();
+                if let Some((key, _)) = body.split_once(':') {
+                    inputs.push(key.trim().to_string());
+                }
+            }
+        }
+
+        let job = job_of
+            .iter()
+            .rev()
+            .find(|(job_at, _)| *job_at <= root)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| "an unnamed job".to_string());
+        steps.push(CheckoutStep { job, inputs });
+    }
+
+    if steps.is_empty() {
+        return Err(format!(
+            "ci.yml declares no `{CHECKOUT_ACTION}` step. Every assertion in this file \
+             is about files read out of a checkout, so with none to read this guard \
+             reports nothing rather than reporting a clean file."
+        ));
+    }
+    Ok(steps)
+}
+
+/// No checkout in `ci.yml` redirects its job to a different tree.
+fn check_no_checkout_redirects_the_tree(steps: &[CheckoutStep]) -> Result<(), String> {
+    for step in steps {
+        for input in &step.inputs {
+            if !CHECKOUT_REDIRECTING_INPUTS.contains(&input.as_str()) {
+                continue;
+            }
+            // The evidence is per input, not one sentence reused for all
+            // three: the `ref:` measurement is a statement about `ref:`, and
+            // quoting it under `github-server-url:` would be reporting a
+            // number nobody took.
+            let measured = match input.as_str() {
+                "ref" => {
+                    "same command, same binary, same pins, only the tree differing: with \
+                     the proposed tree's `allow` missing `\"MIT\"` the gate's step exits 4 \
+                     with 48 `rejected`, and against the tree a `ref:` points at it exits \
+                     0 with `licenses ok`"
+                }
+                "repository" => {
+                    "`repository: someone/else` on this job is `actionlint` ok and leaves \
+                     this target green, and the tree the gate then reads is whatever that \
+                     other repository's default branch holds"
+                }
+                "github-server-url" => {
+                    "`github-server-url: https://ghe.example.com` is `actionlint` ok and \
+                     left this target at `180 passed` before it was listed here; the \
+                     repository path stays `${{ github.repository }}` and the server the \
+                     whole tree is cloned from moves"
+                }
+                _ => "measured as fail-open, see `CHECKOUT_REDIRECTING_INPUTS`",
+            };
+            return Err(format!(
+                "the `{}` job's checkout declares `{input}:`, which chooses the tree that \
+                 job then reads. Measured: {measured}. Nothing else reports this -- \
+                 actionlint accepts it, and the gate reads whatever is on disk. If a \
+                 redirect is genuinely wanted, say which of \
+                 {CHECKOUT_REDIRECTING_INPUTS:?} and why in the same diff; the other \
+                 fifteen inputs, such as `fetch-depth` and `persist-credentials`, are \
+                 not reported.",
+                step.job
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The gate, and this file's own guards, read the tree that was proposed.
+///
+/// Scope, stated exactly, because half of this is not closeable from here.
+///
+/// The `deny` job's checkout **is**: it is a different job, so when it is
+/// redirected this target still runs against the real tree and sees the
+/// `ref:`. That half is what this test reports.
+///
+/// The `test` job's checkout is **not**, and no guard in this repository can
+/// be. Redirect it and this target compiles from the tree the `ref:` points
+/// at, reads that tree's `ci.yml`, finds no `ref:` in it, and reports
+/// `ok 173` -- the same self-reference that put the reporter guard in
+/// `fidelity_matrix_tests` (SAK-249), except that moving it there does not help:
+/// both reporters run in the `test` job, so one `ref:` takes them together.
+///
+/// Note it is also not closed by a required status check, which is the fix
+/// SAK-242 is weighing for the neighbouring `if:`-on-the-job hole. A skipped
+/// job and a redirected one differ here: the redirected job really runs and
+/// really succeeds, so a required check is *satisfied*. What would close it is
+/// a reader of this file hosted in a job with its own checkout -- the SAK-249
+/// mutual arrangement one level up, at job rather than target granularity.
+/// Left to SAK-242, which already owns the `test` job's other job-level hole,
+/// rather than done here: it adds a step to `ci.yml`, which is a change to the
+/// gate's own file and not to this file's reader.
+#[test]
+fn no_checkout_in_ci_yml_points_a_job_at_another_tree() {
+    let steps = checkout_steps(&repo_file(".github/workflows/ci.yml"))
+        .unwrap_or_else(|why| panic!("{why}"));
+    if let Err(why) = check_no_checkout_redirects_the_tree(&steps) {
+        panic!("{why}");
+    }
+}
+
+#[cfg(test)]
+mod checkout_scope_controls {
+    use super::*;
+
+    /// The real `ci.yml` with every checkout's `with:` block removed.
+    ///
+    /// Normalising first is what keeps each arm measuring the inputs *it*
+    /// added, for the reason `ci_yml_base` gives: with the raw file as the
+    /// base, a real `ref:` on the shipped checkout reddened **five** tests here
+    /// instead of one, and the four extra failures were these controls reading
+    /// a file carrying both their own inputs and the mutation. The test that
+    /// reads the shipped file unnormalised, and so is the one that goes red
+    /// when a redirect really lands there, is
+    /// `no_checkout_in_ci_yml_points_a_job_at_another_tree`.
+    ///
+    /// The base has to lack what the arms add -- a `with:` block -- and these
+    /// arms remove nothing, so stripping is the whole of it. SAK-245 needed
+    /// both directions; this one does not.
+    fn ci_yml_checkout_base() -> String {
+        let ci = repo_file(".github/workflows/ci.yml");
+        let lines: Vec<&str> = ci.lines().collect();
+        let mut drop: Vec<usize> = Vec::new();
+        for (at, line) in lines.iter().enumerate() {
+            if !without_comment(line).contains(CHECKOUT_ACTION) {
+                continue;
+            }
+            let mut root = at;
+            while root > 0 && !without_comment(lines[root]).trim_start().starts_with("- ") {
+                root -= 1;
+            }
+            let key_indent = indent_of(lines[root]) + 2;
+            for (with_at, with_line) in block_under(&lines, root) {
+                if indent_of(with_line) != key_indent
+                    || without_comment(with_line).trim() != "with:"
+                {
+                    continue;
+                }
+                drop.push(with_at);
+                drop.extend(block_under(&lines, with_at).iter().map(|(at, _)| *at));
+            }
+        }
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| !drop.contains(at))
+            .map(|(_, line)| format!("{line}\n"))
+            .collect()
+    }
+
+    /// `ci_yml_checkout_base()` with `inputs` given to the checkout of `job`.
+    fn ci_yml_with_checkout_inputs(job: &str, inputs: &[&str]) -> String {
+        let ci = ci_yml_checkout_base();
+        let lines: Vec<&str> = ci.lines().collect();
+        let job_at = lines
+            .iter()
+            .position(|line| without_comment(line).trim() == format!("{job}:"))
+            .unwrap_or_else(|| panic!("ci.yml has no `{job}:` job"));
+        let uses_at = (job_at..lines.len())
+            .find(|at| without_comment(lines[*at]).contains(CHECKOUT_ACTION))
+            .unwrap_or_else(|| panic!("the `{job}` job has no checkout step"));
+
+        let mut out: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+        let mut block = vec!["        with:".to_string()];
+        for input in inputs {
+            block.push(format!("          {input}"));
+        }
+        out.splice(uses_at + 1..uses_at + 1, block);
+        out.join("\n")
+    }
+
+    /// The reader itself, before anything is asserted about what it read.
+    ///
+    /// Only that the checkouts are **locatable**, and that it reads the inputs
+    /// it is handed. Nothing here pins the shipped file's input list, for the
+    /// reason `the_gate_condition_reader_finds_the_live_gate` gives: today
+    /// every checkout declares no inputs at all, and a guard asserting that
+    /// would redden on `persist-credentials: false`, a stricter tree.
+    #[test]
+    fn the_checkout_reader_finds_every_live_checkout() {
+        let steps = checkout_steps(&repo_file(".github/workflows/ci.yml")).expect("readable");
+        let jobs: Vec<&str> = steps.iter().map(|step| step.job.as_str()).collect();
+        assert!(
+            jobs.contains(&"deny") && jobs.contains(&"test"),
+            "both jobs' checkouts must be found, read {jobs:?}"
+        );
+
+        let read = checkout_steps(&ci_yml_with_checkout_inputs(
+            "deny",
+            &["ref: 5d015dc", "fetch-depth: 0"],
+        ))
+        .expect("readable");
+        let deny = read
+            .iter()
+            .find(|step| step.job == "deny")
+            .expect("deny job");
+        assert_eq!(
+            deny.inputs,
+            vec!["ref".to_string(), "fetch-depth".to_string()]
+        );
+    }
+
+    /// The hole: a one-line input that leaves everything green while the gate
+    /// and the guards read a tree nobody proposed.
+    #[test]
+    fn a_checkout_that_redirects_the_tree_fails() {
+        for (job, inputs) in [
+            ("deny", vec!["ref: 5d015dc"]),
+            ("test", vec!["ref: 5d015dc"]),
+            ("deny", vec!["repository: someone/else"]),
+            ("test", vec!["repository: someone/else"]),
+            // The same redirect one level out: the repository path is left
+            // alone and the server it is fetched from moves.
+            ("deny", vec!["github-server-url: https://ghe.example.com"]),
+            ("test", vec!["github-server-url: https://ghe.example.com"]),
+            // Quoting changes nothing: it is the key that selects the tree.
+            ("deny", vec!["ref: 'main'"]),
+            ("deny", vec!["ref: \"main\""]),
+            // Hidden among inputs that are themselves fine.
+            (
+                "deny",
+                vec![
+                    "fetch-depth: 0",
+                    "ref: 5d015dc",
+                    "persist-credentials: false",
+                ],
+            ),
+        ] {
+            let steps =
+                checkout_steps(&ci_yml_with_checkout_inputs(job, &inputs)).expect("readable");
+            let why = check_no_checkout_redirects_the_tree(&steps)
+                .expect_err(&format!("{inputs:?} on the `{job}` job redirects its tree"));
+            assert!(
+                why.contains(job),
+                "the failure must name the job whose tree moved, said: {why}"
+            );
+            // And the evidence it quotes has to be the evidence for *this*
+            // input. One sentence reused across the three would read as a
+            // measurement of a key nobody measured.
+            let redirect = inputs
+                .iter()
+                .find_map(|input| {
+                    let key = input.split_once(':')?.0.trim();
+                    CHECKOUT_REDIRECTING_INPUTS
+                        .iter()
+                        .find(|listed| **listed == key)
+                })
+                .expect("each arm carries one redirecting input");
+            assert!(
+                why.contains(*redirect),
+                "the failure must name `{redirect}`, the input that moved the tree, \
+                 said: {why}"
+            );
+        }
+    }
+
+    /// Each listed input is reported with its own measurement.
+    ///
+    /// The control for a template, rather than for the predicate: one
+    /// `{input}` hole in one sentence would make the `ref:` numbers read as
+    /// evidence for `repository:` and `github-server-url:` as well, and the
+    /// reader of the failure would have no way to tell. So the three failures
+    /// must differ by more than the key's name.
+    #[test]
+    fn each_redirecting_input_is_reported_with_its_own_evidence() {
+        let mut said: Vec<String> = Vec::new();
+        for input in CHECKOUT_REDIRECTING_INPUTS {
+            let steps = checkout_steps(&ci_yml_with_checkout_inputs(
+                "deny",
+                &[&format!("{input}: whatever")],
+            ))
+            .expect("readable");
+            let why = check_no_checkout_redirects_the_tree(&steps)
+                .expect_err("a listed input redirects the tree");
+            // Strip every key's name, so what is left is only the evidence.
+            let evidence = CHECKOUT_REDIRECTING_INPUTS
+                .iter()
+                .fold(why.clone(), |acc, key| acc.replace(key, ""));
+            assert!(
+                !said.contains(&evidence),
+                "`{input}:` is reported with evidence already used for another input, \
+                 which would be quoting a measurement nobody took for it: {why}"
+            );
+            said.push(evidence);
+        }
+    }
+
+    /// Inputs that are neutral, stricter, or fail-closed must pass.
+    ///
+    /// Without these arms the guard could be spelled "a checkout declares no
+    /// `with:` at all", which would redden on `persist-credentials: false` --
+    /// a tree safer than the one shipped, and the direction that teaches
+    /// people to delete a guard rather than fix it.
+    ///
+    /// Every input `actions/checkout@v4` accepts and
+    /// `CHECKOUT_REDIRECTING_INPUTS` does not list appears here, taken from
+    /// actionlint's own rejection message rather than from the three the hole
+    /// was reported with. That is how `github-server-url` turned out to belong
+    /// on the other list, so the enumeration earns its length: an input missing
+    /// from both lists is an input nobody decided about.
+    #[test]
+    fn inputs_that_do_not_move_the_tree_pass() {
+        for inputs in [
+            // Neutral or stricter.
+            vec!["fetch-depth: 0"],
+            vec!["fetch-tags: true"],
+            vec!["filter: blob:none"],
+            vec!["lfs: true"],
+            vec!["clean: false"],
+            vec!["show-progress: false"],
+            vec!["set-safe-directory: false"],
+            vec!["sparse-checkout-cone-mode: false"],
+            vec!["submodules: false"],
+            vec!["persist-credentials: false"],
+            // The credential and the transport, not the tree: the same
+            // repository at the same ref, fetched differently.
+            vec!["token: ${{ secrets.OTHER }}"],
+            vec!["ssh-key: ${{ secrets.KEY }}"],
+            vec!["ssh-user: git"],
+            vec!["ssh-known-hosts: example.com ssh-ed25519 AAAA"],
+            vec!["ssh-strict: false"],
+            // Fail-closed, not silent: both leave files the gate needs
+            // missing. `path` puts the tree in a subdirectory while the step's
+            // working directory does not move, which is the measured
+            // no-manifest case (gate exit 4).
+            vec!["path: sub"],
+            vec!["sparse-checkout: src"],
+            vec!["fetch-depth: 0", "persist-credentials: false"],
+        ] {
+            for job in ["deny", "test"] {
+                let steps =
+                    checkout_steps(&ci_yml_with_checkout_inputs(job, &inputs)).expect("readable");
+                assert!(
+                    check_no_checkout_redirects_the_tree(&steps).is_ok(),
+                    "`{inputs:?}` on the `{job}` job does not choose a different tree and \
+                     must not be reported as a hole"
+                );
+            }
+        }
+    }
+
+    /// A commented-out redirect is not a redirect, and a trailing comment does
+    /// not hide a live one.
+    ///
+    /// Which code this actually covers, because the first draft of this test
+    /// claimed more than it tested. Deleting `checkout_steps`' own
+    /// `without_comment` call on an input line left all 180 tests green, and
+    /// the reason is that `block_under` has already dropped comment-only lines
+    /// before the input loop sees them. So the comment-only arm below is a
+    /// statement about `block_under`, not about this reader, and this reader's
+    /// `without_comment` call only trims a comment *trailing* a real input --
+    /// cosmetic, since the key sits before the first colon either way. That
+    /// line is therefore deliberately left unguarded: its failure direction is
+    /// to report a spurious extra input name, never to hide a real one, and a
+    /// guard is worth writing only where the direction is fail-open (SAK-241's
+    /// `without_comment` call sites, same question and same answer).
+    #[test]
+    fn a_commented_out_redirect_passes() {
+        let steps = checkout_steps(&ci_yml_with_checkout_inputs(
+            "deny",
+            &["# ref: 5d015dc", "fetch-depth: 0"],
+        ))
+        .expect("readable");
+        let deny = steps
+            .iter()
+            .find(|step| step.job == "deny")
+            .expect("deny job");
+        assert_eq!(deny.inputs, vec!["fetch-depth".to_string()]);
+        assert!(check_no_checkout_redirects_the_tree(&steps).is_ok());
+
+        // The other direction: a live redirect wearing a comment is still one.
+        let dressed = checkout_steps(&ci_yml_with_checkout_inputs(
+            "deny",
+            &["ref: 5d015dc  # pinned deliberately"],
+        ))
+        .expect("readable");
+        check_no_checkout_redirects_the_tree(&dressed)
+            .expect_err("a trailing comment does not stop `ref:` choosing the tree");
+    }
+
+    /// The other spelling of a step, which a reader keyed on `- uses:` would
+    /// have read as declaring nothing.
+    #[test]
+    fn a_named_checkout_step_is_read_too() {
+        // Synthetic rather than a rewrite of the shipped file: this is a
+        // statement about the reader, and an arm built by editing `ci.yml`
+        // measured the edit as well as the reader -- it reddened a second time
+        // when a real `ref:` landed on the shipped checkout.
+        let ci = "\
+name: CI
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: 5d015dc
+
+      - name: cargo deny check
+        run: cargo-deny --locked check advisories licenses bans sources
+";
+        let steps = checkout_steps(ci).expect("readable");
+        let named = steps
+            .iter()
+            .find(|step| step.job == "deny")
+            .expect("the `- name:` spelling must still be found as a checkout");
+        assert_eq!(
+            named.inputs,
+            vec!["ref".to_string()],
+            "`with:` sits in the same place in both spellings; a reader keyed on \
+             `- uses:` read this step as declaring nothing"
+        );
+        let plain = steps
+            .iter()
+            .find(|step| step.job == "test")
+            .expect("test job");
+        assert_eq!(plain.inputs, Vec::<String>::new());
+        check_no_checkout_redirects_the_tree(&steps)
+            .expect_err("a redirect in the other step spelling is still a redirect");
+    }
+
+    /// Shapes this reader cannot evaluate fail closed.
+    #[test]
+    fn a_checkout_this_reader_cannot_find_fails_closed() {
+        let ci = repo_file(".github/workflows/ci.yml");
+        for (what, broken) in [
+            (
+                "no checkout at all",
+                ci.replace(CHECKOUT_ACTION, "actions/nothing"),
+            ),
+            ("no jobs:", ci.replace("\njobs:\n", "\nnot-jobs:\n")),
+        ] {
+            checkout_steps(&broken)
+                .expect_err(&format!("`{what}` must fail closed, not read as clean"));
+        }
+    }
+}
