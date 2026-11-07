@@ -1,6 +1,6 @@
 # Fireup Project Status
 
-**Last Updated:** November 4, 2026  
+**Last Updated:** November 7, 2026  
 **Version:** 0.1.0  
 **Status:** ⛔ NOT production ready — fixture path works; live GCP export + scale unproven
 
@@ -294,6 +294,91 @@ runs.
 - Levels 1–4 generators live under `tests/data-generator/` (`npm run generate:level1` … `generate:level4`, or `generate:all-levels`).
 - Rust coverage: `tests/functional-tests/level{1,2,3,4}_tests.rs` (skips when `tests/.firestore-data` fixtures are missing).
 - See `tests/functional-tests/README.md` for fixture generation and `cargo test --test integration_tests functional_tests::`.
+
+### Merge gating on `main` (November 7, 2026)
+
+`main` is protected by repository **ruleset 10282558**, not by the legacy
+branch-protection API. Read the effective rules with:
+
+```bash
+gh api repos/asakaxgit/fireup/rules/branches/main    # → 5 rules
+```
+
+**Do not use `repos/.../branches/main/protection` to answer "is main
+protected?".** It returns `404 Branch not protected` *whether or not* a ruleset
+is in force — measured both ways on this repository: it returned 404 when
+`rules/branches/main` was `[]`, and it still returns 404 now that the same
+endpoint lists 5 effective rules. The 404 carries no information. Likewise, a
+ruleset that is `"enforcement": "active"` can still match nothing: this one sat
+active with `conditions.ref_name.include: []` — which matches no ref — so the
+repository looked configured while nothing was enforced (SAK-242).
+
+**In force on `main`:** `deletion`, `non_fast_forward`, `pull_request`
+(0 approvals required), `copilot_code_review`, and `required_status_checks`.
+
+Direct ref updates are refused — measured against a no-op (same-sha) update, so
+the probe could not rewrite history either way:
+
+| request | ruleset matches the ref | result |
+|---|---|---|
+| set `main` → its own sha | yes | `422 Repository rule violations found` |
+| set `main` → its own sha, `force=true` | yes | `422 Repository rule violations found` |
+| set a feature branch → its own sha | no | `200 OK` |
+
+#### Required status checks
+
+GitHub matches the **check-run name**, which for a job with a `name:` is that
+value and not the job id. Writing `deny` instead of the name below matches zero
+check runs, and a required-check list that matches nothing is indistinguishable
+from an empty one — every PR stays green.
+
+| required context | produced by |
+|---|---|
+| `actionlint` | `actionlint.yml` |
+| `build and test (no external services)` | `ci.yml` job `test` |
+| `supply chain (cargo deny)` | `ci.yml` job `deny` |
+
+`coverage` runs on every PR but is **not** required: its 75% floor is a separate
+policy decision, and a cache miss makes it build `cargo-llvm-cov` from source,
+so a red `coverage` can mean "the network failed" rather than "the code broke".
+
+Verify the binding actually took, rather than trusting the strings — GraphQL
+reports it per context:
+
+```bash
+gh api graphql -f query='{repository(owner:"asakaxgit",name:"fireup"){
+  pullRequest(number:NNN){mergeStateStatus commits(last:1){nodes{commit{
+    statusCheckRollup{contexts(first:30){nodes{
+      ... on CheckRun{name conclusion isRequired(pullRequestNumber:NNN)}}}}}}}}}}'
+```
+
+#### What required status checks do and do not stop
+
+Measured on 2026-11-07 with four throwaway PRs against `main`, each one a
+single-line change to `actionlint.yml` with the other two required checks green.
+All four were closed unmerged.
+
+| edit | `actionlint` reports | `mergeStateStatus` | stopped? |
+|---|---|---|---|
+| none (control) | `SUCCESS` | `CLEAN` | — |
+| a step fails | `FAILURE` | **`BLOCKED`** | ✅ |
+| job id renamed | *never reported* | **`BLOCKED`** | ✅ |
+| job deleted / file deleted | *never reported* | **`BLOCKED`** | ✅ (same mechanism) |
+| `if: false` on the job | `SKIPPED` | `CLEAN` | ❌ **merges** |
+| `ref:` added to `checkout` | `SUCCESS` (of another tree) | `CLEAN` | ❌ **merges** |
+
+So, stated precisely:
+
+> **Required status checks stop a gate that goes red and a gate that never
+> reports. They do not stop a gate that runs and goes green against a tree
+> other than the one being merged.**
+
+A skipped **job** reports Success and satisfies a required check. (A skipped
+**workflow** is different — its checks stay Pending and do block.) The two
+remaining holes are tracked as SAK-249 (`if:`) and SAK-251 (`checkout` inputs);
+both are closable in-tree only by guards that live outside the job they guard,
+and both would close at once under the ruleset `workflows` rule type, whose
+availability on a free personal repository is unverified.
 
 ---
 
