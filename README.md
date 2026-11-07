@@ -295,7 +295,7 @@ those two plus two numbers:
 
 | Badge | What it actually means |
 |---|---|
-| **CI** | [`ci.yml`](.github/workflows/ci.yml) — build plus every suite that needs nothing but a Rust toolchain: unit tests, the local data plane over real gRPC/HTTP, export parsing, the CLI and library surface, and the docs-vs-matrix checks. Red here means the code is broken, not that a service failed to start. |
+| **CI** | [`ci.yml`](.github/workflows/ci.yml) — two jobs. `test`: build plus every suite that needs nothing but a Rust toolchain — unit tests, the local data plane over real gRPC/HTTP, export parsing, the CLI and library surface, and the docs-vs-matrix checks. Red there means the code is broken, not that a service failed to start. `deny`: the supply-chain gate below. The badge is red if either fails. |
 | **Coverage** | [`coverage.yml`](.github/workflows/coverage.yml) — runs `scripts/coverage.sh` and **fails under 75% line coverage**. The full HTML report is attached to each run as the `coverage-report` artifact, and the summary table is printed in the run's summary. |
 | **line coverage** | The enforced floor, not a live reading. A number nobody checks drifts; a floor that fails the build does not. The real figure for a commit is in that run's summary. |
 | **fidelity matrix** | How many of the 119 documented `fireup local` behaviours are served, from [`tests/conformance/matrix.json`](tests/conformance/matrix.json). `cargo test --test fidelity_matrix_tests` fails if the badge and the matrix disagree, so it cannot go stale. |
@@ -311,6 +311,34 @@ llvm-tools-preview` once. Scope is the `--lib` unit tests, which is why the
 number is a floor rather than a boast: the suites that need PostgreSQL, Node, or
 a running server are not counted, so the figure means the same thing on every
 machine.
+
+### Supply chain
+
+[`deny.toml`](deny.toml) is the policy; the `deny` job in
+[`ci.yml`](.github/workflows/ci.yml) enforces it on every commit. Run exactly
+what CI runs:
+
+```bash
+cargo install cargo-deny --locked   # once; or grab the prebuilt release binary
+cargo deny --locked check -D advisory-not-detected advisories licenses bans sources
+```
+
+Four checks, and what each one is for:
+
+| Check | Policy |
+|---|---|
+| **advisories** | RustSec vulnerabilities and yanked crates. One advisory is accepted today — `RUSTSEC-2026-0258` in `h2 0.3.27`, reachable only through the pinned `tonic` 0.11. The reason and the review date are in `deny.toml`; the fix is the tonic 0.12 / prost 0.13 migration. |
+| **licences** | Permissive only — the enforced form of the audit in [`docs/licenses/CARGO_LICENSE_AUDIT.md`](docs/licenses/CARGO_LICENSE_AUDIT.md). A dependency carrying a copyleft-only licence fails the build. |
+| **bans** | Wildcard version requirements fail. Duplicate major versions only warn: the tree has eleven of them from transitive pins, none of Fireup's doing. |
+| **sources** | crates.io only. A git or unknown-registry dependency fails. |
+
+`cargo audit` is deliberately **not** used. It reads the same RustSec database
+as `cargo deny check advisories`, so running both reports every vulnerability
+twice; cargo-deny also covers licences, duplicates, and provenance in one
+binary.
+
+The checks were verified to actually bite, not just to pass — see the negative
+controls recorded in [`docs/licenses/CARGO_LICENSE_AUDIT.md`](docs/licenses/CARGO_LICENSE_AUDIT.md#how-this-is-enforced).
 
 The two older workflows — [`local_firestore.yml`](.github/workflows/local_firestore.yml)
 (the official-SDK conformance suite) and [`integration_tests.yml`](.github/workflows/integration_tests.yml)

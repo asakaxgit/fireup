@@ -4,10 +4,15 @@ name: CI
 # directory that runs on every commit.
 #
 # Scope is chosen so that red means "the code is broken", never "a service did
-# not come up": everything here runs with nothing but a Rust toolchain — no
+# not come up": the `test` job runs with nothing but a Rust toolchain — no
 # PostgreSQL, no Node, no Docker, no network. The suites that need those live in
 # `local_firestore.yml` (the official-SDK conformance layer) and
 # `integration_tests.yml`, which stay manual for now.
+#
+# The `deny` job is the one exception to "no network": it fetches the RustSec
+# advisory database, which is the whole point of it. It is a separate job rather
+# than a step in `test` so that a supply-chain failure is never mistaken for a
+# broken build, and so it reports in seconds instead of waiting on a compile.
 #
 # Deliberately not here yet: `cargo fmt --check` and `cargo clippy -D warnings`.
 # Both are currently failing on `main` for reasons that predate this workflow,
@@ -106,3 +111,58 @@ jobs:
           cargo test --locked --test export_fidelity_tests
           cargo test --locked --test library_api_tests
           cargo test --locked --test cli_exit_code_tests
+
+  deny:
+    name: supply chain (cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The prebuilt release binary rather than EmbarkStudios/cargo-deny-action,
+      # for two reasons. The version is pinned to an exact release and the
+      # download is checksum-verified, which matters more than usual for the job
+      # whose entire job is supply-chain hygiene. And the command below is
+      # byte-for-byte the command a developer runs locally, instead of being
+      # assembled from an action's inputs — so "it passes on my machine" and "it
+      # passes in CI" mean the same thing.
+      #
+      # Bump CARGO_DENY_VERSION and CARGO_DENY_SHA256 together, deliberately.
+      # Get the checksum from the release page or by running sha256sum on the
+      # downloaded tarball.
+      - name: Install cargo-deny
+        env:
+          CARGO_DENY_VERSION: 0.20.2
+          CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          set -euo pipefail
+          dir="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          curl -sSfL -o cargo-deny.tar.gz \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${dir}.tar.gz"
+          echo "${CARGO_DENY_SHA256}  cargo-deny.tar.gz" | sha256sum -c -
+          tar xzf cargo-deny.tar.gz
+          # Into a directory we own and add to PATH, so the step needs no sudo.
+          mkdir -p "${RUNNER_TEMP}/bin"
+          install -m 0755 "${dir}/cargo-deny" "${RUNNER_TEMP}/bin/cargo-deny"
+          rm -rf cargo-deny.tar.gz "${dir}"
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+          "${RUNNER_TEMP}/bin/cargo-deny" --version
+          # cargo-deny shells out to `cargo metadata`, so fail here with a clear
+          # message if the runner image ever stops shipping a toolchain.
+          cargo --version
+
+      # Printed, not enforced: cargo-deny has no expiry mechanism for `ignore`
+      # entries and says nothing at all about an advisory it was told to skip.
+      # Surfacing the reasons keeps every accepted exception and its review date
+      # in the log of every run instead of only in the config file.
+      - name: Accepted advisory exceptions
+        run: grep -n 'id = "RUSTSEC' deny.toml || echo 'none'
+
+      # `-D advisory-not-detected` turns a stale `ignore` entry from a warning
+      # into a failure, so an accepted vulnerability cannot outlive its fix.
+      # `--locked` for the same reason the test job uses it: check the exact
+      # versions this commit pins, and fail if Cargo.lock has drifted.
+      - name: cargo deny check
+        run: |
+          cargo-deny --locked check \
+            -D advisory-not-detected \
+            advisories licenses bans sources
