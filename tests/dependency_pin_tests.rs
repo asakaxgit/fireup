@@ -7047,6 +7047,32 @@ include-build = false
 /// both of them gone (SAK-229, SAK-249).
 const SIBLING_REPORTER_TARGET: &str = "fidelity_matrix_tests";
 
+/// `value` with one matching pair of surrounding YAML quotes removed.
+///
+/// `if: !cancelled()` is not valid YAML -- a leading `!` is a tag indicator --
+/// so the only shippable spelling of that member of `CONDITIONS_THAT_STILL_RUN`
+/// is `if: '!cancelled()'`, and comparing the raw text rejects it. Measured on
+/// the real `ci.yml`: without this, the `!cancelled()` arm was red.
+///
+/// Unquoting cannot open a hole. It can only turn a non-matching value into one
+/// of `CONDITIONS_THAT_STILL_RUN`, every member of which means "run anyway"
+/// however it is quoted; `if: 'false'` unquotes to `false`, still not a member.
+///
+/// Deliberately local to this reader rather than applied to
+/// `gate_conditions` too: the `deny` job's reader has the same gap and closing
+/// it belongs with that reader, not in the layer above it.
+fn unquote_condition(value: &str) -> &str {
+    for quote in ['\'', '"'] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|v| v.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    value
+}
+
 /// The live `if:` / `continue-on-error:` on the `ci.yml` step that runs `target`.
 ///
 /// Anchored on the command, not on the step's `name:` -- renaming a step does
@@ -7124,7 +7150,7 @@ fn sibling_reporter_conditions(ci: &str, target: &str) -> Result<Vec<GateConditi
                 keys.push(GateCondition {
                     scope: scope.clone(),
                     key: (*key).to_string(),
-                    value: value.trim().to_string(),
+                    value: unquote_condition(value.trim()).to_string(),
                 });
             }
         }

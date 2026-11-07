@@ -538,6 +538,11 @@ const GUARDED_TARGET: &str = "dependency_pin_tests";
 /// through are the handful that mean "run anyway"; everything else fails
 /// closed. Same list and same reasoning as `dependency_pin_tests`'
 /// `CONDITIONS_THAT_STILL_RUN`.
+///
+/// Compared against the value with any surrounding YAML quotes removed, which
+/// `!cancelled()` needs: bare, a leading `!` is a YAML tag indicator and the
+/// file does not parse, so the only spelling of that entry anyone can actually
+/// ship is `if: '!cancelled()'`.
 const CONDITIONS_THAT_STILL_RUN: &[&str] = &[
     "always()",
     "${{ always() }}",
@@ -568,12 +573,35 @@ fn indent_of(line: &str) -> usize {
     bare.len() - bare.trim_start().len()
 }
 
+/// `value` with one matching pair of surrounding YAML quotes removed.
+///
+/// Not cosmetic. `if: !cancelled()` is not valid YAML -- a leading `!` is a tag
+/// indicator -- so the only shippable spelling of that allowed value is
+/// `if: '!cancelled()'`, and a reader comparing the raw text would reject the
+/// one form anybody can write. Measured: it reddened the `!cancelled()` arm.
+///
+/// Unquoting cannot open a hole. It can only turn a non-matching value into one
+/// of `CONDITIONS_THAT_STILL_RUN`, and every value on that list means "run
+/// anyway" however it is quoted. `if: 'false'` unquotes to `false`, which is
+/// still not on the list.
+fn unquote(value: &str) -> &str {
+    for quote in ['\'', '"'] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|v| v.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    value
+}
+
 /// One live `if:` or `continue-on-error:` on a step.
 #[derive(Debug, PartialEq, Eq)]
 struct StepCondition {
     /// `if` or `continue-on-error`, without the colon.
     key: String,
-    /// The value as written, comment stripped and trimmed.
+    /// The value as written, comment stripped, trimmed and unquoted.
     value: String,
 }
 
@@ -663,7 +691,7 @@ fn reporting_step(ci: &str, target: &str) -> Result<Vec<StepCondition>, String> 
             if let Some(value) = text.strip_prefix(&format!("{key}:")) {
                 conditions.push(StepCondition {
                     key: (*key).to_string(),
-                    value: value.trim().to_string(),
+                    value: unquote(value.trim()).to_string(),
                 });
             }
         }
@@ -782,6 +810,48 @@ mod supply_chain_reporter_controls {
                 "{ok} should pass"
             );
         }
+    }
+
+    #[test]
+    fn a_quoted_condition_that_still_runs_passes() {
+        // `!cancelled()` has to be quoted to be valid YAML at all, so a reader
+        // that compared the raw text would reject the only spelling of it
+        // anyone can ship. Both quote styles, because YAML takes either.
+        for ok in ["'!cancelled()'", "\"always()\"", "'success()'"] {
+            let conditions =
+                reporting_step(&ci_with(&format!("        if: {ok}\n")), GUARDED_TARGET)
+                    .expect("located");
+            assert_eq!(conditions.len(), 1, "{ok}");
+            assert!(
+                CONDITIONS_THAT_STILL_RUN.contains(&conditions[0].value.as_str()),
+                "{ok} is a condition that still runs the step, only quoted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quoted_hole_is_still_caught() {
+        // The direction control for unquoting: it must not let a value through
+        // just because it had quotes on it. Each key is checked against the
+        // predicate the live test applies to that key.
+        let switched_off =
+            reporting_step(&ci_with("        if: 'false'\n"), GUARDED_TARGET).expect("located");
+        assert_eq!(switched_off.len(), 1);
+        assert!(
+            !CONDITIONS_THAT_STILL_RUN.contains(&switched_off[0].value.as_str()),
+            "`if: 'false'` should still read as switched off, not as a condition that runs"
+        );
+
+        let discarded = reporting_step(
+            &ci_with("        continue-on-error: \"true\"\n"),
+            GUARDED_TARGET,
+        )
+        .expect("located");
+        assert_eq!(discarded.len(), 1);
+        assert_ne!(
+            discarded[0].value, "false",
+            "`continue-on-error: \"true\"` should still read as discarding the verdict"
+        );
     }
 
     #[test]
