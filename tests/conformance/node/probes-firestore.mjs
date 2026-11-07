@@ -366,8 +366,10 @@ export const firestoreProbes = [
     },
     // Dormant while the matrix says `unimplemented` — the runner only runs the
     // branch the status names. It exists so observe.mjs can *measure* the row
-    // against an implementation that does serve it, which is the only evidence
-    // behind "floci-gcp serves what Fireup refuses" in docs/local/COMPARISON.md.
+    // against an implementation that does serve it. That measurement is what
+    // turns a "Fireup refuses this" row in docs/local/COMPARISON.md from a claim
+    // about our own code into a recorded answer from a reference implementation
+    // — see docs/local/measurements/.
     served: async ({ raw, projectId, runId }) => {
       const message = await duplexFirstOutcome(raw.firestore, 'Write', {
         database: databaseName(projectId),

@@ -126,11 +126,12 @@ probes and **records** the answer instead of asserting it:
 Start the target yourself, then:
 
 ```bash
-# floci-gcp — one port for everything
-docker compose up -d      # from github.com/floci-io/floci-gcp
-scripts/conformance-target.sh --target 'floci-gcp 0.12.0' \
+# any other implementation of the same contract — start it yourself first, then
+# point the probes at whatever port it serves Firestore on (one port for
+# everything, in which case --datastore-host can be left to default)
+scripts/conformance-target.sh --target '<name> <version>' \
   --firestore-host 127.0.0.1:4588 \
-  --out docs/local/measurements/floci-gcp-0.12.0.json
+  --out "docs/local/measurements/<name>-<version>.json"
 
 # Google's emulator — separate ports, and it needs a JRE 21+
 firebase emulators:start --only firestore,auth --project demo-fireup-local
@@ -181,7 +182,8 @@ Black-box conformance testing of a **published** API contract through its
 vendor's own open-source client libraries — the same method this suite uses on
 fireup. Running a published binary and recording what its public API answers is
 observation. **Do not decompile, disassemble, or binary-analyse** the Firebase
-emulator JAR or any floci-gcp artefact, and do not copy code or configuration
-out of either. See `.cursor/rules/firebase-gcp-compliance.mdc` and
+emulator JAR or any other third-party artefact you point this at, and do not
+copy code or configuration out of any of them. See
+`.cursor/rules/firebase-gcp-compliance.mdc` and
 `docs/licenses/FIREBASE_GCP_LOCAL.md`, which carries the method and the versions
 measured.
