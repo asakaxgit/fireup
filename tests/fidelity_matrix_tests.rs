@@ -1094,6 +1094,12 @@ fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
         .filter(|(_, line)| line.contains(&needle))
         .map(|(at, _)| at)
         .collect();
+    // No control covers the `_` arm below, and that is deliberate rather than
+    // an oversight: `found` above counts the *lines* carrying the needle and
+    // already refuses more than one, so by here the body holds exactly one.
+    // The arm stays because it fails closed if that ever stops being true --
+    // measured by disabling it (SAK-253), and every control stayed green,
+    // which is how we know it is unreachable rather than unguarded.
     let command_at = match running[..] {
         [one] => one,
         _ => {

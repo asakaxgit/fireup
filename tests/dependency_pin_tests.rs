@@ -2423,7 +2423,8 @@ fn check_every_deny_check_runs(step: &DenyStep) -> Result<(), String> {
              run either way, use `;` — that keeps the failure, measured, because `-e` \
              leaves before the `;`. Not a pipe: this workflow declares no `shell:`, so \
              the runner gives it `bash -e` with no `-o pipefail` (run 42362531653), and \
-                          guard.",
+             a pipe discards the exit too — the assertion below rejects one unless the \
+             `run:` body opens with `set -o pipefail`.",
             step.command
         ));
     }
@@ -6065,6 +6066,21 @@ include-build = false
         )
         .expect_err("any `||` after the gate must fail");
         assert!(error.contains("discards the verdict"), "{error}");
+
+        // The *advice* in that message is why SAK-253 had to reopen this guard:
+        // the old one read "as does a pipe (`-o pipefail`)", crediting a `set`
+        // line this step does not have. No test read the prose, so nothing
+        // reported it. These two do — one for the wrong recommendation, one for
+        // the sentence finishing at all.
+        assert!(
+            !error.contains("as does a pipe"),
+            "the `||` message must not offer a bare pipe as a safe alternative: {error}"
+        );
+        assert!(
+            error.contains("set -o pipefail"),
+            "the `||` message must name the one spelling that does keep the gate's exit \
+             through a pipe: {error}"
+        );
     }
 
     /// The direction control for the arm above: the trailing constructs that
@@ -8360,6 +8376,12 @@ fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
         .filter(|(_, line)| line.contains(&needle))
         .map(|(at, _)| at)
         .collect();
+    // No control covers the `_` arm below, and that is deliberate rather than
+    // an oversight: `found` above counts the *lines* carrying the needle and
+    // already refuses more than one, so by here the body holds exactly one.
+    // The arm stays because it fails closed if that ever stops being true --
+    // measured by disabling it (SAK-253), and every control stayed green,
+    // which is how we know it is unreachable rather than unguarded.
     let command_at = match running[..] {
         [one] => one,
         _ => {
