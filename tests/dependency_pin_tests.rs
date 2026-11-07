@@ -2313,6 +2313,283 @@ fn check_every_deny_check_runs(step: &DenyStep) -> Result<(), String> {
     Ok(())
 }
 
+/// The id of the job in `ci.yml` that holds the gate — the mapping key under
+/// `jobs:`, not the `name:` beside it.
+const DENY_JOB: &str = "deny";
+
+/// The two keys that decide whether the gate above runs and whether its verdict
+/// is counted. Both are valid on a job and on a step, which is the four places
+/// `deny_gate_conditions` looks.
+const GATE_CONDITION_KEYS: &[&str] = &["if", "continue-on-error"];
+
+/// The `if:` values that leave the gate running.
+///
+/// Not an attempt at an expression evaluator — the opposite. A text reader
+/// cannot decide `github.event_name == 'push'`, so the only `if:` values that
+/// may pass are the handful whose meaning is "run anyway" no matter what the
+/// rest of the workflow did. Everything else, including every expression over
+/// the `github` context, fails closed.
+///
+/// Both spellings of each, because `if: always()` and `if: ${{ always() }}` are
+/// the same condition and GitHub accepts either.
+const CONDITIONS_THAT_STILL_RUN: &[&str] = &[
+    "always()",
+    "${{ always() }}",
+    "success()",
+    "${{ success() }}",
+    "!cancelled()",
+    "${{ !cancelled() }}",
+];
+
+/// One live `if:` or `continue-on-error:` on the gate's path.
+#[derive(Debug, PartialEq, Eq)]
+struct GateCondition {
+    /// Where it sits, in the words the failure message uses: the `deny` job or
+    /// the gate step inside it. Which of the two matters to whoever reads the
+    /// failure, and to nothing else — both switch the gate off.
+    scope: String,
+    /// `if` or `continue-on-error`, without the colon.
+    key: String,
+    /// The value as written, comment stripped and trimmed.
+    value: String,
+}
+
+/// Every `if:` / `continue-on-error:` that governs the `deny` gate.
+#[derive(Debug, PartialEq, Eq)]
+struct GateConditions {
+    /// In file order, job-level before step-level. Empty on the shipped tree —
+    /// but see `the_gate_condition_reader_finds_the_live_gate` for why no test
+    /// asserts that about the real file.
+    keys: Vec<GateCondition>,
+}
+
+/// Indentation of `line`, comment and trailing whitespace already irrelevant.
+fn indent_of(line: &str) -> usize {
+    let bare = without_comment(line);
+    bare.len() - bare.trim_start().len()
+}
+
+/// The lines strictly inside the block opened at `at`, by indentation.
+///
+/// Blank and comment-only lines belong to neither the block nor what follows,
+/// so they are skipped rather than ending it — the same call `permissions_keys`
+/// makes, and `ci.yml` has blank lines between every step.
+fn block_under<'a>(lines: &[&'a str], at: usize) -> Vec<(usize, &'a str)> {
+    let indent = indent_of(lines[at]);
+    let mut body = Vec::new();
+    for (offset, line) in lines[at + 1..].iter().enumerate() {
+        let bare = without_comment(line);
+        let inner = bare.trim_start();
+        if inner.is_empty() {
+            continue;
+        }
+        if bare.len() - inner.len() <= indent {
+            break;
+        }
+        body.push((at + 1 + offset, *line));
+    }
+    body
+}
+
+/// The one line in `lines` that is exactly `needle` once its comment is gone.
+///
+/// `Err` for none and `Err` for several, both for the reason `deny_step_checks`
+/// gives: a reader that picked the first of two would be reporting on whichever
+/// of them it happened to find.
+fn sole_line(lines: &[&str], needle: &str, what: &str) -> Result<usize, String> {
+    let found: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| without_comment(line).trim() == needle)
+        .map(|(at, _)| at)
+        .collect();
+    match found[..] {
+        [at] => Ok(at),
+        [] => Err(format!(
+            "ci.yml has no `{needle}` line, so this guard cannot find {what}. It fails \
+             rather than passing: the gate it was written to protect is somewhere this \
+             reader cannot see, and every promise below is about a gate it located. If \
+             it was renamed, point DENY_JOB / DENY_STEP at the new name."
+        )),
+        _ => Err(format!(
+            "ci.yml has {} `{needle}` lines, so which one is {what} is not something a \
+             reader can tell.",
+            found.len()
+        )),
+    }
+}
+
+/// The live `if:` / `continue-on-error:` keys on the `deny` gate's path,
+/// read out of `ci.yml`.
+///
+/// There are exactly four places one can sit, and this reads all four: the
+/// `deny` job's own keys, and the gate step's. A job-level `if:` stops the job
+/// from being created at all; a step-level one skips the step; `continue-on-error`
+/// at either level keeps the failure from reaching the job's conclusion. All
+/// four end in the same place — the `deny` job concludes `success` with the
+/// gate's verdict thrown away.
+///
+/// Read rather than asserted against a hard-coded expectation for the reason
+/// `deny_step_checks` and `log_step_pattern` are: the file is the contract.
+///
+/// `Err` if the job or the step cannot be located. That is fail-closed, and it
+/// has to be: a missing `deny:` job is the gate gone, which is worse than any
+/// condition on it, and the only thing a test in this target can do about it is
+/// refuse to pass (SAK-221).
+fn deny_gate_conditions(ci: &str) -> Result<GateConditions, String> {
+    let lines: Vec<&str> = ci.lines().collect();
+
+    let job_at = sole_line(&lines, &format!("{DENY_JOB}:"), "the gate's job")?;
+    let job_body = block_under(&lines, job_at);
+    let Some(job_key_indent) = job_body.iter().map(|(_, line)| indent_of(line)).min() else {
+        return Err(format!(
+            "ci.yml's `{DENY_JOB}:` job has no body at all, so there is no gate under it \
+             and nothing for this guard to report on."
+        ));
+    };
+
+    let mut keys = Vec::new();
+    let job_scope = format!("the `{DENY_JOB}` job");
+    for (_, line) in &job_body {
+        if indent_of(line) != job_key_indent {
+            continue;
+        }
+        if let Some(found) = gate_condition(&job_scope, without_comment(line).trim()) {
+            keys.push(found);
+        }
+    }
+
+    // The step is looked for inside the job's own lines, so that a `deny` gate
+    // and some other job's identically named step cannot be confused.
+    let job_lines: Vec<&str> = job_body.iter().map(|(_, line)| *line).collect();
+    let step_at = sole_line(
+        &job_lines,
+        &format!("- name: {DENY_STEP}"),
+        "the gate step inside that job",
+    )?;
+    let step_key_indent = indent_of(job_lines[step_at]) + 2;
+    let step_scope = format!("the `{DENY_STEP}` step");
+    for (_, line) in &block_under(&job_lines, step_at) {
+        // Exactly that depth, not "at least": `env:` under this step has its own
+        // deeper keys, and a variable called `if` there governs nothing.
+        if indent_of(line) != step_key_indent {
+            continue;
+        }
+        if let Some(found) = gate_condition(&step_scope, without_comment(line).trim()) {
+            keys.push(found);
+        }
+    }
+
+    Ok(GateConditions { keys })
+}
+
+/// `body` as a gate condition, if that is what it is.
+fn gate_condition(scope: &str, body: &str) -> Option<GateCondition> {
+    let (key, value) = body.split_once(':')?;
+    let key = key.trim();
+    if !GATE_CONDITION_KEYS.contains(&key) {
+        return None;
+    }
+    Some(GateCondition {
+        scope: scope.to_string(),
+        key: key.to_string(),
+        value: value.trim().to_string(),
+    })
+}
+
+/// `Ok` if nothing on the gate's path stops it running or discards its verdict.
+///
+/// This is the other half of `check_every_deny_check_runs`. That one reads the
+/// gate's command and asks whether it runs the whole policy; this one asks the
+/// two questions one indent out — whether that command is reached, and whether
+/// failing it costs anything. Measured on this tree (SAK-244), each against a
+/// `deny.toml` mutation the gate otherwise catches:
+///
+/// | mutation | where | the step | the job | this file |
+/// |---|---|---|---|---|
+/// | `if: false` | gate step | skipped | `success` | 149 passed |
+/// | `if: false` | `deny` job | never runs | no job to fail | 149 passed |
+/// | `continue-on-error: true` | gate step | runs, fails | `success` | 149 passed |
+///
+/// Replaying the step the way the runner does (`bash --noprofile --norc -e -o
+/// pipefail`) still exits 0, because none of the three changed the command.
+/// cargo-deny has nothing to say about how it was invoked, so this is the same
+/// tool-invisible shape as `check_every_deny_check_runs` and the `[graph]`
+/// targets guard.
+///
+/// **Two assertions, and deliberately only two.**
+///
+/// 1. `continue-on-error` is absent or literally `false`.
+/// 2. `if:` is absent or one of `CONDITIONS_THAT_STILL_RUN`.
+///
+/// An `if:` this reader cannot evaluate **fails**. That is not caution for its
+/// own sake: `if: github.event_name == 'push'` is a condition no text reader can
+/// decide, and on this repository it would skip the gate on exactly the event
+/// that merges code, because every merge here arrives as a `pull_request`. A
+/// guard that waved through what it could not read would wave that through.
+///
+/// What is asserted about the *runtime*, and on what evidence:
+///
+/// | claim | evidence |
+/// |---|---|
+/// | a false `if:` skips the step and the job still concludes `success` | run `42161681376` (`local_firestore.yml`): four jobs with a step skipped by `if: matrix.store == …`, all four `conclusion: success` |
+/// | direction control — a step that really fails does fail its job | run `42153955324` (`CI`): `Build` `conclusion: failure`, job `conclusion: failure` |
+/// | `if: always()` does not stop a step | run `42318904935` (`coverage.yml`): two `if: always()` steps, both `conclusion: success` |
+///
+/// `continue-on-error: true` is the one line here taken from GitHub's
+/// documentation rather than measured on this repository: it says a step's
+/// failure stops failing the job. Measuring it means pushing the mutation to a
+/// branch of a public repository, which was not done. If it ever needs
+/// measuring: put `continue-on-error: true` on the gate step, `gh workflow run
+/// --ref` that branch, and read the `deny` job's `conclusion`.
+///
+/// Deliberately **out of scope**: an `if:` or `continue-on-error:` on the `test`
+/// job's `Supply-chain pins and gate settings` step — the step that runs this
+/// assertion. Switching that off takes the reporter away along with the report,
+/// and no test inside the target it guards can see that happen (SAK-221).
+fn check_nothing_switches_the_gate_off(conditions: &GateConditions) -> Result<(), String> {
+    for found in &conditions.keys {
+        let GateCondition { scope, key, value } = found;
+        if key == "continue-on-error" {
+            if value.eq_ignore_ascii_case("false") || value == "${{ false }}" {
+                continue;
+            }
+            return Err(format!(
+                "{scope} in ci.yml carries `continue-on-error: {value}`. That keeps the \
+                 gate's failure out of the job's conclusion: cargo-deny runs, reports the \
+                 problem, exits non-zero, and — per GitHub's documentation for this key, \
+                 which is where this one line comes from rather than from a run of this \
+                 repository — the `{DENY_JOB}` job still concludes `success`, so the one \
+                 thing that reads the gate's verdict reads nothing. What *was* measured \
+                 (SAK-244) is the half on this side: with that key on the gate step and \
+                 deny.toml's licence allowlist broken, this whole file still passed 149 \
+                 tests, so nothing here would have told you. Remove the key, or set it to \
+                 `false` if something wants it written down explicitly."
+            ));
+        }
+
+        if CONDITIONS_THAT_STILL_RUN.contains(&value.as_str()) {
+            continue;
+        }
+        return Err(format!(
+            "{scope} in ci.yml carries `if: {value}`, which this guard cannot clear. A \
+             condition that is false does not fail anything — the step is `skipped` and \
+             the job still concludes `success` (measured on this repository's own run \
+             `42161681376`), so a tree with the supply-chain gate switched off is \
+             indistinguishable from a tree that passed it. Measured (SAK-244) with \
+             `if: false` on the gate step, this whole file still passed 149 tests.\n\n\
+             Conditions that pass: {}. Everything else fails, including an expression \
+             over the `github` context — a text reader cannot decide one, and \
+             `github.event_name == 'push'` in particular would skip the gate on every \
+             pull request, which is how code reaches `main` here. If the gate genuinely \
+             has to be conditional, that is a decision to take in a ticket rather than \
+             in a line this guard has to guess at.",
+            CONDITIONS_THAT_STILL_RUN.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 fn repo_file(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name);
     std::fs::read_to_string(&path)
@@ -2467,6 +2744,17 @@ fn the_deny_job_runs_every_check_deny_toml_configures() {
         Err(reason) => panic!("{reason}"),
     };
     if let Err(reason) = check_every_deny_check_runs(&step) {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+fn nothing_in_ci_yml_switches_the_deny_gate_off() {
+    let conditions = match deny_gate_conditions(&repo_file(".github/workflows/ci.yml")) {
+        Ok(conditions) => conditions,
+        Err(reason) => panic!("{reason}"),
+    };
+    if let Err(reason) = check_nothing_switches_the_gate_off(&conditions) {
         panic!("{reason}");
     }
 }
@@ -4821,5 +5109,322 @@ include-build = false
             ))
             .is_err()
         );
+    }
+
+    /// The three lines in the real `ci.yml` the SAK-244 arms anchor to, each
+    /// verified to be exactly one live line before any of them is edited.
+    const DENY_JOB_LINE: &str = "  deny:";
+    const GATE_STEP_LINE: &str = "      - name: cargo deny check";
+    const INSTALL_STEP_LINE: &str = "      - name: Install cargo-deny";
+
+    /// The real `ci.yml` with the single live line `anchor` replaced.
+    ///
+    /// Against the real file rather than a synthetic workflow, because the
+    /// question these arms ask is about the file that actually runs — a
+    /// synthetic `deny` job could differ from it in the one structural way that
+    /// mattered and nothing would say so.
+    ///
+    /// Whole-line, exact, and it asserts there is exactly **one** live match
+    /// before editing. `ci.yml` is a file that documents its own settings in
+    /// prose: a substring edit, or one that tolerated two matches, could land
+    /// on a comment and produce a tree where the mutation is not in force,
+    /// which reads as "the guard did not catch it".
+    fn with_sole_line(text: &str, anchor: &str, replacement: &str) -> String {
+        let live = text.lines().filter(|line| *line == anchor).count();
+        assert_eq!(
+            live, 1,
+            "`{anchor}` is {live} live lines, not one. These arms edit by whole-line \
+             anchor, so an anchor that has moved means they are no longer mutating the \
+             gate they claim to be mutating."
+        );
+        text.lines()
+            .map(|line| {
+                if line == anchor {
+                    format!("{replacement}\n")
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect()
+    }
+
+    /// The real `ci.yml` with every `if:` / `continue-on-error:` line removed.
+    ///
+    /// The base every arm below mutates, and a no-op on the shipped tree, which
+    /// carries neither key anywhere (that is a fact about today, which is why no
+    /// assertion here states it — see the note on
+    /// `the_gate_condition_reader_finds_the_live_gate`).
+    ///
+    /// Normalising first is what keeps each arm measuring the key *it* added.
+    /// With the raw file as the base, putting `if: false` on the real gate step
+    /// would redden the green arms too — they would be reading a file with both
+    /// their `if: always()` and the mutation on it — and a suite where one hole
+    /// fails five tests says less, and says it worse, than one where it fails
+    /// the single test whose message is about that hole. The test that reads the
+    /// shipped file unnormalised, and so is the one that goes red when a
+    /// condition really lands there, is
+    /// `nothing_in_ci_yml_switches_the_deny_gate_off`.
+    fn ci_yml_base() -> String {
+        repo_file(".github/workflows/ci.yml")
+            .lines()
+            .filter(|line| {
+                let body = without_comment(line).trim();
+                !GATE_CONDITION_KEYS
+                    .iter()
+                    .any(|key| body.starts_with(&format!("{key}:")))
+            })
+            .map(|line| format!("{line}\n"))
+            .collect()
+    }
+
+    fn ci_yml_with(anchor: &str, replacement: &str) -> String {
+        with_sole_line(&ci_yml_base(), anchor, replacement)
+    }
+
+    /// The real `ci.yml` with `inserted` added directly under `anchor`, as the
+    /// first key of that job or step.
+    fn ci_yml_with_key_under(anchor: &str, inserted: &str) -> String {
+        ci_yml_with(anchor, &format!("{anchor}\n{inserted}"))
+    }
+
+    /// The reader itself, before anything is asserted about what it read.
+    ///
+    /// Note what is asked of the real file and what is not: only that the gate
+    /// is **locatable**. Nothing here says the live file has no conditions on
+    /// it, even though today it has none.
+    ///
+    /// That restraint is the whole lesson of this ticket. The first draft of
+    /// this test asserted `assert_eq!(live.keys, Vec::new())`, which is true of
+    /// the shipped tree — and went **red** the moment `if: always()` was added
+    /// to the gate step. `if: always()` does not stop a step (measured: run
+    /// `42318904935`), so that tree is *safer* than the one shipped, and the
+    /// guard was failing it. That is precisely the mistake SAK-241 undid in
+    /// `the_permissions_reader_finds_exactly_the_live_keys`, reproduced here by
+    /// the author who had raised it against #96.
+    ///
+    /// The grammar is pinned on synthetic input instead, where `assert_eq!` is
+    /// honest because the input is fixed.
+    #[test]
+    fn the_gate_condition_reader_finds_the_live_gate() {
+        deny_gate_conditions(&repo_file(".github/workflows/ci.yml")).expect(
+            "the shipped deny gate must be locatable, or every arm below is failing on \
+             the reader rather than on the condition it put there",
+        );
+
+        // A job-level key, read with the scope that names the job.
+        let read = deny_gate_conditions(&ci_yml_with_key_under(DENY_JOB_LINE, "    if: always()"))
+            .expect("readable");
+        assert_eq!(
+            read.keys,
+            vec![GateCondition {
+                scope: format!("the `{DENY_JOB}` job"),
+                key: "if".to_string(),
+                value: "always()".to_string(),
+            }]
+        );
+
+        // A step-level key, and the value kept verbatim including the `${{ }}`.
+        let read = deny_gate_conditions(&ci_yml_with_key_under(
+            GATE_STEP_LINE,
+            "        continue-on-error: ${{ false }}",
+        ))
+        .expect("readable");
+        assert_eq!(
+            read.keys,
+            vec![GateCondition {
+                scope: format!("the `{DENY_STEP}` step"),
+                key: "continue-on-error".to_string(),
+                value: "${{ false }}".to_string(),
+            }]
+        );
+
+        // Both at once, job before step, with a trailing comment stripped off
+        // the value rather than read as part of it.
+        let read = deny_gate_conditions(&with_sole_line(
+            &ci_yml_with_key_under(GATE_STEP_LINE, "        if: success()  # keeps running"),
+            DENY_JOB_LINE,
+            &format!("{DENY_JOB_LINE}\n    continue-on-error: false"),
+        ))
+        .expect("readable");
+        assert_eq!(
+            read.keys
+                .iter()
+                .map(|found| (found.key.as_str(), found.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("continue-on-error", "false"), ("if", "success()")]
+        );
+
+        // Depth is exact, not "at least": a variable called `if` in the gate
+        // step's own `env:` block governs nothing, and neither does an `if:` on
+        // a different step of the same job.
+        let read = deny_gate_conditions(&ci_yml_with_key_under(
+            GATE_STEP_LINE,
+            "        env:\n          if: false\n          continue-on-error: true",
+        ))
+        .expect("readable");
+        assert_eq!(read.keys, Vec::new());
+        let read = deny_gate_conditions(&ci_yml_with_key_under(
+            INSTALL_STEP_LINE,
+            "        if: false",
+        ))
+        .expect("readable");
+        assert_eq!(read.keys, Vec::new());
+    }
+
+    /// The hole this ticket is about: the gate is never reached, or its failure
+    /// is never counted. Four arms, because the two keys are each valid in two
+    /// places and a guard that read only one place would pass half of them.
+    #[test]
+    fn a_condition_that_switches_the_gate_off_fails() {
+        for (anchor, inserted, expected) in [
+            (DENY_JOB_LINE, "    if: false", "if: false"),
+            (GATE_STEP_LINE, "        if: false", "if: false"),
+            (
+                DENY_JOB_LINE,
+                "    continue-on-error: true",
+                "continue-on-error: true",
+            ),
+            (
+                GATE_STEP_LINE,
+                "        continue-on-error: true",
+                "continue-on-error: true",
+            ),
+            // The spellings that do not read as a switch at a glance.
+            (
+                GATE_STEP_LINE,
+                "        if: ${{ false }}",
+                "if: ${{ false }}",
+            ),
+            (
+                GATE_STEP_LINE,
+                "        continue-on-error: ${{ github.event_name == 'pull_request' }}",
+                "continue-on-error: ${{ github.event_name == 'pull_request' }}",
+            ),
+        ] {
+            let conditions =
+                deny_gate_conditions(&ci_yml_with_key_under(anchor, inserted)).expect("readable");
+            let Err(error) = check_nothing_switches_the_gate_off(&conditions) else {
+                panic!("`{inserted}` under `{anchor}` must fail: it switches the gate off");
+            };
+            assert!(
+                error.contains(expected),
+                "the failure has to quote the key it found, got: {error}"
+            );
+        }
+
+        // The control, and the arm that says the guard is satisfiable at all:
+        // the same base with nothing added to it passes. Deliberately the base
+        // and not the raw shipped file — that assertion is
+        // `nothing_in_ci_yml_switches_the_deny_gate_off`, and duplicating it
+        // here would just make a real hole fail two tests.
+        let conditions = deny_gate_conditions(&ci_yml_base()).expect("readable");
+        assert!(
+            check_nothing_switches_the_gate_off(&conditions).is_ok(),
+            "the base must pass, or the arms above are failing on something other than \
+             the condition they added"
+        );
+    }
+
+    /// Fails closed on an `if:` it cannot evaluate, and on a gate it cannot
+    /// find.
+    ///
+    /// `github.event_name == 'push'` is the arm that matters. A text reader
+    /// cannot decide it, and on this repository it is not a harmless guess
+    /// either way: every change reaches `main` through a `pull_request`, so that
+    /// condition skips the supply-chain gate on exactly the event that merges
+    /// code. A guard that passed what it could not read would pass that.
+    #[test]
+    fn a_condition_this_reader_cannot_evaluate_fails_closed() {
+        for (anchor, inserted) in [
+            (DENY_JOB_LINE, "    if: github.event_name == 'push'"),
+            (
+                GATE_STEP_LINE,
+                "        if: ${{ github.event_name == 'push' }}",
+            ),
+            (
+                GATE_STEP_LINE,
+                "        if: github.ref == 'refs/heads/main'",
+            ),
+            (GATE_STEP_LINE, "        if: cancelled()"),
+        ] {
+            let conditions =
+                deny_gate_conditions(&ci_yml_with_key_under(anchor, inserted)).expect("readable");
+            assert!(
+                check_nothing_switches_the_gate_off(&conditions).is_err(),
+                "`{inserted}` is a condition this reader cannot evaluate and must fail \
+                 closed rather than be assumed harmless"
+            );
+        }
+
+        // The gate somewhere this reader cannot see. Renaming either the job or
+        // the step is a tree whose gate this guard has not located, and the
+        // only thing it can do about that is refuse to pass (SAK-221).
+        assert!(deny_gate_conditions(&ci_yml_with(DENY_JOB_LINE, "  supply-chain:")).is_err());
+        assert!(deny_gate_conditions(&ci_yml_with(
+            GATE_STEP_LINE,
+            "      - name: dependency audit"
+        ))
+        .is_err());
+
+        // A commented-out job header is not a job header.
+        assert!(deny_gate_conditions(&ci_yml_with(DENY_JOB_LINE, "#  deny:")).is_err());
+
+        // Two jobs by that name: which one carries the gate is unreadable.
+        assert!(deny_gate_conditions(&ci_yml_with(
+            DENY_JOB_LINE,
+            "  deny:\n    runs-on: ubuntu-latest\n  deny:"
+        ))
+        .is_err());
+
+        // A job header with nothing under it.
+        assert!(deny_gate_conditions("jobs:\n  deny:\n").is_err());
+    }
+
+    /// The direction control, and the arm without which this guard would be
+    /// rejecting trees safer than the one shipped.
+    ///
+    /// Every value in `CONDITIONS_THAT_STILL_RUN` leaves the gate running —
+    /// `if: always()` was measured on this repository's own run `42318904935`,
+    /// where two `if: always()` steps both ran to `conclusion: success`. So is
+    /// `continue-on-error: false`, which is the key written down with the value
+    /// it already has by default.
+    ///
+    /// And `if: false` on the *Install* step has to pass. Skipping the install
+    /// leaves no `cargo-deny` on `PATH`, so the gate step fails — that mutation
+    /// is fail-*safe*, and it is the arm that rules out a predicate merely
+    /// reacting to "an `if:` somewhere in the job".
+    #[test]
+    fn conditions_that_still_run_the_gate_pass() {
+        for value in CONDITIONS_THAT_STILL_RUN {
+            for (anchor, indent) in [(DENY_JOB_LINE, "    "), (GATE_STEP_LINE, "        ")] {
+                let conditions = deny_gate_conditions(&ci_yml_with_key_under(
+                    anchor,
+                    &format!("{indent}if: {value}"),
+                ))
+                .expect("readable");
+                assert!(
+                    check_nothing_switches_the_gate_off(&conditions).is_ok(),
+                    "`if: {value}` leaves the gate running and must not be reported as a \
+                     hole — a guard that reddened on it would be failing a tree that is \
+                     safer than the one shipped"
+                );
+            }
+        }
+
+        for (anchor, inserted) in [
+            (DENY_JOB_LINE, "    continue-on-error: false"),
+            (GATE_STEP_LINE, "        continue-on-error: false"),
+            (GATE_STEP_LINE, "        continue-on-error: False"),
+            // Fail-safe, not fail-open: no install means no binary means the
+            // gate step fails.
+            (INSTALL_STEP_LINE, "        if: false"),
+        ] {
+            let conditions =
+                deny_gate_conditions(&ci_yml_with_key_under(anchor, inserted)).expect("readable");
+            assert!(
+                check_nothing_switches_the_gate_off(&conditions).is_ok(),
+                "`{inserted}` under `{anchor}` does not switch the gate off and must pass"
+            );
+        }
     }
 }
