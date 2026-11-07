@@ -315,6 +315,132 @@ wildcards = "deny"
 # reason inline.
 deny = []
 
+[bans.build]
+# The one binary blob the build actually runs.
+#
+# `protoc-bin-vendored` is a direct build-dependency of Fireup
+# (`cargo tree --locked -i protoc-bin-vendored` -> `[build-dependencies] fireup
+# v0.1.0`). It pulls eight platform crates, each shipping one precompiled
+# `protoc` executable downloaded from crates.io, and `build.rs` executes the
+# linux-x86_64 one on every build in CI and on every developer machine.
+#
+# Everything else in this file reasons about *source*: its licence, its
+# advisories, its version, the registry it came from. None of that says anything
+# about an ELF binary sitting in a `.crate` tarball, and until SAK-237 this table
+# did not exist, so cargo-deny never looked at build scripts or bundled
+# executables at all.
+#
+# Two keys and not one, because `executables` alone is inert. Measured on this
+# tree (SAK-237), varying only this table:
+#
+#   no `[bans.build]` (what shipped)      exit 0   —            <- the hole
+#   `executables = "deny"` alone          exit 0   0 findings   <- still inert
+#   + `include-dependencies = true`       exit 2   8 findings
+#   `executables = "allow"` + include     exit 0   0 findings   control
+#
+# `include-dependencies` defaults to false, which scopes the scan to the
+# workspace — and Fireup bundles no binaries of its own, so the scan finds
+# nothing and reports success. Writing `executables = "deny"` on its own looks
+# like enforcement and enforces nothing. Same two-keys-one-fact shape as
+# `yanked` / `disable-yank-checking` (SAK-231) and `include-dev` /
+# `exclude-dev` (SAK-234), which is why `dependency_pin_tests` asserts both.
+executables = "deny"
+include-dependencies = true
+# The exemption is pinned to the path *and* the bytes, not to a glob.
+#
+# `allow-globs = ["bin/*"]` is green too (measured: exit 0 for all eight), and it
+# was the obvious shape. It is the wrong one: it exempts whatever that crate ever
+# puts in `bin/`, so a second binary appearing there in some future version
+# passes silently. The `allow` form takes a `path` and a `checksum` and fixes
+# both halves. Measured, varying only the bypass list against the eight-crate
+# shipping shape:
+#
+#   `allow = [{ path, checksum }]` x8      exit 0   `bans ok`
+#   one checksum, one hex digit flipped    exit 2   `error[checksum-mismatch]`
+#   one path wrong, checksum correct       exit 2   `error[detected-executable]`
+#   no bypass at all                       exit 2   8 findings
+#
+# Two traps are worth writing down, because both of them look like an exemption
+# and are not one:
+#
+#   `bypass = [{ crate = "…" }]` — a bare crate name          exit 2, 8 findings
+#   `allow = [{ path }]` with no `checksum`                   exit 0, 0 findings
+#
+# The first exempts nothing: the count stays at eight and it is only the
+# surrounding red that tells you. The second is the dangerous one — `checksum` is
+# optional in cargo-deny's schema, so dropping it is a one-token edit that keeps
+# the gate green while unpinning the bytes of every binary listed here. That is
+# the specific regression `dependency_pin_tests` watches for.
+#
+# Narrowing was measured too: one entry with `allow-globs` takes the count from
+# eight to seven, an unrelated crate with the same glob leaves it at eight, and
+# `executables = "allow"` is the kill-switch green — so the green above is these
+# entries and not the check being off.
+#
+# These lines need updating when `Cargo.lock` moves `protoc-bin-vendored-*`,
+# which is the point: a new upstream binary is a thing to look at, and the
+# checksum makes the gate say so instead of trusting the version number. Same
+# house style as pinning cargo-deny and actionlint by version + sha256 in
+# `ci.yml`. Regenerate with:
+#
+#   sha256sum ~/.cargo/registry/src/*/protoc-bin-vendored-*-<version>/bin/*
+#
+# A bypass entry for a crate that has left the tree is only
+# `warning[unmatched-bypass]` and exit 0 (measured). It is left as a warning for
+# the reason `[licenses] unused-allowed-license` is left alone (SAK-234): a stale
+# entry here exempts nothing, and promoting it would turn an ordinary dependency
+# removal red.
+bypass = [
+  { crate = "protoc-bin-vendored-linux-aarch_64", allow = [{ path = "bin/protoc", checksum = "cb89a125fd3d6c1ee86ee65a2bcbd7c3ac7c3fab1a806e0c466f162882053cb7" }] },
+  { crate = "protoc-bin-vendored-linux-ppcle_64", allow = [{ path = "bin/protoc", checksum = "3f807a99f5f494a6cb15f1aab7ddf411f3005a9be4330955dda8869902b9ef09" }] },
+  { crate = "protoc-bin-vendored-linux-s390_64", allow = [{ path = "bin/protoc", checksum = "525e2d8b76559c73e2ca83b3ebb114b777fd22aecc4aab329ec4229be9375769" }] },
+  { crate = "protoc-bin-vendored-linux-x86_32", allow = [{ path = "bin/protoc", checksum = "5bd5b505f5ec9fd26e27818a9cda2fa9d5aa60d1fdc9009ff33bc70276d78e39" }] },
+  { crate = "protoc-bin-vendored-linux-x86_64", allow = [{ path = "bin/protoc", checksum = "f6ee22d65361338459208da8bff801c9ca689741cba9187b34990dd45198f864" }] },
+  { crate = "protoc-bin-vendored-macos-aarch_64", allow = [{ path = "bin/protoc", checksum = "765ccb18be73e565bfc3e2ad94e85039ca28f928b3e62b487e51b7b8fdf1dcfb" }] },
+  { crate = "protoc-bin-vendored-macos-x86_64", allow = [{ path = "bin/protoc", checksum = "56ba0f583d8761975d177670a3375564fd2bf5a7d96182a9d0c3b818a893c0ff" }] },
+  { crate = "protoc-bin-vendored-win32", allow = [{ path = "bin/protoc.exe", checksum = "ab254642d458b8f307f5a2aefd87f9f7ec426c5c1c5e551e68a845dc14113c0e" }] },
+]
+
+# The six keys of this table that are deliberately *not* set. None of them is a
+# way to switch the two above off — `include-dependencies` is the only kill
+# switch this policy has, which is why there are two value assertions and not
+# six. All measured on top of the shipping shape, varying one key:
+#
+# `allow-build-scripts = []` — exit 2, 33 `error[build-script-not-allowed]`. An
+#   allow list of 33 crates goes red every time a dependency moves, which is
+#   unmaintainable; recorded and not adopted, on the same grounds that left
+#   `multiple-versions` at "warn". (The older spelling directly under `[bans]`
+#   is still live and gives the identical 33.)
+#
+# `interpreted = "deny"` — exit 2, 7 more findings, all shell scripts bundled in
+#   crate sources (`deadpool/test-build.sh`, `redox_syscall/.../generate.sh`,
+#   `sharded-slab/bin/loom.sh`, `tracing/test-macros/bin/macro-results.sh`,
+#   `wasi/ci/*.sh`). Fireup's build runs none of them, so unlike protoc they are
+#   not on the execution path and do not earn eight more lines of bypass upkeep.
+#
+# `script-extensions` — adds extension-based denial independently of
+#   `interpreted`: `["sh"]` is exit 2 with the same six `.sh` files. Strictness we
+#   are not buying, for the reason above, not a hole.
+#
+# `enable-builtin-globs = true` — exit 2, 9 `error[denied-by-extension]` (the
+#   seven scripts plus `unicode-normalization/scripts/unicode.py` and two
+#   `worker.js`). Also stricter, not laxer.
+#
+# `include-archives = true` — exit 2, 9 more: the `windows_*` `.a`/`.lib` files
+#   and `wit-bindgen`'s `libwit_bindgen_cabi.a`. Nothing links them here; they are
+#   in the graph only because SAK-235 deliberately left `[graph] targets` unset,
+#   so this one follows from that decision rather than being its own.
+#
+# `include-workspace = true` — exit 0, no change. Fireup ships no binaries.
+#
+# Outside this table, the audit covered `[bans] skip` and `skip-tree` (no effect
+# on the executable scan — they only touch duplicate-version analysis),
+# `[graph] exclude-dev` (no effect; a build-dependency is not a dev dependency),
+# and `[graph] targets = ["x86_64-unknown-linux-gnu"]` (no effect — still all
+# eight, so this guard is independent of SAK-235's). `[graph] exclude` does
+# narrow it, 8 -> 7, and is deliberately not forbidden here for the same reason
+# SAK-234 and SAK-235 left it alone: it names the crate it excuses.
+
 [sources]
 # An entry in `allow-registry` that nothing in the tree comes from is an error,
 # not a warning. This is what makes cargo-deny itself report a widened source
