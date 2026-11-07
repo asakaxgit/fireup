@@ -33,7 +33,7 @@ permissions:
   contents: read
 
 jobs:
-  actionlint:
+  actionlint_renamed:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
