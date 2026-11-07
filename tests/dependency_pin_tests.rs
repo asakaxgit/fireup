@@ -5834,6 +5834,16 @@ include-build = false
             "cargo-deny --locked --offline check advisories licenses bans sources",
             "cargo-deny --locked check --all-features advisories licenses bans sources",
             "cargo-deny check advisories licenses bans sources",
+            // The strict-prefix arms. `silenced_diagnostics` matches the long
+            // form as exactly `--allow`/`--warn` or an `=`-suffixed prefix of
+            // one, and nothing else. These pin that shape, so a later rewrite
+            // to a bare `starts_with("--allow")` reddens a tree in which no
+            // diagnostic was lowered at all. Neither flag exists in cargo-deny
+            // 0.20.2 — the shape of the match is the whole point, and it is the
+            // only thing standing between this guard and a future
+            // `--allow-<something stricter>`.
+            "cargo-deny --locked check --allow-registry-only advisories licenses bans sources",
+            "cargo-deny --locked check --warn-as-error advisories licenses bans sources",
         ] {
             let step = deny_step_checks(&deny_job_with(command)).expect("readable");
             assert!(
