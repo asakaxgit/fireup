@@ -7310,7 +7310,7 @@ const CHECKOUT_ACTION: &str = "actions/checkout";
 
 /// `actions/checkout` inputs that change *which tree* a job then checks.
 ///
-/// Both of these leave a workflow that lints clean and runs to a green
+/// Each of these leaves a workflow that lints clean and runs to a green
 /// conclusion while the gate -- and this file's own guards -- read a tree
 /// nobody proposed. Measured on the real `ci.yml` (SAK-251):
 ///
@@ -7319,12 +7319,22 @@ const CHECKOUT_ACTION: &str = "actions/checkout";
 /// | none (shipped) | ok | ok 173 | exit 0 |
 /// | `ref: 5d015dc` on the `deny` job | **ok** | **ok 173** | reads another tree |
 /// | `repository: someone/else` on the `deny` job | **ok** | **ok 173** | reads another repo |
+/// | `github-server-url: https://ghe.example.com` | **ok** | **ok 180** | reads another server |
 /// | `bogus-input: x` | **rc 1** | -- | -- |
 ///
 /// The `bogus-input` row is the control: actionlint does validate this block,
-/// so the two clean rows are a shippable workflow rather than one that fails to
+/// so the clean rows are a shippable workflow rather than one that fails to
 /// parse. Compare `continue-on-error: 'false'`, which actionlint rejects and
 /// `unquote_condition` therefore tolerates.
+///
+/// `github-server-url` was found by asking actionlint for the list rather than
+/// by reading the ones this hole was reported with: rejecting `bogus-input`
+/// prints every input `actions/checkout@v4` accepts, and that enumeration is
+/// what the three rows above and the fifteen in the exclusion list below are
+/// measured against. It is the same key as `repository:` one level out -- the
+/// repository path stays `${{ github.repository }}` and the *server* it is
+/// fetched from moves -- and the `ok 180` row is against the guard as first
+/// committed, which read only `ref` and `repository`.
 ///
 /// What makes the verdict follow the tree, same binary and same pins, only the
 /// checkout differing:
@@ -7338,22 +7348,38 @@ const CHECKOUT_ACTION: &str = "actions/checkout";
 /// `unsound = "all"` dropped: **1 failed** in the proposed tree, **ok 173** in
 /// the tree the `ref:` points at.
 ///
-/// Deliberately *not* listed, each measured rather than assumed:
+/// Deliberately *not* listed. The other fifteen inputs in actionlint's list,
+/// each measured on the real `ci.yml` rather than assumed -- all fifteen are
+/// `actionlint` ok and `180 passed`, so what separates them from the three
+/// above is the direction, not the silence:
 ///
-/// - `fetch-depth`, `persist-credentials`, `submodules`, `sparse-checkout` --
-///   neutral or stricter. `persist-credentials: false` narrows the token this
-///   job hands to the third-party binary it runs, so a guard reddening on it
-///   would be failing a tree safer than the one shipped, which is the mistake
-///   SAK-241 undid in the `permissions` reader.
-/// - `path` -- fail-closed, not silent. It moves the tree into a subdirectory
-///   while the step's working directory stays the workspace root, which is the
-///   measured "no manifest" case: with `deny.toml` simply absent the gate exits
-///   4 with 216 errors, and with `.github/` absent this target reports 37
+/// - `fetch-depth`, `fetch-tags`, `filter`, `lfs`, `clean`, `show-progress`,
+///   `set-safe-directory`, `sparse-checkout-cone-mode`, `submodules`,
+///   `persist-credentials` -- neutral or stricter. `persist-credentials: false`
+///   narrows the token this job hands to the third-party binary it runs, so a
+///   guard reddening on it would be failing a tree safer than the one shipped,
+///   which is the mistake SAK-241 undid in the `permissions` reader. (`clean`
+///   is neutral because both jobs are `runs-on: ubuntu-latest`: there is no
+///   workspace to leave dirty. On a self-hosted runner it would need its own
+///   look, which is why the reason is written down rather than the verdict.)
+/// - `token`, `ssh-key`, `ssh-user`, `ssh-known-hosts`, `ssh-strict` -- the
+///   credential and transport, not the tree. They change how the same
+///   `repository` at the same `ref` is fetched. `token` is the one worth
+///   naming: handing the checkout a different credential is a real question,
+///   but it is SAK-240's question about what the job can *do*, not this one's
+///   about which bytes it reads.
+/// - `path` and `sparse-checkout` -- fail-closed, not silent. Both leave files
+///   the gate needs missing: `path` moves the tree into a subdirectory while
+///   the step's working directory stays the workspace root, which is the
+///   measured "no manifest" case -- with `deny.toml` simply absent the gate
+///   exits 4 with 216 errors, and with `.github/` absent this target reports 37
 ///   failures. A direction that is loud needs no guard (SAK-247's `--locked`).
 ///
 /// So the list is the inputs whose failure direction is **fail-open**, and only
-/// those.
-const CHECKOUT_REDIRECTING_INPUTS: &[&str] = &["ref", "repository"];
+/// those. Three fail-open, two loud, fifteen neutral is every input the action
+/// has; the exclusions are enumerated rather than summarised so that a new
+/// input in `actions/checkout@v5` is visibly not yet classified.
+const CHECKOUT_REDIRECTING_INPUTS: &[&str] = &["ref", "repository", "github-server-url"];
 
 /// One live `actions/checkout` step in `ci.yml`.
 #[derive(Debug, PartialEq, Eq)]
@@ -7475,21 +7501,43 @@ fn checkout_steps(ci: &str) -> Result<Vec<CheckoutStep>, String> {
 fn check_no_checkout_redirects_the_tree(steps: &[CheckoutStep]) -> Result<(), String> {
     for step in steps {
         for input in &step.inputs {
-            if CHECKOUT_REDIRECTING_INPUTS.contains(&input.as_str()) {
-                return Err(format!(
-                    "the `{}` job's checkout declares `{input}:`, which chooses the tree \
-                     that job then reads. Measured: with the proposed tree's `allow` \
-                     missing `\"MIT\"` the gate's step exits 4 with 48 `rejected`, and \
-                     the same command with the same binary and the same pins exits 0 \
-                     against the tree a `ref:` points at. Nothing else reports this -- \
-                     actionlint accepts it, and the gate reads whatever is on disk. If a \
-                     redirect is genuinely wanted, say which of \
-                     {CHECKOUT_REDIRECTING_INPUTS:?} and why in the same diff; neutral \
-                     inputs such as `fetch-depth` and `persist-credentials` are not \
-                     reported.",
-                    step.job
-                ));
+            if !CHECKOUT_REDIRECTING_INPUTS.contains(&input.as_str()) {
+                continue;
             }
+            // The evidence is per input, not one sentence reused for all
+            // three: the `ref:` measurement is a statement about `ref:`, and
+            // quoting it under `github-server-url:` would be reporting a
+            // number nobody took.
+            let measured = match input.as_str() {
+                "ref" => {
+                    "same command, same binary, same pins, only the tree differing: with \
+                     the proposed tree's `allow` missing `\"MIT\"` the gate's step exits 4 \
+                     with 48 `rejected`, and against the tree a `ref:` points at it exits \
+                     0 with `licenses ok`"
+                }
+                "repository" => {
+                    "`repository: someone/else` on this job is `actionlint` ok and leaves \
+                     this target green, and the tree the gate then reads is whatever that \
+                     other repository's default branch holds"
+                }
+                "github-server-url" => {
+                    "`github-server-url: https://ghe.example.com` is `actionlint` ok and \
+                     left this target at `180 passed` before it was listed here; the \
+                     repository path stays `${{ github.repository }}` and the server the \
+                     whole tree is cloned from moves"
+                }
+                _ => "measured as fail-open, see `CHECKOUT_REDIRECTING_INPUTS`",
+            };
+            return Err(format!(
+                "the `{}` job's checkout declares `{input}:`, which chooses the tree that \
+                 job then reads. Measured: {measured}. Nothing else reports this -- \
+                 actionlint accepts it, and the gate reads whatever is on disk. If a \
+                 redirect is genuinely wanted, say which of \
+                 {CHECKOUT_REDIRECTING_INPUTS:?} and why in the same diff; the other \
+                 fifteen inputs, such as `fetch-depth` and `persist-credentials`, are \
+                 not reported.",
+                step.job
+            ));
         }
     }
     Ok(())
@@ -7516,8 +7564,9 @@ fn check_no_checkout_redirects_the_tree(steps: &[CheckoutStep]) -> Result<(), St
 /// really succeeds, so a required check is *satisfied*. What would close it is
 /// a reader of this file hosted in a job with its own checkout -- the SAK-249
 /// mutual arrangement one level up, at job rather than target granularity.
-/// Left to SAK-251 rather than done here, because it adds a step to `ci.yml`
-/// and this layer is `in_review`.
+/// Left to SAK-242, which already owns the `test` job's other job-level hole,
+/// rather than done here: it adds a step to `ci.yml`, which is a change to the
+/// gate's own file and not to this file's reader.
 #[test]
 fn no_checkout_in_ci_yml_points_a_job_at_another_tree() {
     let steps = checkout_steps(&repo_file(".github/workflows/ci.yml"))
@@ -7637,6 +7686,10 @@ mod checkout_scope_controls {
             ("test", vec!["ref: 5d015dc"]),
             ("deny", vec!["repository: someone/else"]),
             ("test", vec!["repository: someone/else"]),
+            // The same redirect one level out: the repository path is left
+            // alone and the server it is fetched from moves.
+            ("deny", vec!["github-server-url: https://ghe.example.com"]),
+            ("test", vec!["github-server-url: https://ghe.example.com"]),
             // Quoting changes nothing: it is the key that selects the tree.
             ("deny", vec!["ref: 'main'"]),
             ("deny", vec!["ref: \"main\""]),
@@ -7658,6 +7711,54 @@ mod checkout_scope_controls {
                 why.contains(job),
                 "the failure must name the job whose tree moved, said: {why}"
             );
+            // And the evidence it quotes has to be the evidence for *this*
+            // input. One sentence reused across the three would read as a
+            // measurement of a key nobody measured.
+            let redirect = inputs
+                .iter()
+                .find_map(|input| {
+                    let key = input.split_once(':')?.0.trim();
+                    CHECKOUT_REDIRECTING_INPUTS
+                        .iter()
+                        .find(|listed| **listed == key)
+                })
+                .expect("each arm carries one redirecting input");
+            assert!(
+                why.contains(*redirect),
+                "the failure must name `{redirect}`, the input that moved the tree, \
+                 said: {why}"
+            );
+        }
+    }
+
+    /// Each listed input is reported with its own measurement.
+    ///
+    /// The control for a template, rather than for the predicate: one
+    /// `{input}` hole in one sentence would make the `ref:` numbers read as
+    /// evidence for `repository:` and `github-server-url:` as well, and the
+    /// reader of the failure would have no way to tell. So the three failures
+    /// must differ by more than the key's name.
+    #[test]
+    fn each_redirecting_input_is_reported_with_its_own_evidence() {
+        let mut said: Vec<String> = Vec::new();
+        for input in CHECKOUT_REDIRECTING_INPUTS {
+            let steps = checkout_steps(&ci_yml_with_checkout_inputs(
+                "deny",
+                &[&format!("{input}: whatever")],
+            ))
+            .expect("readable");
+            let why = check_no_checkout_redirects_the_tree(&steps)
+                .expect_err("a listed input redirects the tree");
+            // Strip every key's name, so what is left is only the evidence.
+            let evidence = CHECKOUT_REDIRECTING_INPUTS
+                .iter()
+                .fold(why.clone(), |acc, key| acc.replace(key, ""));
+            assert!(
+                !said.contains(&evidence),
+                "`{input}:` is reported with evidence already used for another input, \
+                 which would be quoting a measurement nobody took for it: {why}"
+            );
+            said.push(evidence);
         }
     }
 
@@ -7667,17 +7768,40 @@ mod checkout_scope_controls {
     /// `with:` at all", which would redden on `persist-credentials: false` --
     /// a tree safer than the one shipped, and the direction that teaches
     /// people to delete a guard rather than fix it.
+    ///
+    /// Every input `actions/checkout@v4` accepts and
+    /// `CHECKOUT_REDIRECTING_INPUTS` does not list appears here, taken from
+    /// actionlint's own rejection message rather than from the three the hole
+    /// was reported with. That is how `github-server-url` turned out to belong
+    /// on the other list, so the enumeration earns its length: an input missing
+    /// from both lists is an input nobody decided about.
     #[test]
     fn inputs_that_do_not_move_the_tree_pass() {
         for inputs in [
+            // Neutral or stricter.
             vec!["fetch-depth: 0"],
-            vec!["persist-credentials: false"],
+            vec!["fetch-tags: true"],
+            vec!["filter: blob:none"],
+            vec!["lfs: true"],
+            vec!["clean: false"],
+            vec!["show-progress: false"],
+            vec!["set-safe-directory: false"],
+            vec!["sparse-checkout-cone-mode: false"],
             vec!["submodules: false"],
-            vec!["sparse-checkout: src"],
-            // Fail-closed, not silent: the tree lands in a subdirectory and the
-            // step's working directory does not, which is the measured
+            vec!["persist-credentials: false"],
+            // The credential and the transport, not the tree: the same
+            // repository at the same ref, fetched differently.
+            vec!["token: ${{ secrets.OTHER }}"],
+            vec!["ssh-key: ${{ secrets.KEY }}"],
+            vec!["ssh-user: git"],
+            vec!["ssh-known-hosts: example.com ssh-ed25519 AAAA"],
+            vec!["ssh-strict: false"],
+            // Fail-closed, not silent: both leave files the gate needs
+            // missing. `path` puts the tree in a subdirectory while the step's
+            // working directory does not move, which is the measured
             // no-manifest case (gate exit 4).
             vec!["path: sub"],
+            vec!["sparse-checkout: src"],
             vec!["fetch-depth: 0", "persist-credentials: false"],
         ] {
             for job in ["deny", "test"] {
