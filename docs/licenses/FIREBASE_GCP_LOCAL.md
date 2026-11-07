@@ -2,7 +2,7 @@
 
 > First-party Fireup code is licensed under **Apache-2.0** (see root `LICENSE`). Brand assets under `brand/` are carved out — see `brand/LICENSE`. Dependency-tree audit: [`CARGO_LICENSE_AUDIT.md`](CARGO_LICENSE_AUDIT.md).
 
-**Status:** current as of Phase 2.1 (SAK-189) — Firestore `Listen` / realtime listeners. Prior: SAK-195 managed-export fidelity regression fixtures; SAK-193 Phase L.1 out-of-band email flows (no mail transport); SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
+**Status:** current as of SAK-192 — PostgreSQL pushdown for equality/range query filters. Prior: Phase 2.1 (SAK-189) Firestore `Listen` / realtime listeners; SAK-195 managed-export fidelity regression fixtures; SAK-193 Phase L.1 out-of-band email flows (no mail transport); SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -411,6 +411,44 @@ fidelity matrix in `docs/local/README.md` rather than left for a user to find.
 drives `onSnapshot()` on a document and on a query, still purely as a **client**
 against our server. No version range changed.
 
+### SAK-192 notes — PostgreSQL pushdown for equality/range query filters
+
+No new dependency, no new proto, no new vendored code. What is new is first-party
+SQL that applies a subset of a Firestore query's predicates in the database
+before the rows reach the in-process engine.
+
+**Sources.** Firestore's published query documentation and the public
+"sort order of Firestore values" reference, plus the `googleapis` protos already
+vendored under `proto/` and already rowed in this ledger. The value-ordering
+source is named in `src/local/query.rs`, which is the one definition of those
+semantics; `src/local/postgres_filter.rs` only restates a *subset* of it in SQL.
+No Google emulator binary was inspected, and no query-planner behaviour was
+reconstructed — there is no planner here to clone. Deciding *what* a query means
+stays in Rust; the SQL only decides what to read.
+
+**Why that boundary matters for this rule.** The translation is deliberately
+sound-but-not-exact: it must return a superset of the matching rows and may
+return extra ones, and `Query::evaluate` still decides every result. A predicate
+the translation cannot express faithfully is not expressed at all — the row falls
+through to the engine. So the pushdown cannot introduce behaviour that was not
+already derived from the public contract, and it cannot quietly diverge from the
+in-memory backend. `tests/local_query_pushdown_tests.rs` enforces that by running
+49 query shapes through both paths and requiring identical answers.
+
+**Gaps stated rather than hidden**, per the "undocumented behaviours deferred"
+item: every predicate that stays in-process (`!=`, `not-in`, the array
+operators, `==` on arrays and maps, bytes ranges, ranges on null/geo/array/map,
+an `OR` with one untranslatable branch, limit/offset/cursors, and the whole
+Datastore query surface) is tabulated with its reason in `docs/local/README.md`
+and in the module docs. The index added to the schema is a GIN index on the
+existing `fields` column; no index is implied to the client, and the "no indexes
+and no index errors" limit in the fidelity matrix is unchanged — production
+Firestore still rejects queries this serves.
+
+**Defect found, not fixed:** `value_json` cannot decode its own encoding of a
+timestamp outside years 0001–9999. Filed as SAK-205 rather than silently
+narrowed or worked around.
+
 ## Existing Fireup notes (pre-local-cloud)
 
 | Dependency | Version / pin | SPDX | Upstream | How we use it | Attribution OK? | Decision |
@@ -423,14 +461,14 @@ against our server. No version range changed.
 The PR checklist in `.cursor/rules/firebase-gcp-compliance.mdc`, answered as each
 phase landed.
 
-| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 | SAK-196 | SAK-190 | Phase L.1 (SAK-193) | SAK-195 | Phase 2.1 (SAK-189) |
-|---|---|---|---|---|---|---|---|---|---|---|
-| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected | Yes — the vendored `write.proto` comments, public `FieldValue` docs, open-source client as a client | Yes — public REST + email-action-link docs, and the open-source client SDK's published link parser; no page markup or asset reproduced | Yes — fixtures generated first-party from the public LevelDB log spec and already-documented `EntityProto` numbering; no Google fixture or export used | Yes — vendored public protos, public `Listen` reference, open-source client source |
-| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added | Yes — none added; first-party SPDX corrected to Apache-2.0; audit linked | Yes — none added | Yes — none added, of any kind | Yes — none added | Yes — none added |
-| For a REST/JSON surface: public sources named | n/a / prior phases | Yes | n/a (protos) | n/a | n/a | n/a — no new surface | n/a (protos) | Yes — the four sources are rowed in the Phase L.1 notes | n/a — binary export format, sources named above | n/a (protos) |
-| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated → `501` (OOB too, until SAK-193) | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a | Yes — `maximum`/`minimum`, nested transform paths, and Datastore property transforms stay refused | Yes — `PHONE_VERIFICATION` → `501`; mail delivery stated as a non-goal rather than faked; the one-hour code lifetime and the landing route labelled as Fireup's own choices | Yes — the `numeric` negative-zero gap is stated in the fixture README and filed as SAK-202, not hidden | Yes — a `read_time` resume is refused per target; no resume tokens and no `ExistenceFilter`, both published in the matrix |
-| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged | Yes — retained in README licence section | Yes — unchanged | Yes — and the landing route's own response carries a "not a Google page" notice | Yes — unchanged | Yes — on `src/local/watch.rs` and the `Listen` row of `src/local/firestore.rs` |
-| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added | Yes — no signing key; the link's `apiKey` placeholder is a sentence, not a key-shaped string | n/a — nothing added | n/a — nothing added |
+| Checklist item | Phase 0–2 | Phase L (SAK-168) | Phase 3 (SAK-166) | Phase 4 (SAK-167) | SAK-174 | SAK-196 | SAK-190 | Phase L.1 (SAK-193) | SAK-195 | Phase 2.1 (SAK-189) | SAK-192 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| No RE of proprietary binaries | Yes | Yes — public REST docs, `FIREBASE_AUTH_EMULATOR_HOST`, open-source clients | Yes — public Datastore protos + docs + `DATASTORE_EMULATOR_HOST` | Yes — docs and a demo only; nothing inspected | Yes — first-party tags, already-vendored public protos | Yes — licence text / audit only; no binaries inspected | Yes — the vendored `write.proto` comments, public `FieldValue` docs, open-source client as a client | Yes — public REST + email-action-link docs, and the open-source client SDK's published link parser; no page markup or asset reproduced | Yes — fixtures generated first-party from the public LevelDB log spec and already-documented `EntityProto` numbering; no Google fixture or export used | Yes — vendored public protos, public `Listen` reference, open-source client source | Yes — the SQL translation comes from the public "sort order of Firestore values" and query documentation plus the already-vendored public protos; nothing inspected, and no query planner behaviour reconstructed |
+| New deps/protos logged in this ledger | Yes | Yes (`base64`, `sha2`; no new protos) | Yes (`datastore.proto` + closure; `@google-cloud/datastore` test-only) | Yes — none added; the two npm client rows re-scoped to cover `demo/` | Yes — none added | Yes — none added; first-party SPDX corrected to Apache-2.0; audit linked | Yes — none added | Yes — none added, of any kind | Yes — none added | Yes — none added | Yes — none added |
+| For a REST/JSON surface: public sources named | n/a / prior phases | Yes | n/a (protos) | n/a | n/a | n/a — no new surface | n/a (protos) | Yes — the four sources are rowed in the Phase L.1 notes | n/a — binary export format, sources named above | n/a (protos) | n/a (gRPC/protos); the SQL is first-party and the value-ordering source is named in `src/local/query.rs` |
+| Undocumented behaviours deferred / listed unsupported | Yes | Yes — phone/MFA/`v2`/federated → `501` (OOB too, until SAK-193) | Yes — GQL, aggregations, namespaces, cursors, transforms → `UNIMPLEMENTED` | Yes — the seed value-type gap is now stated accurately and demonstrated, not hidden | Yes — the gap is closed; namespaces still skipped, an unrestorable payload still refused | n/a | Yes — `maximum`/`minimum`, nested transform paths, and Datastore property transforms stay refused | Yes — `PHONE_VERIFICATION` → `501`; mail delivery stated as a non-goal rather than faked; the one-hour code lifetime and the landing route labelled as Fireup's own choices | Yes — the `numeric` negative-zero gap is stated in the fixture README and filed as SAK-202, not hidden | Yes — a `read_time` resume is refused per target; no resume tokens and no `ExistenceFilter`, both published in the matrix | Yes — every predicate the translation will not push is tabulated **with its reason** in `docs/local/README.md` and `src/local/postgres_filter.rs`, and falls back to the in-process engine rather than guessing. The `value_json` timestamp round-trip defect found on the way is filed as SAK-205, not hidden |
+| Independent-implementation blurb preserved where relevant | Yes | Yes | Yes | Yes — and added to the top-level `README.md`, which previously had none | Yes — unchanged | Yes — retained in README licence section | Yes — unchanged | Yes — and the landing route's own response carries a "not a Google page" notice | Yes — unchanged | Yes — on `src/local/watch.rs` and the `Listen` row of `src/local/firestore.rs` | Yes — unchanged |
+| No production key material | n/a | Yes — unsigned tokens; no signing keys shipped | n/a | n/a — nothing added | n/a — nothing added | n/a — nothing added | n/a — nothing added | Yes — no signing key; the link's `apiKey` placeholder is a sentence, not a key-shaped string | n/a — nothing added | n/a — nothing added | n/a — nothing added |
 
 ## How to add a row
 

@@ -8,18 +8,27 @@
 //!
 //! ## Why the engine is here and not in the store
 //!
-//! Filtering, ordering, and limiting run in the server process against
-//! documents fetched by [`Store::scan_collection`](crate::local::store::Store::scan_collection),
-//! rather than being pushed into SQL per backend. That is a deliberate
-//! trade-off:
+//! Filtering, ordering, and limiting are *decided* in the server process
+//! against documents fetched from the store, rather than being reimplemented
+//! as SQL per backend. That is a deliberate trade-off:
 //!
 //! - **One set of semantics.** Firestore's value ordering, its treatment of
 //!   missing fields, and `NaN` handling are subtle. Expressed once in Rust,
 //!   the in-memory and PostgreSQL stores cannot disagree about what a query
 //!   means; expressed as SQL per backend, they would.
-//! - **Cost.** A query reads the whole collection. For the local-development
-//!   data volumes `fireup local` exists for that is fine, and it is recorded
-//!   as a known limit in `docs/local/README.md` rather than hidden.
+//! - **Cost.** Deciding in-process means reading candidate documents out of
+//!   the store.
+//!
+//! The second bullet is what [`Query::prefilter`] exists to reduce. A backend
+//! may use the compiled filter to narrow *which* documents it hands back, but
+//! it never gets to decide the result: a pre-filter must return a **superset**
+//! of the matching documents, and [`Query::evaluate`] still has the only vote
+//! on what matches. That is what lets
+//! [`PostgresStore`](crate::local::postgres_store::PostgresStore) push
+//! equality and range predicates into SQL — where an index can serve them —
+//! without the two backends being able to disagree about a query's meaning.
+//! [`MemoryStore`](crate::local::store::MemoryStore) ignores the pre-filter
+//! entirely, so CI exercises exactly the semantics in this file.
 //!
 //! Semantics come from the public Firestore query documentation and the
 //! `googleapis` protos vendored under `proto/`. No Firebase emulator code or
@@ -142,6 +151,42 @@ impl FieldPath {
         Ok(Self { segments })
     }
 
+    /// A path addressing one top-level field whose name is `name` **verbatim**.
+    ///
+    /// Not [`FieldPath::parse`]: that reads Firestore's path syntax, in which a
+    /// dot separates segments and an unquoted segment must be an identifier. A
+    /// Datastore property name is neither — it is one name, and `my-prop` or
+    /// `名前` is an ordinary property that `parse` would reject or, worse,
+    /// split. Callers holding a single already-decoded name want this.
+    ///
+    /// A name containing a dot is refused rather than quoted into a path,
+    /// because the two readings of `a.b` select different values and the
+    /// Datastore surface refuses that property name for the same reason.
+    pub fn literal(name: &str) -> Result<Self, Status> {
+        if name.is_empty() {
+            return Err(Status::invalid_argument("a field name must not be empty"));
+        }
+        if name.contains('.') {
+            return Err(Status::invalid_argument(format!(
+                "the field name {name:?} contains a dot, which addresses a nested value"
+            )));
+        }
+        Ok(Self {
+            segments: vec![name.to_string()],
+        })
+    }
+
+    /// The path's segments, outermost first. Always at least one.
+    ///
+    /// Public so a store backend can translate the path into its own addressing
+    /// — the PostgreSQL store turns them into a JSONB path. Deliberately not a
+    /// re-joined string: a backend that reassembled `a.b` and looked for a
+    /// field of that name would silently find nothing, which on a query means
+    /// dropping documents that should have matched.
+    pub fn segments(&self) -> &[String] {
+        &self.segments
+    }
+
     /// The value this path addresses in `fields`, if any.
     ///
     /// Only maps are walked into. Firestore field paths do not index into
@@ -199,8 +244,12 @@ fn graft(fields: &mut HashMap<String, Value>, segments: &[String], value: Value)
 }
 
 /// A field path a query can address.
+///
+/// Public so a store backend can inspect a compiled filter for pushdown; the
+/// variants carry no behaviour, so a backend can read the shape of a query but
+/// cannot redefine what it means.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Path {
+pub enum Path {
     /// `__name__`: the document's resource name.
     Name,
     /// A field of the document, possibly nested.
@@ -239,7 +288,7 @@ impl Path {
 
 /// A comparison a query can make against one field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Comparison {
+pub enum Comparison {
     Equal,
     NotEqual,
     LessThan,
@@ -282,7 +331,7 @@ impl Comparison {
 
 /// A presence/`NaN` test, which takes no value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Presence {
+pub enum Presence {
     Null,
     NotNull,
     Nan,
@@ -305,7 +354,7 @@ impl Presence {
 
 /// A compiled filter tree.
 #[derive(Debug, Clone)]
-enum Predicate {
+pub enum Predicate {
     /// Every child must match.
     All(Vec<Predicate>),
     /// At least one child must match.
@@ -382,6 +431,16 @@ impl Predicate {
     /// queries are index lookups, and a document with no value for a field has
     /// no entry in that field's index. Returning it would be the one failure
     /// mode that looks like working code.
+    ///
+    /// `pub(crate)` so the Datastore filter translation can be checked against
+    /// the evaluator it has to stay a superset of — see the soundness matrix in
+    /// [`datastore_filter`](crate::local::datastore_filter). Deliberately not
+    /// what the Datastore data plane *uses* to answer a query: that stays its
+    /// own evaluator, so the translation has an independent reference.
+    pub(crate) fn admits(&self, document: &Document) -> bool {
+        self.matches(document)
+    }
+
     fn matches(&self, document: &Document) -> bool {
         match self {
             Predicate::All(children) => children.iter().all(|child| child.matches(document)),
@@ -429,34 +488,58 @@ fn compare_matches(op: Comparison, actual: &Value, expected: &Value) -> bool {
     }
 }
 
-/// Whether `actual` compares to `expected` in one of `wanted` orderings.
+/// Order two values the way a **filter** does, or `None` when a filter cannot
+/// compare them at all.
 ///
-/// An inequality against a value of a different type never matches. Firestore
-/// keeps one index per (field, type), so `where('age', '>', 5)` does not return
-/// a document whose `age` is the string `"old"`, even though strings sort after
-/// numbers in the global value order.
+/// Two values are incomparable in exactly two cases, and both mean "no match"
+/// for every comparison operator rather than some fallback ordering:
+///
+/// - **Different types.** Firestore keeps one index per (field, type), so
+///   `where('age', '>', 5)` does not return a document whose `age` is the
+///   string `"old"`, even though strings sort after numbers in the global value
+///   order. Datastore's published value ordering says the same.
+/// - **`NaN`.** It is not ordered against anything, including itself; `IS_NAN`
+///   is the only way to select it.
+///
+/// `pub(crate)` because the Datastore surface compares *its* property values
+/// through this, having converted them to the Firestore values they are stored
+/// as. The two surfaces keep their own operator tables and their own field
+/// lookup — which is what leaves the pushdown's translation something to get
+/// wrong, and therefore something a differential test can catch — but they do
+/// not get their own answer to "is this string less than that integer".
+pub(crate) fn comparable(left: &Value, right: &Value) -> Option<Ordering> {
+    if type_rank(left) != type_rank(right) {
+        return None;
+    }
+    if is_nan(left) || is_nan(right) {
+        return None;
+    }
+    Some(compare_values(left, right))
+}
+
+/// The **total** order over values, for sorting rather than filtering.
+///
+/// Distinct from [`comparable`] on purpose: a sort comparator has to answer for
+/// every pair, so this orders across types by their rank and treats `NaN` as
+/// equal to itself. `pub(crate)` for the Datastore surface's `order`, which
+/// sorts entities and therefore needs the total answer, not the filter's.
+pub(crate) fn total_order(left: &Value, right: &Value) -> Ordering {
+    compare_values(left, right)
+}
+
+/// Whether `actual` compares to `expected` in one of `wanted` orderings.
 fn ordered(actual: &Value, expected: &Value, wanted: &[Ordering]) -> bool {
-    if type_rank(actual) != type_rank(expected) {
-        return false;
-    }
-    // `NaN` is not ordered against anything, including itself: `IS_NAN` is the
-    // only way to select it.
-    if is_nan(actual) || is_nan(expected) {
-        return false;
-    }
-    wanted.contains(&compare_values(actual, expected))
+    comparable(actual, expected).is_some_and(|ordering| wanted.contains(&ordering))
 }
 
 /// Equality as a *filter* sees it.
 ///
 /// Distinct from `compare_values(..) == Equal` in one place: ordering has to be
 /// a total order, so it treats `NaN` as equal to itself, while an equality
-/// filter on `NaN` must never match.
+/// filter on `NaN` must never match. That is the same distinction
+/// [`comparable`] draws, so it is drawn once, here.
 fn values_equal(left: &Value, right: &Value) -> bool {
-    if is_nan(left) || is_nan(right) {
-        return false;
-    }
-    values_equivalent(left, right)
+    comparable(left, right) == Some(Ordering::Equal)
 }
 
 /// Equality as the **array field transforms** see it.
@@ -699,6 +782,31 @@ pub struct Results {
     pub skipped: usize,
 }
 
+/// What a store backend is allowed to use to narrow a scan.
+///
+/// A backend that acts on this must return a **superset** of the documents the
+/// query matches: letting a non-matching document through costs one wasted
+/// in-process comparison, while dropping a matching one is a wrong answer.
+/// Anything a backend cannot translate exactly it must therefore translate to
+/// "keep the row" rather than guess.
+///
+/// Deliberately not carrying `offset`, `limit`, or the cursors: all three are
+/// *positional*, resolved against the ordered result [`Query::evaluate`]
+/// produces after the pre-filter has already run. A backend has no way to know
+/// which rows they would keep.
+#[derive(Debug, Clone, Copy)]
+pub struct Prefilter<'a> {
+    /// The query's `where` clause, or `None` for an unfiltered query.
+    pub filter: Option<&'a Predicate>,
+    /// Field paths the query orders by, which a matching document must carry.
+    ///
+    /// Not part of `filter`, but just as restrictive: Firestore cannot order a
+    /// document that has no value for a sort field, so such a document is
+    /// absent from the result. `__name__` is excluded because every document
+    /// has one.
+    pub required_fields: &'a [FieldPath],
+}
+
 /// A compiled, runnable query.
 #[derive(Debug, Clone)]
 pub struct Query {
@@ -715,6 +823,10 @@ pub struct Query {
     start: Option<Bound>,
     /// The `end_at` cursor, if the query is bounded above.
     end: Option<Bound>,
+    /// The field paths of `order`, which [`Query::admits`] requires a document
+    /// to carry. Precomputed so [`Query::prefilter`] can hand them out by
+    /// reference.
+    required_fields: Vec<FieldPath>,
     offset: usize,
     limit: Option<usize>,
     /// `select` projection: the field paths to return, if restricted.
@@ -821,6 +933,14 @@ impl Query {
             }
         };
 
+        let required_fields = order
+            .iter()
+            .filter_map(|key| match &key.path {
+                Path::Field(field) => Some(field.clone()),
+                Path::Name => None,
+            })
+            .collect();
+
         Ok(Self {
             collection_id: selector.collection_id.clone(),
             all_descendants: selector.all_descendants,
@@ -828,6 +948,7 @@ impl Query {
             order,
             start,
             end,
+            required_fields,
             offset,
             limit,
             projection,
@@ -844,6 +965,15 @@ impl Query {
     /// parent, rather than only the one directly under it.
     pub fn all_descendants(&self) -> bool {
         self.all_descendants
+    }
+
+    /// What a store backend may use to narrow its scan. See [`Prefilter`] for
+    /// the contract a backend has to honour.
+    pub fn prefilter(&self) -> Prefilter<'_> {
+        Prefilter {
+            filter: self.filter.as_ref(),
+            required_fields: &self.required_fields,
+        }
     }
 
     /// Filter, order, page, and project `documents`.

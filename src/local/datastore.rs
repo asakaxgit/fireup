@@ -17,6 +17,13 @@
 //! | `ReserveIds`         | served (acknowledged; ids are not reused) |
 //! | `RunAggregationQuery`| `UNIMPLEMENTED` |
 //!
+//! `RunQuery`'s property filters are translated into the same compiled
+//! [`Predicate`](crate::local::query::Predicate) the Firestore surface
+//! compiles, so a kind query narrows in the store rather than reading the whole
+//! kind — and so that one comparator decides what a value comparison means on
+//! both surfaces. See [`datastore_filter`](crate::local::datastore_filter) for
+//! what translates and why that unification was load-bearing rather than tidy.
+//!
 //! This is an independent implementation of a published API contract. No
 //! Firebase Emulator Suite code or behaviour was reverse-engineered; see
 //! `.cursor/rules/firebase-gcp-compliance.mdc`.
@@ -28,11 +35,14 @@ use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
+use crate::local::datastore_filter;
 use crate::local::entity_map::{
     ancestor_collection, apply_property_mask, check_project_database, compile_property_transforms,
-    complete_key, document_to_entity, documents_root, entity_to_document, key_is_incomplete,
-    key_to_document_name, normalize_database_id, transform_results_to_properties,
+    complete_key, document_to_entity, documents_root, ds_value_to_fs, entity_to_document,
+    key_is_incomplete, key_to_document_name, normalize_database_id,
+    transform_results_to_properties,
 };
+use crate::local::query::{self, Prefilter};
 use crate::local::store::{
     Mutation as StoreMutation, PendingWrite, Precondition, SharedStore, WriteOutcome,
 };
@@ -216,13 +226,39 @@ impl DatastoreApi {
             (None, None) => None,
         };
 
+        // Compiled before the read, because it is what decides how wide the
+        // read is. See `datastore_filter` for why the translated predicate is
+        // then also what filters in process when the translation is exact.
+        let property_filter = strip_ancestor_filter(query.filter.as_ref())?;
+        let translated = datastore_filter::translate(
+            property_filter.as_ref(),
+            &self.project_id,
+            &self.database_id,
+        );
+        let prefilter = Prefilter {
+            filter: translated.as_ref(),
+            // Empty on purpose, and not because Datastore queries have no
+            // `order`. Firestore excludes a document that has no value for a
+            // sort field, which is what lets its pre-filter demand the field be
+            // present; `compare_entities` instead *orders* an entity missing
+            // the property first. Copying the Firestore spelling here would
+            // drop those entities from the answer.
+            required_fields: &[],
+        };
+
         let mut candidates = match (kind, ancestor.as_ref()) {
             (Some(kind), Some(ancestor)) => {
                 let (parent, collection) =
                     ancestor_collection(ancestor, kind, &self.project_id, &self.database_id)?;
-                self.store.scan_collection(&parent, &collection).await?
+                self.store
+                    .scan_collection_filtered(&parent, &collection, prefilter)
+                    .await?
             }
-            (Some(kind), None) => self.store.scan_kind(&self.root(), kind).await?,
+            (Some(kind), None) => {
+                self.store
+                    .scan_kind_filtered(&self.root(), kind, prefilter)
+                    .await?
+            }
             (None, Some(_ancestor)) => {
                 // No kind: every direct child collection under the ancestor.
                 // Phase 3 refuses the unbounded form rather than scan the world.
@@ -239,11 +275,17 @@ impl DatastoreApi {
             }
         };
 
-        let property_filter = strip_ancestor_filter(query.filter.as_ref())?;
+        // The pre-filter narrowed the read; it does not decide the answer. The
+        // Datastore evaluator still has the only vote, exactly as before this
+        // translation existed — which is what leaves the translation an
+        // independent reference to be wrong against, and so something
+        // `tests/local_datastore_pushdown_tests.rs` can catch.
         if let Some(filter) = property_filter.as_ref() {
             candidates.retain(|document| {
                 match document_to_entity(document, &self.project_id, &self.database_id) {
-                    Ok(entity) => entity_matches(&entity, filter),
+                    Ok(entity) => {
+                        entity_matches(&entity, filter, &self.project_id, &self.database_id)
+                    }
                     Err(_) => false,
                 }
             });
@@ -254,7 +296,13 @@ impl DatastoreApi {
                 let left = document_to_entity(left, &self.project_id, &self.database_id).ok();
                 let right = document_to_entity(right, &self.project_id, &self.database_id).ok();
                 match (left, right) {
-                    (Some(left), Some(right)) => compare_entities(&left, &right, &query.order),
+                    (Some(left), Some(right)) => compare_entities(
+                        &left,
+                        &right,
+                        &query.order,
+                        &self.project_id,
+                        &self.database_id,
+                    ),
                     _ => Ordering::Equal,
                 }
             });
@@ -761,7 +809,12 @@ fn strip_ancestor_filter(filter: Option<&Filter>) -> Result<Option<Filter>, Stat
     }
 }
 
-fn entity_matches(entity: &Entity, filter: &Filter) -> bool {
+pub(crate) fn entity_matches(
+    entity: &Entity,
+    filter: &Filter,
+    project_id: &str,
+    database_id: &str,
+) -> bool {
     match filter.filter_type.as_ref() {
         Some(FilterType::CompositeFilter(composite)) => {
             // Only AND is generated by the public proto's Operator for
@@ -772,17 +825,27 @@ fn entity_matches(entity: &Entity, filter: &Filter) -> bool {
             );
             match op {
                 Ok(crate::protos::google::datastore::v1::composite_filter::Operator::And) => {
-                    composite.filters.iter().all(|child| entity_matches(entity, child))
+                    composite
+                        .filters
+                        .iter()
+                        .all(|child| entity_matches(entity, child, project_id, database_id))
                 }
                 _ => false,
             }
         }
-        Some(FilterType::PropertyFilter(property)) => property_matches(entity, property),
+        Some(FilterType::PropertyFilter(property)) => {
+            property_matches(entity, property, project_id, database_id)
+        }
         None => true,
     }
 }
 
-fn property_matches(entity: &Entity, filter: &PropertyFilter) -> bool {
+pub(crate) fn property_matches(
+    entity: &Entity,
+    filter: &PropertyFilter,
+    project_id: &str,
+    database_id: &str,
+) -> bool {
     let Some(reference) = filter.property.as_ref() else {
         return false;
     };
@@ -799,7 +862,29 @@ fn property_matches(entity: &Entity, filter: &PropertyFilter) -> bool {
         Some(value) => value,
         None => return false,
     };
-    let ord = compare_ds_values(actual, expected);
+
+    // Both sides cross into the Firestore values the store actually holds, for
+    // the same reason `compile_property_transforms` converts its operands: a
+    // `key_value` is stored as a reference string, so comparing the
+    // unconverted key would never match. A conversion that fails — a key
+    // outside this database — is no match rather than an error, because a
+    // filter is a question about the entity, not a write.
+    let (Ok(actual), Ok(expected)) = (
+        ds_value_to_fs(actual, project_id, database_id),
+        ds_value_to_fs(expected, project_id, database_id),
+    ) else {
+        return false;
+    };
+
+    // `None` is "a filter cannot compare these two at all" — different types,
+    // or a `NaN` on either side — and it is no match for *every* operator,
+    // including equality. The comparator this replaced instead returned
+    // `Ordering::Equal` for every type pair it did not name, so `priority = 3`
+    // matched an entity whose `priority` was a string, a blob, or a list, and
+    // so did `<=` and `>=`. Real Datastore returns none of those.
+    let Some(ord) = query::comparable(&actual, &expected) else {
+        return false;
+    };
     match PropertyOp::try_from(filter.op) {
         Ok(PropertyOp::Equal) => ord == Ordering::Equal,
         Ok(PropertyOp::LessThan) => ord == Ordering::Less,
@@ -814,7 +899,13 @@ fn property_matches(entity: &Entity, filter: &PropertyFilter) -> bool {
     }
 }
 
-fn compare_entities(left: &Entity, right: &Entity, order: &[PropertyOrder]) -> Ordering {
+fn compare_entities(
+    left: &Entity,
+    right: &Entity,
+    order: &[PropertyOrder],
+    project_id: &str,
+    database_id: &str,
+) -> Ordering {
     for term in order {
         let Some(PropertyReference { name }) = term.property.as_ref() else {
             continue;
@@ -825,7 +916,9 @@ fn compare_entities(left: &Entity, right: &Entity, order: &[PropertyOrder]) -> O
             (None, None) => Ordering::Equal,
             (None, Some(_)) => Ordering::Less,
             (Some(_), None) => Ordering::Greater,
-            (Some(left), Some(right)) => compare_ds_values(left, right),
+            (Some(left), Some(right)) => {
+                compare_ds_values(left, right, project_id, database_id)
+            }
         };
         if ord != Ordering::Equal {
             return if term.direction == Direction::Descending as i32 {
@@ -838,24 +931,28 @@ fn compare_entities(left: &Entity, right: &Entity, order: &[PropertyOrder]) -> O
     Ordering::Equal
 }
 
-fn compare_ds_values(left: &DsValue, right: &DsValue) -> Ordering {
-    match (left.value_type.as_ref(), right.value_type.as_ref()) {
-        (Some(DsValueType::NullValue(_)), Some(DsValueType::NullValue(_))) => Ordering::Equal,
-        (Some(DsValueType::BooleanValue(a)), Some(DsValueType::BooleanValue(b))) => a.cmp(b),
-        (Some(DsValueType::IntegerValue(a)), Some(DsValueType::IntegerValue(b))) => a.cmp(b),
-        (Some(DsValueType::IntegerValue(a)), Some(DsValueType::DoubleValue(b))) => {
-            (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
-        }
-        (Some(DsValueType::DoubleValue(a)), Some(DsValueType::IntegerValue(b))) => {
-            a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
-        }
-        (Some(DsValueType::DoubleValue(a)), Some(DsValueType::DoubleValue(b))) => {
-            a.partial_cmp(b).unwrap_or(Ordering::Equal)
-        }
-        (Some(DsValueType::StringValue(a)), Some(DsValueType::StringValue(b))) => a.cmp(b),
-        (Some(DsValueType::TimestampValue(a)), Some(DsValueType::TimestampValue(b))) => {
-            (a.seconds, a.nanos).cmp(&(b.seconds, b.nanos))
-        }
+/// Order two Datastore property values for a *sort*.
+///
+/// Delegates to the store's own total value order, via the conversion the
+/// properties are stored under. The hand-rolled version this replaced named
+/// eight type pairs and returned `Ordering::Equal` for every other — so two
+/// entities whose sort property had different types compared equal and came
+/// back in whatever order the scan happened to produce.
+///
+/// A value that cannot convert compares equal to everything, which is what the
+/// old fall-through did for it too; there is no better answer available inside
+/// a sort comparator, and nothing that reaches here has failed to convert.
+fn compare_ds_values(
+    left: &DsValue,
+    right: &DsValue,
+    project_id: &str,
+    database_id: &str,
+) -> Ordering {
+    match (
+        ds_value_to_fs(left, project_id, database_id),
+        ds_value_to_fs(right, project_id, database_id),
+    ) {
+        (Ok(left), Ok(right)) => query::total_order(&left, &right),
         _ => Ordering::Equal,
     }
 }
