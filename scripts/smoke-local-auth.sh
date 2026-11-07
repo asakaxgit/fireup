@@ -100,10 +100,16 @@ if ! node -e "
 fi
 
 echo "==> running the Auth SDK smoke test"
-if FIREBASE_AUTH_EMULATOR_HOST="127.0.0.1:$port" node "$smoke_dir/auth-smoke.mjs"; then
+# Bounded for the reason given in `smoke-local-firestore.sh`: a client that hangs
+# should be a red test, not a stalled CI job.
+if FIREBASE_AUTH_EMULATOR_HOST="127.0.0.1:$port" timeout 120 node "$smoke_dir/auth-smoke.mjs"; then
   status=0
 else
   status=$?
+  if [[ "$status" -eq 124 ]]; then
+    echo "the Auth SDK smoke test did not finish within 120s — the client is \
+hung, not slow" >&2
+  fi
   echo "--- fireup local log ---" >&2
   cat "$log" >&2
 fi

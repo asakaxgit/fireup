@@ -67,12 +67,18 @@ for _ in $(seq 1 50); do
 done
 
 echo "==> running the Datastore SDK smoke test"
+# Bounded for the reason given in `smoke-local-firestore.sh`: a client that hangs
+# should be a red test, not a stalled CI job.
 if DATASTORE_EMULATOR_HOST="127.0.0.1:$port" \
    FIREUP_SMOKE_PROJECT_ID=fireup-local \
-   node "$smoke_dir/smoke.mjs"; then
+   timeout 120 node "$smoke_dir/smoke.mjs"; then
   status=0
 else
   status=$?
+  if [[ "$status" -eq 124 ]]; then
+    echo "the Datastore SDK smoke test did not finish within 120s — the client \
+is hung, not slow" >&2
+  fi
   echo "--- fireup local log ---" >&2
   cat "$log" >&2
 fi

@@ -766,9 +766,30 @@ async fn two_targets_on_one_stream_are_reported_independently() {
 }
 
 #[tokio::test]
-async fn a_half_closed_request_stream_keeps_its_targets_live() {
-    // A client that adds every target up front and then stops writing must
-    // still receive changes; ending the stream on half-close would break it.
+async fn a_half_closed_request_stream_finishes_the_listen_stream() {
+    // This asserted the opposite until SAK-220: that a half-closed stream kept
+    // its targets live, on the reading that half-close means "done adding
+    // targets" rather than "done with this stream". That is legal bidi gRPC and
+    // it is not what the official SDKs do. `Watch.shutdown()` in
+    // `@google-cloud/firestore` — the body of the function `onSnapshot()`
+    // returns as `unsubscribe` — is exactly:
+    //
+    //     this.currentStream?.end();
+    //     this.currentStream = null;
+    //
+    // It half-closes, drops the reference, and never reads the stream again.
+    // `resetStream()` and the watch idle timeout do the same before opening a
+    // replacement. So a server that keeps the stream open after a half-close is
+    // holding something no client will ever read:
+    //
+    //   * `terminate()` closes the HTTP/2 session *gracefully*, which waits for
+    //     open streams — so a Node process that ever called `onSnapshot()`
+    //     never exits. `scripts/smoke-local-firestore.sh` hung exactly there.
+    //   * every SDK idle cycle leaves another live session behind on the server.
+    //
+    // Neither showed up under tonic 0.11: hyper 0.14 dropped the whole
+    // connection when the client sent GOAWAY, whatever the stream was doing.
+    // hyper 1.x honours graceful shutdown, so the stream has to end itself.
     let (server, mut client) = start().await;
     let name = format!("{ROOT}/users/alice");
 
@@ -782,23 +803,21 @@ async fn a_half_closed_request_stream_keeps_its_targets_live() {
     } = listener;
     drop(requests); // half-close the request side
 
-    write(&mut client, &name, fields([("city", string_value("SF"))])).await;
+    // The stream ends on its own, without the client reading anything more and
+    // without the server being shut down. `None` rather than an error: this is
+    // an ordinary completion, so the SDK's `onError` must not fire.
+    let ended = tokio::time::timeout(RESPONSE_TIMEOUT, responses.message())
+        .await
+        .expect("a half-closed Listen stream must finish, not hang")
+        .expect("ending the stream is not an error");
+    assert!(
+        ended.is_none(),
+        "expected the stream to complete; got another response: {ended:?}"
+    );
 
-    let mut seen = Vec::new();
-    loop {
-        let response = tokio::time::timeout(RESPONSE_TIMEOUT, responses.message())
-            .await
-            .expect("the listener still fires after a half-close")
-            .expect("healthy stream")
-            .expect("open stream")
-            .response_type
-            .expect("a response_type");
-        if is_snapshot_marker(&response) {
-            break;
-        }
-        seen.push(response);
-    }
-    assert_eq!(changed(&seen).len(), 1, "{seen:?}");
+    // And a write to a document the dead stream was watching is still served
+    // normally — ending one Listen session must not disturb the store.
+    write(&mut client, &name, fields([("city", string_value("SF"))])).await;
 
     server.shutdown().await.expect("clean shutdown");
 }

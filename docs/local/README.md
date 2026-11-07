@@ -467,6 +467,18 @@ What to know before trusting a listener here:
 - **Shutting the server down ends its listeners.** A `Listen` stream is
   open-ended, and gRPC graceful shutdown waits for in-flight requests, so the
   server closes its listeners explicitly rather than hanging on Ctrl-C.
+- **A half-closed request stream finishes the `Listen` stream.** When a client
+  stops writing requests, this server treats that as "done with this stream" and
+  completes it — not as "done adding targets, keep streaming". That is the
+  narrower of the two legal readings of bidi gRPC, and it is the one the official
+  SDKs rely on: `unsubscribe()` in `@google-cloud/firestore` half-closes, drops
+  its reference, and never reads the stream again, as do its stream reset and
+  watch idle-timeout paths. A server that kept those streams open would leave one
+  live session behind per SDK idle cycle, and — because `terminate()` closes the
+  HTTP/2 session gracefully, waiting on open streams — a Node process that ever
+  called `onSnapshot()` would never exit. Corrected in
+  [SAK-220](/SAK/issues/SAK-220); until then hyper 0.14 dropped the connection on
+  the client's GOAWAY and hid both.
 
 ### Transactions
 

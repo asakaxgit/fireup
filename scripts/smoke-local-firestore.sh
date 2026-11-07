@@ -77,10 +77,20 @@ for _ in $(seq 1 50); do
 done
 
 echo "==> running the SDK smoke test"
-if FIRESTORE_EMULATOR_HOST="127.0.0.1:$port" node "$smoke_dir/smoke.mjs"; then
+# Bounded, because "the SDK hangs" is a real failure mode and an unbounded run
+# reports it as a stalled CI job rather than as a red test. SAK-220 hit exactly
+# that: every check passed and then the process would not exit, because the
+# server kept a half-closed `Listen` stream open and `terminate()` waits on open
+# streams. The whole suite takes seconds; two minutes is slack for a cold
+# machine, not a guess at the runtime.
+if FIRESTORE_EMULATOR_HOST="127.0.0.1:$port" timeout 120 node "$smoke_dir/smoke.mjs"; then
   status=0
 else
   status=$?
+  if [[ "$status" -eq 124 ]]; then
+    echo "the SDK smoke test did not finish within 120s — the client is hung, \
+not slow; check whether a stream is left open" >&2
+  fi
   echo "--- fireup local log ---" >&2
   cat "$log" >&2
 fi

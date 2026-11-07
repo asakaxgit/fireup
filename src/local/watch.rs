@@ -911,15 +911,31 @@ pub fn listen(
         // `session` while the other branches' handlers mutate it. `closed()`
         // resolves on the *receiver* going away, which a clone does not affect.
         let hangup = session.out.clone();
-        // Once the client half-closes it can add no more targets, but the ones
-        // it already added stay live — so the loop keeps running with that
-        // branch disabled rather than ending the stream.
-        let mut half_closed = false;
 
         loop {
             tokio::select! {
-                request = request_rx.recv(), if !half_closed => match request {
-                    None => half_closed = true,
+                request = request_rx.recv() => match request {
+                    // The client half-closed, which the official SDKs use to
+                    // mean "I am finished with this stream" — not "I have
+                    // finished adding targets". `Watch.shutdown()` in
+                    // `@google-cloud/firestore` is exactly
+                    // `this.currentStream?.end(); this.currentStream = null`,
+                    // and `resetStream()` plus the watch idle timeout end the
+                    // stream the same way before opening a fresh one. In all
+                    // three the SDK drops its reference and never reads the
+                    // stream again, so finishing it here is what the client is
+                    // waiting for.
+                    //
+                    // Keeping the targets live instead — which is legal bidi
+                    // gRPC, and what this did until SAK-220 — wedges a real
+                    // client: `terminate()` closes the HTTP/2 session
+                    // gracefully, which waits for open streams, so a Node
+                    // process that ever called `onSnapshot()` would never exit.
+                    // It also leaked one live server-side session per SDK idle
+                    // cycle. Neither was visible under tonic 0.11, because
+                    // hyper 0.14 dropped the whole connection on the client's
+                    // GOAWAY regardless of what we did with the stream.
+                    None => break,
                     Some(Err(status)) => {
                         let _ = session.out.send(Err(status)).await;
                         break;

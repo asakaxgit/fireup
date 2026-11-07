@@ -2,7 +2,7 @@
 
 > First-party Fireup code is licensed under **Apache-2.0** (see root `LICENSE`). Brand assets under `brand/` are carved out — see `brand/LICENSE`. Dependency-tree audit: [`CARGO_LICENSE_AUDIT.md`](CARGO_LICENSE_AUDIT.md).
 
-**Status:** current as of SAK-217 — the comparison's emulator column replaced with **measured** conformance results (the first entry covering the *running* of third-party software). Prior: SAK-218 — `deny.toml` turns the permissive-only dependency policy into a CI gate instead of a periodic manual audit, and records the one accepted vulnerability (`RUSTSEC-2026-0258` in `h2`, via the pinned `tonic` 0.11); see [`CARGO_LICENSE_AUDIT.md#how-this-is-enforced`](CARGO_LICENSE_AUDIT.md#how-this-is-enforced); SAK-216 — `Cargo.lock` committed and `--locked` restored in CI, which turns every "see `Cargo.toml`" pin in this ledger from a semver range into one exact version per commit; SAK-206 README badges, coverage, and the comparison document (the first entry covering claims about third-party software); SAK-203 Datastore `property_mask` on a mutation (masked entity writes, paired with the SAK-198 property transforms); Phase 2.1 (SAK-189) Firestore `Listen` / realtime listeners; SAK-195 managed-export fidelity regression fixtures; SAK-193 Phase L.1 out-of-band email flows (no mail transport); SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
+**Status:** current as of SAK-220 — the gRPC stack moved from `tonic` 0.11 / `prost` 0.12 to `tonic` 0.13 / `prost` 0.13, which replaces the old HTTP/2 transport chain (`axum` 0.6 → `hyper` 0.14 → `h2` 0.3.27) with `axum` 0.8 → `hyper` 1.12 → `h2` 0.4.20 and so clears `RUSTSEC-2026-0258`; the accepted-vulnerability entry was deleted from `deny.toml` in the same change, leaving `[advisories] ignore` empty. These are version bumps inside the existing transitive gRPC transport, not new third-party components, and every replacement crate is MIT and/or Apache-2.0 — machine-checked by `cargo deny --locked check ... licenses` (`licenses ok`) against the permissive-only allow list, not asserted by hand. No Google/Firebase proto or generated stub changed; the same two service protos are compiled, by a newer `tonic-build`. Prior: SAK-217 — the comparison's emulator column replaced with **measured** conformance results (the first entry covering the *running* of third-party software). Prior: SAK-218 — `deny.toml` turns the permissive-only dependency policy into a CI gate instead of a periodic manual audit, and records the one accepted vulnerability (`RUSTSEC-2026-0258` in `h2`, via the pinned `tonic` 0.11); see [`CARGO_LICENSE_AUDIT.md#how-this-is-enforced`](CARGO_LICENSE_AUDIT.md#how-this-is-enforced); SAK-216 — `Cargo.lock` committed and `--locked` restored in CI, which turns every "see `Cargo.toml`" pin in this ledger from a semver range into one exact version per commit; SAK-206 README badges, coverage, and the comparison document (the first entry covering claims about third-party software); SAK-203 Datastore `property_mask` on a mutation (masked entity writes, paired with the SAK-198 property transforms); Phase 2.1 (SAK-189) Firestore `Listen` / realtime listeners; SAK-195 managed-export fidelity regression fixtures; SAK-193 Phase L.1 out-of-band email flows (no mail transport); SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -588,20 +588,26 @@ after the PR is merged"; this is the mechanism that makes it so.
 | `Cargo.lock` | first-party, generated | Apache-2.0 (repo) | Fireup | Pins the exact resolved version of all 229 transitive crates per commit | N/A | First-party generated metadata. Every entry resolves to `registry+https://github.com/rust-lang/crates.io-index`; checked for git dependencies, local path dependencies, and credentials — none present |
 | `cargo-deny` | 0.20.2, installed locally, not in CI | Apache-2.0 OR MIT | crates.io | Audited the committed lock file once, for this change; never linked into the binary | Yes (crate licence) | Developer tool. Adding it to CI is [SAK-218](/SAK/issues/SAK-218), not this change — see below |
 
-#### One known advisory, recorded rather than carried silently
+#### The one known advisory, now fixed rather than carried
 
-`cargo deny check` against the committed lock file reports `bans` clean and one
-vulnerability: **`RUSTSEC-2026-0258`** in `h2` 0.3.27 (empty `DATA` frames
-queued without limit; unbounded memory or a length-overflow panic; low
-severity). Its path is `fireup → tonic 0.11 → axum 0.6 → hyper 0.14 → h2 0.3`,
-and the exposure is the gRPC surface of `fireup local` — a local development
-emulator, not something this repository asks anyone to expose. The fix needs
-`h2 >= 0.4.16`, hence hyper 1.x, hence **tonic 0.12+**, and `Cargo.toml` pins
-tonic 0.11 deliberately so the local data plane and the export parser share one
-`prost` version. So it is not a lock-file bump, and this change does not move
-it. [SAK-218](/SAK/issues/SAK-218) carries the decision, along with the
-`deny.toml` licence allow-list that `cargo deny check licenses` needs before it
-can run green. `cargo-audit` is not installed in this workspace and overlaps
+`cargo deny check` against the committed lock file reports `advisories ok,
+bans ok, licenses ok, sources ok`. Nothing is accepted; `[advisories] ignore` in
+`deny.toml` is empty.
+
+It reported one vulnerability when this section was written:
+**`RUSTSEC-2026-0258`** in `h2` 0.3.27 (empty `DATA` frames queued without
+limit; unbounded memory or a length-overflow panic; low severity), reached as
+`fireup → tonic 0.11 → axum 0.6 → hyper 0.14 → h2 0.3`. The fix needed
+`h2 >= 0.4.16`, hence hyper 1.x, hence **tonic 0.12+** — and `Cargo.toml` pinned
+tonic 0.11 deliberately, so the local data plane and the export parser would
+share one `prost` version. That made it a migration rather than a lock-file bump,
+so [SAK-218](/SAK/issues/SAK-218) recorded the acceptance with a review date and
+[SAK-220](/SAK/issues/SAK-220) did the migration: tonic 0.13 / prost 0.13, which
+makes the chain `fireup → tonic 0.13 → axum 0.8 → hyper 1.12 → h2 0.4.20`, still
+on a single `prost`. The `ignore` entry went with it, which
+`-D advisory-not-detected` in the CI job required rather than merely encouraged.
+
+`cargo-audit` is not installed in this workspace and overlaps
 `cargo deny check advisories`, so only one of the two is worth adopting.
 ### SAK-217 notes — measuring the comparison instead of reading it
 

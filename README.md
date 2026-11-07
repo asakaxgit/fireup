@@ -331,7 +331,7 @@ Four checks, and what each one is for:
 
 | Check | Policy |
 |---|---|
-| **advisories** | RustSec vulnerabilities and yanked crates. One advisory is accepted today — `RUSTSEC-2026-0258` in `h2 0.3.27`, reachable only through the pinned `tonic` 0.11. The reason and the review date are in `deny.toml`; the fix is the tonic 0.12 / prost 0.13 migration. |
+| **advisories** | RustSec vulnerabilities and yanked crates. Nothing is accepted: `[advisories] ignore` in `deny.toml` is empty, so every advisory fails the build. The one exception the repo ever carried, `RUSTSEC-2026-0258` in `h2 0.3.27`, was removed by the tonic 0.13 / prost 0.13 migration that fixed it. |
 | **licences** | Permissive only — the enforced form of the audit in [`docs/licenses/CARGO_LICENSE_AUDIT.md`](docs/licenses/CARGO_LICENSE_AUDIT.md). A dependency carrying a copyleft-only licence fails the build. |
 | **bans** | Wildcard version requirements fail. Duplicate major versions only warn: the tree has eleven of them from transitive pins, none of Fireup's doing. |
 | **sources** | crates.io only. A git or unknown-registry dependency fails. |
