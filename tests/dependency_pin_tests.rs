@@ -7031,3 +7031,164 @@ include-build = false
         );
     }
 }
+
+/// The sibling test target that holds this file's own reporter guard.
+///
+/// The guard in question is in `fidelity_matrix_tests`, and it is there because
+/// a guard on the step that runs *this* target cannot live in this target: the
+/// edit it reports on is the edit that stops it running. That arrangement only
+/// holds while both steps are intact, which is what this guard is for. Switch
+/// off this file's step and `fidelity_matrix_tests` says so; switch off
+/// `fidelity_matrix_tests`' step and this says so. Opening the hole takes both
+/// edits rather than either one.
+///
+/// The same two-independent-keys shape as `unused-ignored-advisory` beside
+/// `-D advisory-not-detected`: neither is redundant, because the hole needs
+/// both of them gone (SAK-229, SAK-249).
+const SIBLING_REPORTER_TARGET: &str = "fidelity_matrix_tests";
+
+/// `value` with one matching pair of surrounding YAML quotes removed.
+///
+/// `if: !cancelled()` is not valid YAML -- a leading `!` is a tag indicator --
+/// so the only shippable spelling of that member of `CONDITIONS_THAT_STILL_RUN`
+/// is `if: '!cancelled()'`, and comparing the raw text rejects it. Measured on
+/// the real `ci.yml`: without this, the `!cancelled()` arm was red.
+///
+/// Unquoting cannot open a hole. It can only turn a non-matching value into one
+/// of `CONDITIONS_THAT_STILL_RUN`, every member of which means "run anyway"
+/// however it is quoted; `if: 'false'` unquotes to `false`, still not a member.
+///
+/// Deliberately local to this reader rather than applied to
+/// `gate_conditions` too: the `deny` job's reader has the same gap and closing
+/// it belongs with that reader, not in the layer above it.
+fn unquote_condition(value: &str) -> &str {
+    for quote in ['\'', '"'] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|v| v.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    value
+}
+
+/// The live `if:` / `continue-on-error:` on the `ci.yml` step that runs `target`.
+///
+/// Anchored on the command, not on the step's `name:` -- renaming a step does
+/// not stop it running, so a reader keyed on the name would redden on a
+/// harmless edit while missing the ones that matter.
+///
+/// `Err` for no such step and `Err` for more than one, for the reason
+/// `deny_step_checks` gives: the reporter gone is worse than any condition on
+/// it, and a reader that picked the first of two would be reporting on
+/// whichever it happened to find.
+fn sibling_reporter_conditions(ci: &str, target: &str) -> Result<Vec<GateCondition>, String> {
+    let lines: Vec<&str> = ci.lines().collect();
+    let needle = format!("--test {target}");
+
+    let found: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| without_comment(line).contains(&needle))
+        .map(|(at, _)| at)
+        .collect();
+    let at = match found[..] {
+        [at] => at,
+        [] => {
+            return Err(format!(
+                "ci.yml runs no `{needle}`. That target holds this file's own reporter guard \
+             (SAK-249), so with its step gone, switching off the step that runs \
+             dependency_pin_tests would be reported by nothing."
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "ci.yml has {} steps running `{needle}`; which is the reporter is not \
+             something this reader can tell.",
+                found.len()
+            ))
+        }
+    };
+
+    let mut start = None;
+    for above in (0..=at).rev() {
+        if without_comment(lines[above]).trim_start().starts_with("- ") {
+            start = Some(above);
+            break;
+        }
+    }
+    let Some(start) = start else {
+        return Err(format!(
+            "ci.yml's `{needle}` is not inside a step -- no `- ` line opens a block above \
+             it, and this reader only understands the step list form."
+        ));
+    };
+
+    let step_indent = indent_of(lines[start]);
+    let scope = format!("the `{target}` step");
+    let inline = without_comment(lines[start]).trim_start();
+    let mut keyed: Vec<&str> = vec![inline.trim_start_matches("- ")];
+    for line in &lines[start + 1..] {
+        let bare = without_comment(line);
+        let inner = bare.trim_start();
+        if inner.is_empty() {
+            continue;
+        }
+        if bare.len() - inner.len() <= step_indent {
+            break;
+        }
+        if indent_of(line) == step_indent + 2 {
+            keyed.push(inner);
+        }
+    }
+
+    let mut keys = Vec::new();
+    for text in keyed {
+        for key in GATE_CONDITION_KEYS {
+            if let Some(value) = text.strip_prefix(&format!("{key}:")) {
+                keys.push(GateCondition {
+                    scope: scope.clone(),
+                    key: (*key).to_string(),
+                    value: unquote_condition(value.trim()).to_string(),
+                });
+            }
+        }
+    }
+    Ok(keys)
+}
+
+#[test]
+fn nothing_in_ci_yml_switches_off_this_files_own_reporter_guard() {
+    let conditions = match sibling_reporter_conditions(
+        &repo_file(".github/workflows/ci.yml"),
+        SIBLING_REPORTER_TARGET,
+    ) {
+        Ok(conditions) => conditions,
+        Err(why) => panic!("{why}"),
+    };
+
+    for condition in &conditions {
+        if condition.key == "continue-on-error" {
+            assert_eq!(
+                condition.value, "false",
+                "{} carries `continue-on-error: {}`. That step runs the guard protecting \
+                 this file's own step in CI, so discarding its verdict leaves the \
+                 supply-chain assertions reportable by nothing. Measured: a step that \
+                 really fails takes its job to `failure` (run 42153955324).",
+                condition.scope, condition.value
+            );
+        } else {
+            assert!(
+                CONDITIONS_THAT_STILL_RUN.contains(&condition.value.as_str()),
+                "{} carries `if: {}`, so the guard protecting this file's own step need \
+                 not run. Measured: a skipped step leaves its job concluding success (run \
+                 42161681376). Allowed values are {:?}; anything a text reader cannot \
+                 evaluate fails closed.",
+                condition.scope,
+                condition.value,
+                CONDITIONS_THAT_STILL_RUN
+            );
+        }
+    }
+}

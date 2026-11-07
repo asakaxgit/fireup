@@ -495,3 +495,438 @@ fn the_coverage_floor_is_the_same_number_everywhere() {
         "README.md should say in words that CI fails under {script_floor}% line coverage"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The step that reports on the supply-chain gate (SAK-249)
+// ---------------------------------------------------------------------------
+//
+// Everything below is about `ci.yml`, not about the fidelity matrix, and it
+// lives in this file for one structural reason.
+//
+// `dependency_pin_tests` holds every assertion about the supply-chain gate --
+// `deny.toml`'s policy, the gate's command line, the version and checksum pins,
+// the workflow's triggers and token. All of them are reported by exactly one
+// step of `ci.yml`. A guard on that step cannot be written inside
+// `dependency_pin_tests`: switch the step off and the guard switches off with
+// it, which is the one shape of guard that reports nothing at the moment it is
+// needed. It has to run in a step other than the one it guards, and this target
+// is the only other automatically-triggered target in the repository that
+// already reads a workflow file.
+//
+// Measured, not assumed. Eight edits to `ci.yml` -- deleting that step, `if:
+// false` or `continue-on-error: true` on the step or on the `test` job, and
+// renaming the step -- each leave `dependency_pin_tests` at 171 passed and this
+// target at 8 passed. Renaming the gate step instead reddens
+// `dependency_pin_tests` by 9 tests, so the file is read and those greens were
+// absence of an assertion.
+//
+// Deliberately out of scope: the two job-level keys. `if:` on the `test` job
+// stops this target from running too, and `continue-on-error:` on it discards
+// this target's failure along with the one it was reporting -- so no test in
+// this repository can report either, because every test target runs in that one
+// job. Closing that half needs the gate made a required status check, which is
+// a repository setting rather than a file (SAK-242).
+
+/// The target whose step this file guards. See the note above for why the guard
+/// is not in that target.
+const GUARDED_TARGET: &str = "dependency_pin_tests";
+
+/// The `if:` values that leave a step running whatever else happened.
+///
+/// Deliberately not an expression evaluator -- the opposite. A text reader
+/// cannot decide `github.event_name == 'push'`, so the only values allowed
+/// through are the handful that mean "run anyway"; everything else fails
+/// closed. Same list and same reasoning as `dependency_pin_tests`'
+/// `CONDITIONS_THAT_STILL_RUN`.
+///
+/// Compared against the value with any surrounding YAML quotes removed, which
+/// `!cancelled()` needs: bare, a leading `!` is a YAML tag indicator and the
+/// file does not parse, so the only spelling of that entry anyone can actually
+/// ship is `if: '!cancelled()'`.
+const CONDITIONS_THAT_STILL_RUN: &[&str] = &[
+    "always()",
+    "${{ always() }}",
+    "success()",
+    "${{ success() }}",
+    "!cancelled()",
+    "${{ !cancelled() }}",
+];
+
+/// The two keys that decide whether a step runs and whether its verdict counts.
+const STEP_CONDITION_KEYS: &[&str] = &["if", "continue-on-error"];
+
+/// `line` with any comment removed.
+///
+/// A commented-out key is not a key, and `ci.yml` documents its own settings in
+/// prose -- a reader that matched anywhere in the line would find the comment
+/// and report on a setting that is not in effect.
+fn without_comment(line: &str) -> &str {
+    match line.split_once('#') {
+        Some((before, _)) => before.trim_end(),
+        None => line.trim_end(),
+    }
+}
+
+/// Indentation of `line`, ignoring any comment on it.
+fn indent_of(line: &str) -> usize {
+    let bare = without_comment(line);
+    bare.len() - bare.trim_start().len()
+}
+
+/// `value` with one matching pair of surrounding YAML quotes removed.
+///
+/// Not cosmetic. `if: !cancelled()` is not valid YAML -- a leading `!` is a tag
+/// indicator -- so the only shippable spelling of that allowed value is
+/// `if: '!cancelled()'`, and a reader comparing the raw text would reject the
+/// one form anybody can write. Measured: it reddened the `!cancelled()` arm.
+///
+/// Unquoting cannot open a hole. It can only turn a non-matching value into one
+/// of `CONDITIONS_THAT_STILL_RUN`, and every value on that list means "run
+/// anyway" however it is quoted. `if: 'false'` unquotes to `false`, which is
+/// still not on the list.
+fn unquote(value: &str) -> &str {
+    for quote in ['\'', '"'] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|v| v.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    value
+}
+
+/// One live `if:` or `continue-on-error:` on a step.
+#[derive(Debug, PartialEq, Eq)]
+struct StepCondition {
+    /// `if` or `continue-on-error`, without the colon.
+    key: String,
+    /// The value as written, comment stripped, trimmed and unquoted.
+    value: String,
+}
+
+/// The live `if:` / `continue-on-error:` on the `ci.yml` step that runs `target`.
+///
+/// Anchored on the command rather than on the step's `name:`. That is the
+/// deliberate choice: renaming a step does not stop it running, so a reader
+/// keyed on the name would fail on a harmless edit while still missing the
+/// edits that matter. The command is what makes the step the reporter.
+///
+/// `Err` when the step cannot be located -- no such command, or more than one.
+/// Fail-closed in both directions: no step at all is the reporter gone, which
+/// is worse than any condition on it, and a reader that picked the first of two
+/// would be reporting on whichever it happened to find.
+fn reporting_step(ci: &str, target: &str) -> Result<Vec<StepCondition>, String> {
+    let lines: Vec<&str> = ci.lines().collect();
+    let needle = format!("--test {target}");
+
+    let found: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| without_comment(line).contains(&needle))
+        .map(|(at, _)| at)
+        .collect();
+    let at = match found[..] {
+        [at] => at,
+        [] => {
+            return Err(format!(
+                "ci.yml runs no `{needle}`, so nothing in CI reports the {target} \
+                 assertions. Whatever they promise, they promise it to a file nobody \
+                 executes. Restore the step, or point GUARDED_TARGET at wherever the \
+                 target moved."
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "ci.yml has {} steps running `{needle}`; which of them is the reporter \
+                 is not something this reader can tell, so it refuses to report on \
+                 either.",
+                found.len()
+            ))
+        }
+    };
+
+    // Walk up to the `- ` that opens the step holding that command.
+    let mut start = None;
+    for above in (0..=at).rev() {
+        let bare = without_comment(lines[above]);
+        if bare.trim_start().starts_with("- ") {
+            start = Some(above);
+            break;
+        }
+    }
+    let Some(start) = start else {
+        return Err(format!(
+            "ci.yml's `{needle}` is not inside a step -- no `- ` line opens a block \
+             above it. This reader only understands the step list form, so it refuses \
+             rather than guessing which keys govern that command."
+        ));
+    };
+
+    let step_indent = indent_of(lines[start]);
+    let key_indent = step_indent + 2;
+    let mut conditions = Vec::new();
+
+    // A step's first key sits on the `- ` line itself, so read that one too:
+    // `- if: false` followed by `name:` is the same step with the same effect.
+    let inline = without_comment(lines[start]).trim_start();
+    let mut keyed: Vec<&str> = vec![inline.trim_start_matches("- ")];
+
+    for line in &lines[start + 1..] {
+        let bare = without_comment(line);
+        let inner = bare.trim_start();
+        if inner.is_empty() {
+            continue;
+        }
+        if bare.len() - inner.len() <= step_indent {
+            break;
+        }
+        if indent_of(line) == key_indent {
+            keyed.push(inner);
+        }
+    }
+
+    for text in keyed {
+        for key in STEP_CONDITION_KEYS {
+            if let Some(value) = text.strip_prefix(&format!("{key}:")) {
+                conditions.push(StepCondition {
+                    key: (*key).to_string(),
+                    value: unquote(value.trim()).to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(conditions)
+}
+
+#[test]
+fn ci_yml_still_counts_the_supply_chain_guards() {
+    let ci = read(&repo_root().join(".github/workflows/ci.yml"));
+    let conditions = match reporting_step(&ci, GUARDED_TARGET) {
+        Ok(conditions) => conditions,
+        Err(why) => panic!("{why}"),
+    };
+
+    for condition in &conditions {
+        if condition.key == "continue-on-error" {
+            assert_eq!(
+                condition.value, "false",
+                "ci.yml's `{GUARDED_TARGET}` step carries `continue-on-error: {}`, so \
+                 every assertion in that target can fail and the job still concludes \
+                 success. A step whose failure is discarded is not a gate. Measured: a \
+                 step that really fails takes its job to `failure` (run 42153955324), \
+                 which is what this key turns off.",
+                condition.value
+            );
+        } else {
+            assert!(
+                CONDITIONS_THAT_STILL_RUN.contains(&condition.value.as_str()),
+                "ci.yml's `{GUARDED_TARGET}` step carries `if: {}`, so the supply-chain \
+                 assertions need not run at all. Measured: a skipped step leaves its job \
+                 concluding success (run 42161681376), so this reads as green rather \
+                 than as nothing having been checked. Allowed values are {:?}; anything \
+                 a text reader cannot evaluate fails closed.",
+                condition.value,
+                CONDITIONS_THAT_STILL_RUN
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod supply_chain_reporter_controls {
+    use super::*;
+
+    /// A `ci.yml` whose reporter step carries `extra` -- the shape the real file
+    /// uses, reduced to the parts this reader looks at.
+    ///
+    /// Synthetic rather than the real file for the reason the arms below need:
+    /// one mutation has to redden one test. An arm built by editing the real
+    /// file reddens every control that also reads it.
+    fn ci_with(extra: &str) -> String {
+        format!(
+            "name: CI\non:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+             steps:\n      - uses: actions/checkout@v4\n\n      - name: Unit tests\n        \
+             run: cargo test --locked --lib\n\n      - name: Supply-chain pins\n{extra}        \
+             run: cargo test --locked --test dependency_pin_tests\n"
+        )
+    }
+
+    #[test]
+    fn the_shipped_reporter_step_is_locatable() {
+        // Deliberately not an assertion about what the live keys are. The
+        // shipped step has none, but a guard that demanded that would fail on a
+        // *stricter* `ci.yml` -- someone adding `if: always()` -- and teach
+        // whoever hit it to delete the guard rather than keep the step.
+        let ci = read(&repo_root().join(".github/workflows/ci.yml"));
+        assert!(
+            reporting_step(&ci, GUARDED_TARGET).is_ok(),
+            "the reader cannot find the {GUARDED_TARGET} step in the real ci.yml, so \
+             every promise above is about a step it never located"
+        );
+    }
+
+    #[test]
+    fn a_step_with_no_conditions_passes() {
+        assert_eq!(reporting_step(&ci_with(""), GUARDED_TARGET), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn switching_the_reporter_step_off_is_caught() {
+        for off in ["        if: false\n", "        if: ${{ false }}\n"] {
+            let conditions = reporting_step(&ci_with(off), GUARDED_TARGET)
+                .expect("the step is still there, only switched off");
+            assert!(
+                !conditions
+                    .iter()
+                    .all(|c| CONDITIONS_THAT_STILL_RUN.contains(&c.value.as_str())),
+                "{off:?} should not read as a condition that still runs"
+            );
+        }
+    }
+
+    #[test]
+    fn a_condition_this_reader_cannot_evaluate_fails_closed() {
+        let conditions = reporting_step(
+            &ci_with("        if: github.event_name == 'push'\n"),
+            GUARDED_TARGET,
+        )
+        .expect("located");
+        assert_eq!(conditions.len(), 1);
+        assert!(!CONDITIONS_THAT_STILL_RUN.contains(&conditions[0].value.as_str()));
+    }
+
+    #[test]
+    fn conditions_that_still_run_the_step_pass() {
+        // The arm that keeps this guard from rejecting a safer ci.yml.
+        for ok in CONDITIONS_THAT_STILL_RUN {
+            let conditions =
+                reporting_step(&ci_with(&format!("        if: {ok}\n")), GUARDED_TARGET)
+                    .expect("located");
+            assert_eq!(conditions.len(), 1, "{ok}");
+            assert!(
+                CONDITIONS_THAT_STILL_RUN.contains(&conditions[0].value.as_str()),
+                "{ok} should pass"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quoted_condition_that_still_runs_passes() {
+        // `!cancelled()` has to be quoted to be valid YAML at all, so a reader
+        // that compared the raw text would reject the only spelling of it
+        // anyone can ship. Both quote styles, because YAML takes either.
+        for ok in ["'!cancelled()'", "\"always()\"", "'success()'"] {
+            let conditions =
+                reporting_step(&ci_with(&format!("        if: {ok}\n")), GUARDED_TARGET)
+                    .expect("located");
+            assert_eq!(conditions.len(), 1, "{ok}");
+            assert!(
+                CONDITIONS_THAT_STILL_RUN.contains(&conditions[0].value.as_str()),
+                "{ok} is a condition that still runs the step, only quoted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quoted_hole_is_still_caught() {
+        // The direction control for unquoting: it must not let a value through
+        // just because it had quotes on it. Each key is checked against the
+        // predicate the live test applies to that key.
+        let switched_off =
+            reporting_step(&ci_with("        if: 'false'\n"), GUARDED_TARGET).expect("located");
+        assert_eq!(switched_off.len(), 1);
+        assert!(
+            !CONDITIONS_THAT_STILL_RUN.contains(&switched_off[0].value.as_str()),
+            "`if: 'false'` should still read as switched off, not as a condition that runs"
+        );
+
+        let discarded = reporting_step(
+            &ci_with("        continue-on-error: \"true\"\n"),
+            GUARDED_TARGET,
+        )
+        .expect("located");
+        assert_eq!(discarded.len(), 1);
+        assert_ne!(
+            discarded[0].value, "false",
+            "`continue-on-error: \"true\"` should still read as discarding the verdict"
+        );
+    }
+
+    #[test]
+    fn discarding_the_reporter_steps_verdict_is_caught() {
+        for bad in [
+            "        continue-on-error: true\n",
+            "        continue-on-error: ${{ github.event_name == 'pull_request' }}\n",
+        ] {
+            let conditions = reporting_step(&ci_with(bad), GUARDED_TARGET).expect("located");
+            assert_eq!(conditions.len(), 1, "{bad:?}");
+            assert_ne!(
+                conditions[0].value, "false",
+                "{bad:?} should not read as false"
+            );
+        }
+    }
+
+    #[test]
+    fn continue_on_error_false_passes() {
+        // The sibling control: the key being present is not the finding, its
+        // value is. Guarding the wrong one of these forces a redundant line or
+        // protects nothing.
+        let conditions = reporting_step(
+            &ci_with("        continue-on-error: false\n"),
+            GUARDED_TARGET,
+        )
+        .expect("located");
+        assert_eq!(conditions[0].value, "false");
+    }
+
+    #[test]
+    fn a_condition_on_the_dash_line_is_caught() {
+        // `- if: false` then `name:` is the same step switched off, one column
+        // further left than the arms above.
+        let ci = "jobs:\n  test:\n    steps:\n      - if: false\n        name: Supply-chain \
+                  pins\n        run: cargo test --locked --test dependency_pin_tests\n";
+        let conditions = reporting_step(ci, GUARDED_TARGET).expect("located");
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].value, "false");
+    }
+
+    #[test]
+    fn a_multi_line_run_block_is_located() {
+        // The other shape ci.yml uses for steps that run several targets.
+        let ci = "jobs:\n  test:\n    steps:\n      - name: Supply-chain pins\n        \
+                  continue-on-error: true\n        run: |\n          cargo test --locked \
+                  --test dependency_pin_tests\n";
+        let conditions = reporting_step(ci, GUARDED_TARGET).expect("located");
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].value, "true");
+    }
+
+    #[test]
+    fn a_missing_reporter_step_fails_closed() {
+        let ci = "jobs:\n  test:\n    steps:\n      - name: Unit tests\n        run: cargo \
+                  test --locked --lib\n";
+        assert!(reporting_step(ci, GUARDED_TARGET).is_err());
+    }
+
+    #[test]
+    fn a_commented_out_reporter_step_fails_closed() {
+        // The edit that looks like the step is still there.
+        let ci = "jobs:\n  test:\n    steps:\n      - name: Unit tests\n        run: cargo \
+                  test --locked --lib\n      # run: cargo test --locked --test \
+                  dependency_pin_tests\n";
+        assert!(reporting_step(ci, GUARDED_TARGET).is_err());
+    }
+
+    #[test]
+    fn two_reporter_steps_fail_closed() {
+        let ci = format!(
+            "{}      - name: Again\n        run: cargo test --locked --test \
+             dependency_pin_tests\n",
+            ci_with("")
+        );
+        assert!(reporting_step(&ci, GUARDED_TARGET).is_err());
+    }
+}
