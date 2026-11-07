@@ -2988,6 +2988,393 @@ fn every_pull_request_starts_the_workflow_holding_the_deny_gate() {
 /// Each one is the regression this file exists to catch, fed to the same
 /// function the tests above call. Without these, a refactor that made
 /// `check_*` return `Ok(())` unconditionally would leave every test above green.
+/// The name of the step in `ci.yml`'s `deny` job that installs the gate's own
+/// binary.
+///
+/// Every other guard in this file reads something the gate *uses* — the policy
+/// in `deny.toml`, the check list in the gate's command, the conditions on the
+/// step, the triggers on the workflow. This one reads where the gate's own
+/// executable comes from. The `deny` job downloads a release tarball from a
+/// third party and runs it; the only thing standing between "the bytes this
+/// commit pinned" and "whatever that URL served today" is one line of shell.
+const INSTALL_STEP: &str = "Install cargo-deny";
+
+/// The digest-tool invocations this reader recognises as *comparing* bytes.
+///
+/// `sha256sum <file>` prints a digest and exits 0 whatever the bytes are; only
+/// the `-c` form compares one. Measured on the real file: swapping the shipped
+/// line for `sha256sum cargo-deny.tar.gz` leaves the step at exit 0, installs
+/// whatever was downloaded, and changes nothing else in the log.
+///
+/// A line that names one of these tools in a form not on this list is not
+/// assumed equivalent — it fails closed, the same call `deny_step_checks` makes
+/// about a command body it cannot read. Extend the list rather than widening
+/// the match.
+const DIGEST_COMPARISONS: [&str; 4] = [
+    "sha256sum -c",
+    "sha256sum --check",
+    "shasum -a 256 -c",
+    "shasum -a 256 --check",
+];
+
+/// The `Install cargo-deny` step's `env:` pins and `run:` body, read out of
+/// `ci.yml`.
+struct InstallStep {
+    /// The step's `env:` entries as `KEY: value`, comments stripped. The pins
+    /// live here: `CARGO_DENY_VERSION` picks the release, `CARGO_DENY_SHA256`
+    /// says which bytes that release is allowed to be.
+    env: Vec<String>,
+    /// The step's `run:` body, one entry per source line, comments stripped,
+    /// blank and comment-only lines dropped.
+    ///
+    /// Comments are stripped for a reason that matters here more than
+    /// elsewhere: a commented-out verification line is not a verification line,
+    /// and a reader that counted it would pass the one tree this guard exists
+    /// to fail.
+    body: Vec<String>,
+}
+
+/// Whether `line` turns errexit back off.
+///
+/// `set +e`, `set +eu`, `set +o errexit` — any of them, and a later failing
+/// command no longer ends the step. Measured: with `set +e` added after the
+/// shipped `set -euo pipefail`, a mismatched checksum prints
+/// `cargo-deny.tar.gz: FAILED`, the step carries on, the unverified binary
+/// lands on `PATH`, and the step exits **0**.
+fn clears_errexit(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    if words.next() != Some("set") {
+        return false;
+    }
+    let words: Vec<&str> = words.collect();
+    words.windows(2).any(|pair| pair == ["+o", "errexit"])
+        || words
+            .iter()
+            .any(|word| word.starts_with('+') && word[1..].contains('e'))
+}
+
+/// The shell variables `line` reads, by name.
+fn shell_vars(line: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let bytes: Vec<char> = line.chars().collect();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == '$' {
+            let mut cursor = at + 1;
+            if cursor < bytes.len() && bytes[cursor] == '{' {
+                cursor += 1;
+            }
+            let start = cursor;
+            while cursor < bytes.len()
+                && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == '_')
+            {
+                cursor += 1;
+            }
+            if cursor > start {
+                found.push(bytes[start..cursor].iter().collect());
+            }
+            at = cursor;
+            continue;
+        }
+        at += 1;
+    }
+    found
+}
+
+/// Whether `line` carries a 64-character hex run — a sha256 written out.
+fn has_sha256_literal(line: &str) -> bool {
+    let mut run = 0;
+    for ch in line.chars() {
+        if ch.is_ascii_hexdigit() {
+            run += 1;
+            if run >= 64 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+/// The `Install cargo-deny` step, read out of `ci.yml`.
+///
+/// Read rather than written down a second time for the same reason
+/// `deny_step_checks` and `log_step_pattern` are: the file is the contract.
+///
+/// `Err` if the step is gone, if there is not exactly one of it, or if its
+/// `run:` body is not something this reader can see. Each of those voids the
+/// promise below, so none may read as a pass. Note what this guard cannot do,
+/// the same note `deny_step_checks` carries: deleting the step outright takes
+/// the install away, and all a test can do about that is refuse to pass
+/// (SAK-221). Deleting it is also the one edit here that is *fail-safe* rather
+/// than fail-open — with no binary on `PATH` the gate step cannot run at all,
+/// which is why SAK-244's guard deliberately permits `if: false` on this very
+/// step.
+fn install_step(ci: &str) -> Result<InstallStep, String> {
+    let lines: Vec<&str> = ci.lines().collect();
+    let at = sole_line(
+        &lines,
+        &format!("- name: {INSTALL_STEP}"),
+        "the step that installs the gate's binary",
+    )?;
+
+    // Everything up to the next item in the `steps:` sequence. `- name:` alone
+    // is not the boundary: a `- uses:` step has no name.
+    let step: Vec<&str> = lines[at + 1..]
+        .iter()
+        .copied()
+        .take_while(|line| {
+            let body = without_comment(line).trim();
+            body != "-" && !body.starts_with("- ")
+        })
+        .collect();
+
+    let key_indent = indent_of(lines[at]) + 2;
+
+    let mut env = Vec::new();
+    if let Some(env_at) = step.iter().position(|line| {
+        let bare = without_comment(line);
+        bare.trim() == "env:" && indent_of(bare) == key_indent
+    }) {
+        for (_, line) in block_under(&step, env_at) {
+            env.push(without_comment(line).trim().to_string());
+        }
+    }
+
+    let run_at = step
+        .iter()
+        .position(|line| {
+            let bare = without_comment(line);
+            indent_of(bare) == key_indent && bare.trim_start().starts_with("run:")
+        })
+        .ok_or_else(|| {
+            format!(
+                "the `{INSTALL_STEP}` step in ci.yml has no `run:` body. This guard reads \
+                 that body to check the download is verified before it is executed, and it \
+                 cannot read a body it did not find."
+            )
+        })?;
+
+    let run_line = without_comment(step[run_at]);
+    let inline = run_line
+        .trim_start()
+        .strip_prefix("run:")
+        .unwrap_or_default()
+        .trim();
+
+    let mut body: Vec<String> = Vec::new();
+    if inline.starts_with('|') || inline.starts_with('>') || inline.is_empty() {
+        for (_, line) in block_under(&step, run_at) {
+            let text = without_comment(line).trim();
+            if !text.is_empty() {
+                body.push(text.to_string());
+            }
+        }
+    } else {
+        body.push(inline.to_string());
+    }
+
+    if body.is_empty() {
+        return Err(format!(
+            "the `{INSTALL_STEP}` step in ci.yml has an empty `run:` body, so it installs \
+             nothing and exits 0."
+        ));
+    }
+
+    Ok(InstallStep { env, body })
+}
+
+/// `Ok` if the gate's own binary is checked against a digest this commit pins
+/// before it is run.
+///
+/// ## Why this is a guard and not a comment
+///
+/// `ci.yml` already says, in prose, "Bump CARGO_DENY_VERSION and
+/// CARGO_DENY_SHA256 together, deliberately." Prose is not a reporter. The
+/// pin is load-bearing today — measured on the real file, replaying the step
+/// body the way the runner does (`bash --noprofile --norc -e -o pipefail`):
+///
+/// ```text
+///   shipped                                       step exit 0   cargo-deny 0.20.2 installed
+///   one hex digit of the digest flipped           step exit 1   nothing installed
+///   version moved to 0.19.9, digest left alone    step exit 1   nothing installed
+///   CARGO_DENY_SHA256 deleted (`set -u`)          step exit 1   nothing installed
+/// ```
+///
+/// And it is switched off by one line, with no reporter anywhere. Same
+/// measurement, same harness, each arm paired with the version bump the pin
+/// exists to catch:
+///
+/// ```text
+///   delete the `sha256sum -c` line     + 0.19.9   step exit 0   cargo-deny 0.19.9 installed
+///   `… | sha256sum -c - || true`       + 0.19.9   step exit 0   cargo-deny 0.19.9 installed
+///   `sha256sum cargo-deny.tar.gz`      + 0.19.9   step exit 0   cargo-deny 0.19.9 installed
+///   `set +e` after `set -euo pipefail` + 0.19.9   step exit 0   cargo-deny 0.19.9 installed
+/// ```
+///
+/// In all four the `deny` job goes on to print `advisories ok, bans ok,
+/// licenses ok, sources ok` and exit 0 — run with a binary nothing checked.
+/// `cargo test --test dependency_pin_tests` was **159 passed in every one of
+/// them**, and that green is an absent assertion rather than an unread file:
+/// renaming the gate step in the same file takes the suite to 7 failed.
+///
+/// ## What this does not assert, and why
+///
+/// Not that the body sets `-e`. It does not have to: the runner invokes
+/// `bash -e {0}`, so errexit is on before the first line of the body. Measured
+/// — replacing the shipped `set -euo pipefail` with `set -uo pipefail` and
+/// moving the version to 0.19.9 is still **step exit 1, nothing installed**.
+/// That corrected the author's first hypothesis, which was that dropping the
+/// `e` was the hole; only `set +e` actually takes errexit away, which is why
+/// that is what is checked. A guard demanding the literal `set -euo pipefail`
+/// would have reddened `set -uo pipefail` plus an explicit `|| exit 1`, which
+/// is equally fail-closed. Stricter trees have to stay green or the cheapest
+/// way back to green is to undo the strictness — the mistake SAK-241 undid in
+/// `the_permissions_reader_finds_exactly_the_live_keys` and SAK-244 avoided in
+/// `the_gate_condition_reader_finds_the_live_gate`.
+///
+/// Not the digest's *value*, and not the URL's shape. Both are fail-closed: a
+/// wrong digest is the second table above, and pointing the URL at
+/// `releases/latest/download/…` was step exit 22 (`curl -f` on a 404) in the
+/// same harness. A guard is only worth writing where the failure direction is
+/// fail-open — the rule `without_comment`'s two call sites produced.
+///
+/// Not that the installed tool is a particular version. The hole is unverified
+/// bytes being executed, not a specific release being weaker: run against the
+/// shipped `deny.toml` with the `[bans.build]` bypass removed, 0.19.9 and
+/// 0.20.2 both report the same 8 `detected-executable` findings and both exit
+/// 2. The stand-in version enforced the same policy; that is a reason to state
+/// the finding as "unverified", not as "downgraded".
+fn check_install_verifies_its_download(step: &InstallStep) -> Result<(), String> {
+    let mut verifications: Vec<(usize, &String)> = Vec::new();
+    let mut unclassified: Vec<&String> = Vec::new();
+    for (at, line) in step.body.iter().enumerate() {
+        if !(line.contains("sha256sum") || line.contains("shasum")) {
+            continue;
+        }
+        if DIGEST_COMPARISONS.iter().any(|form| line.contains(form)) {
+            verifications.push((at, line));
+        } else {
+            unclassified.push(line);
+        }
+    }
+
+    if verifications.is_empty() {
+        if let Some(line) = unclassified.first() {
+            return Err(format!(
+                "the `{INSTALL_STEP}` step in ci.yml names a digest tool but never compares \
+                 one: `{line}`. `sha256sum <file>` prints a digest and exits 0 whatever the \
+                 bytes are. Measured: with this line in place of the shipped one the step \
+                 is exit 0 and installs whatever the URL served. Use one of {DIGEST_COMPARISONS:?}."
+            ));
+        }
+        return Err(format!(
+            "nothing in the `{INSTALL_STEP}` step in ci.yml checks the downloaded tarball \
+             against a digest. The `deny` job downloads a release binary from a third party \
+             and runs it; with no comparison the bytes it runs are whatever that URL served, \
+             the step is exit 0, the gate prints `advisories ok, bans ok, licenses ok, \
+             sources ok`, and no test in this repository says a word. The pin itself is still \
+             in `env:` — a digest nothing compares against is decoration. Body read: {:?}",
+            step.body
+        ));
+    }
+
+    let declared: Vec<&str> = step
+        .env
+        .iter()
+        .filter_map(|entry| entry.split_once(':').map(|(key, _)| key.trim()))
+        .collect();
+
+    for (at, line) in &verifications {
+        // The expected digest has to be fixed by this commit. A checksum file
+        // fetched from the same release alongside the tarball is signed by
+        // whoever served the tarball, so it attests to nothing.
+        let read = shell_vars(line);
+        let pinned_by_env = read.iter().any(|name| declared.contains(&name.as_str()));
+        if !pinned_by_env && !has_sha256_literal(line) && !read.is_empty() {
+            return Err(format!(
+                "the `{INSTALL_STEP}` step in ci.yml compares against {read:?}, and this step \
+                 declares {declared:?}. At runtime an undeclared name is fail-closed — the \
+                 body's `set -u` makes the step exit 1 with nothing installed (measured) — so \
+                 this is not a hole. It fails anyway because the reader can no longer tell a \
+                 digest this commit pinned from one fetched at run time, and that is the whole \
+                 question it was written to answer."
+            ));
+        }
+        if !pinned_by_env && !has_sha256_literal(line) {
+            return Err(format!(
+                "the `{INSTALL_STEP}` step in ci.yml compares a digest that this commit does \
+                 not pin: `{line}`. The expected digest has to come from the repository — an \
+                 `env:` key of this step (declared here: {declared:?}) or a 64-character hex \
+                 literal on the line. A `SHA256SUMS` fetched next to the tarball is served by \
+                 the same host as the tarball and attests to nothing. If the digest is in a \
+                 checked-in file, this reader cannot tell that from a downloaded one, so it \
+                 fails closed: say so in a ticket and widen it deliberately."
+            ));
+        }
+
+        if let Some((_, tail)) = line.split_once("||") {
+            let tail = tail.trim();
+            let aborts = tail
+                .strip_prefix("exit")
+                .map(|rest| {
+                    let code = rest.trim();
+                    !code.is_empty() && code != "0"
+                })
+                .unwrap_or(false);
+            if !aborts {
+                return Err(format!(
+                    "the `{INSTALL_STEP}` step in ci.yml sends the digest comparison's exit \
+                     status to `||`: `{line}`. Measured with `|| true`: the comparison prints \
+                     `cargo-deny.tar.gz: FAILED`, the step carries on, the unverified binary \
+                     is installed, and the step exits 0. `|| exit 1` is fine; anything that \
+                     swallows the status is the hole. Only `||` does this — `; true` and a \
+                     trailing pipe both still abort, because the runner runs this body under \
+                     `bash -e -o pipefail`."
+                ));
+            }
+        }
+
+        for earlier in step.body.iter().take(*at) {
+            if clears_errexit(earlier) {
+                return Err(format!(
+                    "the `{INSTALL_STEP}` step in ci.yml runs `{earlier}` before its digest \
+                     comparison, which takes errexit back off, and a failed comparison then \
+                     no longer ends the step. Measured: `set +e` after the shipped \
+                     `set -euo pipefail`, with the version moved to 0.19.9 — \
+                     `cargo-deny.tar.gz: FAILED` in the log, the wrong binary installed, step \
+                     exit 0. Note the asymmetry: the body cannot *add* errexit-off by writing \
+                     `set -uo pipefail`, because the runner already invoked `bash -e`; only \
+                     `set +e` does it."
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// The gate's own binary is checked against a digest this commit pins before it
+/// is executed.
+///
+/// What is asked of the real file and what is not: only that the install step is
+/// **locatable** and that its download is verified. Nothing here pins the
+/// shipped text, the shipped version, or the shipped digest. A tree that
+/// verified twice, used `shasum -a 256 -c`, added `--status`, or replaced
+/// `set -euo pipefail` with `set -uo pipefail` plus `|| exit 1` is as safe or
+/// safer, and every one of those is a green arm below.
+#[test]
+fn ci_yml_verifies_the_gate_binary_before_running_it() {
+    let step = install_step(&repo_file(".github/workflows/ci.yml")).expect(
+        "the step that installs cargo-deny must be locatable, or every arm below is failing \
+         on the reader rather than on what it put in the body",
+    );
+    if let Err(problem) = check_install_verifies_its_download(&step) {
+        panic!("{problem}");
+    }
+}
+
 mod negative_controls {
     use super::*;
 
@@ -5916,5 +6303,305 @@ include-build = false
             })
             .collect();
         assert!(deny_gate_trigger(&commented).is_err());
+    }
+
+    /// The `Install cargo-deny` step the SAK-246 arms mutate, spliced into the
+    /// real `ci.yml` in place of the shipped one.
+    ///
+    /// ## Why a canonical step and not the shipped bytes
+    ///
+    /// The arms below anchor to whole lines of the install step and edit them.
+    /// Run against the real file that is wrong twice over, and the first draft
+    /// of this block was wrong in both ways:
+    ///
+    /// * A real hole landing in the shipped step — someone actually deleting
+    ///   the verification — reddened **four** tests rather than one, because
+    ///   three of them read the same file and were reading it with the hole on
+    ///   it. One hole failing one test, whose message is about that hole, says
+    ///   more and says it better.
+    /// * A real tree that was *stricter* — `set -o errexit` spelled out, or the
+    ///   comparison done twice — made the anchors stop matching, and
+    ///   `with_sole_line` fails on an anchor it cannot find. Six safe trees
+    ///   came back red for a reason that had nothing to do with their safety.
+    ///
+    /// So the base has to lack what an arm adds (`set +e`) and possess what an
+    /// arm removes or rewrites (the `set` line, the comparison, the pin) — both
+    /// halves, which is the shape SAK-245 arrived at the hard way.
+    ///
+    /// Still spliced into the real file rather than built as a synthetic
+    /// workflow, for the reason `with_sole_line` gives: the job, the step
+    /// sequence and the indentation around it stay the ones that actually run.
+    /// The version and digest here are deliberately not the shipped ones —
+    /// nothing below is a statement about which release this commit pins.
+    const CANONICAL_INSTALL_STEP: &str = concat!(
+        "      - name: Install cargo-deny\n",
+        "        env:\n",
+        "          CARGO_DENY_VERSION: 0.0.0\n",
+        "          CARGO_DENY_SHA256: ",
+        "0000000000000000000000000000000000000000000000000000000000000000\n",
+        "        run: |\n",
+        "          set -euo pipefail\n",
+        "          curl -sSfL -o cargo-deny.tar.gz \"$CARGO_DENY_URL\"\n",
+        "          echo \"${CARGO_DENY_SHA256}  cargo-deny.tar.gz\" | sha256sum -c -\n",
+        "          tar xzf cargo-deny.tar.gz\n",
+        "          install -m 0755 cargo-deny \"${RUNNER_TEMP}/bin/cargo-deny\"\n",
+    );
+
+    /// The three lines of `CANONICAL_INSTALL_STEP` the arms anchor to.
+    const VERIFY_LINE: &str =
+        r#"          echo "${CARGO_DENY_SHA256}  cargo-deny.tar.gz" | sha256sum -c -"#;
+    const SET_LINE: &str = "          set -euo pipefail";
+    const SHA_PIN_LINE: &str =
+        "          CARGO_DENY_SHA256: 0000000000000000000000000000000000000000000000000000000000000000";
+
+    /// The real `ci.yml` with its install step replaced by the canonical one.
+    fn install_yml_base() -> String {
+        let ci = repo_file(".github/workflows/ci.yml");
+        let lines: Vec<&str> = ci.lines().collect();
+        let at = sole_line(
+            &lines,
+            &format!("- name: {INSTALL_STEP}"),
+            "the step this base replaces",
+        )
+        .expect("the shipped install step must be locatable for these arms to have a base");
+
+        let mut out = String::new();
+        for line in &lines[..at] {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str(CANONICAL_INSTALL_STEP);
+        // Everything from the next item in the `steps:` sequence onwards.
+        let rest = lines[at + 1..].iter().skip_while(|line| {
+            let body = without_comment(line).trim();
+            body != "-" && !body.starts_with("- ")
+        });
+        for line in rest {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
+
+    fn install_arm(anchor: &str, replacement: &str) -> Result<(), String> {
+        check_install_verifies_its_download(
+            &install_step(&with_sole_line(&install_yml_base(), anchor, replacement))
+                .expect("the install step stays locatable in every arm that only edits its body"),
+        )
+    }
+
+    /// The base is a tree this guard passes, so a red arm below is the arm's
+    /// mutation and not the splice.
+    #[test]
+    fn the_canonical_install_step_is_a_passing_base() {
+        let base = install_yml_base();
+        assert!(check_install_verifies_its_download(
+            &install_step(&base).expect("the canonical step is locatable")
+        )
+        .is_ok());
+        // It is a base the arms can anchor into: three lines, one match each,
+        // and `set +e` is not already on it.
+        for anchor in [VERIFY_LINE, SET_LINE, SHA_PIN_LINE] {
+            assert_eq!(base.lines().filter(|line| *line == anchor).count(), 1);
+        }
+        assert!(!base.contains("set +e"));
+        // And it is still the real workflow around that step.
+        assert!(base.contains(&format!("- name: {DENY_STEP}")));
+        assert!(base.contains(&format!("- name: {LOG_STEP}")));
+    }
+
+    /// The five ways the digest comparison stops comparing, each measured
+    /// against the real file.
+    ///
+    /// Every one is step exit 0 with an unverified binary installed, and
+    /// `cargo test --test dependency_pin_tests` was 159 passed on all of them
+    /// before this guard existed.
+    #[test]
+    fn a_download_nothing_compares_fails() {
+        // 1. The line is gone. Paired with the version moved to 0.19.9, the
+        //    step installs 0.19.9 and exits 0.
+        assert!(install_arm(VERIFY_LINE, "          # nothing checks the tarball").is_err());
+
+        // 2. The status goes to `||`. The comparison still *runs* and still
+        //    prints `cargo-deny.tar.gz: FAILED`; the step exits 0 anyway.
+        assert!(install_arm(VERIFY_LINE, &format!("{VERIFY_LINE} || true")).is_err());
+        assert!(install_arm(VERIFY_LINE, &format!("{VERIFY_LINE} || echo mismatch")).is_err());
+        assert!(install_arm(VERIFY_LINE, &format!("{VERIFY_LINE} || exit 0")).is_err());
+
+        // 3. A digest that is printed rather than compared.
+        assert!(install_arm(VERIFY_LINE, "          sha256sum cargo-deny.tar.gz").is_err());
+
+        // 4. errexit taken back off before the comparison runs.
+        assert!(install_arm(SET_LINE, &format!("{SET_LINE}\n          set +e")).is_err());
+        assert!(install_arm(SET_LINE, &format!("{SET_LINE}\n          set +eu")).is_err());
+        assert!(install_arm(SET_LINE, &format!("{SET_LINE}\n          set +o errexit")).is_err());
+
+        // 5. A digest fetched from the same host as the tarball it vouches for.
+        assert!(install_arm(
+            VERIFY_LINE,
+            "          curl -sSfL -o SHA256SUMS \"$BASE/SHA256SUMS\"\n          \
+             sha256sum -c SHA256SUMS"
+        )
+        .is_err());
+    }
+
+    /// Trees that are as safe as the shipped one, or safer, stay green.
+    ///
+    /// Without these the cheapest way back to green from a red build is to undo
+    /// the strictness, which is the lesson SAK-241 paid for. Six of these came
+    /// back red against an un-spliced base; see `CANONICAL_INSTALL_STEP`.
+    #[test]
+    fn a_stricter_install_step_passes() {
+        // The shipped file is deliberately *not* read here. The one test that
+        // reads it unnormalised is `ci_yml_verifies_the_gate_binary_before_running_it`,
+        // so that a hole landing in `ci.yml` fails that one test and no other —
+        // two tests reporting one hole is how the first draft of this block
+        // read, and the second message was the worse of the two.
+
+        // `set -o errexit` spelled out. Measured on the real file: step exit 0,
+        // 0.20.2 installed.
+        assert!(install_arm(SET_LINE, "          set -o errexit -o nounset -o pipefail").is_ok());
+
+        // The body's own `set` without `e`, with and without an explicit abort.
+        // Measured: the runner invokes `bash -e`, so `set -uo pipefail` plus a
+        // version bump is still step exit 1 with nothing installed. Dropping
+        // the `e` is not the hole; only `set +e` is.
+        assert!(install_arm(VERIFY_LINE, &format!("{VERIFY_LINE} || exit 1")).is_ok());
+        assert!(install_arm(SET_LINE, "          set -uo pipefail").is_ok());
+
+        // Quieter, still comparing. Measured: no `: OK` line in the log, step
+        // exit 0, right binary — which is also why the log line is not what
+        // this guard reads.
+        assert!(install_arm(
+            VERIFY_LINE,
+            &VERIFY_LINE.replace("sha256sum -c -", "sha256sum -c --status -")
+        )
+        .is_ok());
+
+        // A different tool, and the same thing twice.
+        assert!(install_arm(
+            VERIFY_LINE,
+            &VERIFY_LINE.replace("sha256sum -c -", "shasum -a 256 -c -")
+        )
+        .is_ok());
+        assert!(install_arm(VERIFY_LINE, &format!("{VERIFY_LINE}\n{VERIFY_LINE}")).is_ok());
+
+        // The digest written out instead of referenced. Equally pinned by this
+        // commit, so equally fine — which is why the guard asks where the digest
+        // comes from rather than demanding a particular `env:` key.
+        assert!(install_arm(
+            VERIFY_LINE,
+            "          echo \"9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  \
+             cargo-deny.tar.gz\" | sha256sum -c -"
+        )
+        .is_ok());
+
+        // A `set +e` after the comparison has already run and been acted on.
+        // Harmless, so not a hole — the arms above put it *before*.
+        assert!(install_arm(VERIFY_LINE, &format!("{VERIFY_LINE}\n          set +e")).is_ok());
+    }
+
+    /// Shapes the reader cannot read fail rather than passing.
+    #[test]
+    fn an_unreadable_install_step_fails() {
+        let base = install_yml_base();
+
+        // The step renamed, so this guard would be reading about a step that is
+        // not the one installing the binary.
+        assert!(install_step(&base.replace(
+            &format!("- name: {INSTALL_STEP}"),
+            &format!("- name: {INSTALL_STEP} RENAMED")
+        ))
+        .is_err());
+
+        // Commented out.
+        assert!(install_step(&base.replace(
+            &format!("- name: {INSTALL_STEP}"),
+            &format!("# - name: {INSTALL_STEP}")
+        ))
+        .is_err());
+
+        // Two of them: which one installs the binary the gate runs is not
+        // something a reader can tell.
+        assert!(install_step(&format!(
+            "jobs:\n  deny:\n    steps:\n      - name: {INSTALL_STEP}\n        run: true\n      \
+             - name: {INSTALL_STEP}\n        run: true\n"
+        ))
+        .is_err());
+
+        // No `run:` at all, and a `run:` with nothing under it.
+        assert!(install_step(&format!(
+            "    steps:\n      - name: {INSTALL_STEP}\n        uses: some/action@v1\n"
+        ))
+        .is_err());
+        assert!(install_step(&format!(
+            "    steps:\n      - name: {INSTALL_STEP}\n        run: |\n      - name: next\n"
+        ))
+        .is_err());
+
+        // A one-line `run:` is read as a body rather than skipped — and a
+        // one-liner that installs without comparing is the hole, not an
+        // exemption from it.
+        let inline = install_step(&format!(
+            "    steps:\n      - name: {INSTALL_STEP}\n        run: curl -sSfL -o d.tgz \"$URL\" \
+             && tar xzf d.tgz\n"
+        ))
+        .expect("an inline body is still a body");
+        assert!(check_install_verifies_its_download(&inline).is_err());
+
+        // The pin deleted from `env:` while the body still reads it. At runtime
+        // that is fail-closed — `set -u` makes the step exit 1 with nothing
+        // installed (measured) — so this arm is not reporting a hole. It is here
+        // because the *reader* can no longer tell a pinned digest from a fetched
+        // one, and an unreadable comparison fails rather than passing.
+        assert!(install_arm(SHA_PIN_LINE, "          # pin removed").is_err());
+    }
+
+    /// The two helpers the predicate leans on, pinned on synthetic input where
+    /// `assert_eq!` is honest because the input is fixed.
+    #[test]
+    fn the_install_step_readers_grammar() {
+        assert!(clears_errexit("set +e"));
+        assert!(clears_errexit("set +eu"));
+        assert!(clears_errexit("set +uo pipefail +e"));
+        assert!(clears_errexit("set +o errexit"));
+        assert!(!clears_errexit("set -euo pipefail"));
+        assert!(!clears_errexit("set +u"));
+        assert!(!clears_errexit("set +o pipefail"));
+        // Not a `set` line at all, however much it looks like one.
+        assert!(!clears_errexit("echo 'set +e'"));
+
+        assert_eq!(
+            shell_vars("echo \"${A}  $B\" | x -c -"),
+            vec!["A".to_string(), "B".to_string()]
+        );
+        assert_eq!(shell_vars("sha256sum -c SHA256SUMS"), Vec::<String>::new());
+
+        assert!(has_sha256_literal(
+            "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  f"
+        ));
+        assert!(!has_sha256_literal("9f12ed4c  f"));
+
+        // The body of the canonical step as this reader sees it: comments gone,
+        // the comparison present exactly once. Asserted against the base rather
+        // than the shipped file, which may legitimately verify twice.
+        let step = install_step(&install_yml_base()).expect("locatable");
+        assert_eq!(
+            step.body
+                .iter()
+                .filter(|line| DIGEST_COMPARISONS.iter().any(|form| line.contains(form)))
+                .count(),
+            1
+        );
+        assert!(step.body.iter().all(|line| !line.starts_with('#')));
+        assert_eq!(
+            step.env,
+            vec![
+                "CARGO_DENY_VERSION: 0.0.0".to_string(),
+                "CARGO_DENY_SHA256: \
+                 0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+            ]
+        );
     }
 }
