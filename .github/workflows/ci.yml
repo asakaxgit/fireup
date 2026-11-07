@@ -70,9 +70,21 @@ jobs:
 
       # The static checks that keep the documented promises honest: the fidelity
       # matrix, the comparison document, and the README badges all have to agree
-      # with tests/conformance/matrix.json.
+      # with tests/conformance/matrix.json, and the workflow files in this
+      # directory have to stay parseable.
       - name: Docs and matrix are in sync
-        run: cargo test --test fidelity_matrix_tests
+        run: |
+          cargo test --test fidelity_matrix_tests
+          cargo test --test workflow_yaml_tests
+
+      # Guards that assert *how* a request is served rather than what comes
+      # back, so no other suite can see them fail. `local_pushdown_boundary_tests`
+      # is the one that catches a `Store` decorator which forwards
+      # `scan_collection` but not `scan_collection_filtered` — correct answers,
+      # pushdown silently gone. Needs no database: it records the calls a
+      # `MemoryStore` stack receives.
+      - name: Data-plane boundary guards
+        run: cargo test --test local_pushdown_boundary_tests
 
       # Each of these starts what it needs in-process and talks to it over real
       # gRPC or real HTTP/1.1.
