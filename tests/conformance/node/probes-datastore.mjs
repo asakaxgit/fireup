@@ -52,6 +52,27 @@ const commitWithTransforms = (raw, projectId, kind, name, transforms, properties
     ],
   })
 
+/**
+ * Write `properties` restricted to `mask`, on the wire, optionally with
+ * `transforms` after it.
+ *
+ * `@google-cloud/datastore` has no handwritten surface for `property_mask`, the
+ * same reason `property_transforms` is driven through the generated client —
+ * `save()` cannot express either — so every mask row is a raw `Commit`.
+ */
+const commitMasked = (raw, projectId, kind, name, mask, properties, { transforms = [], op = 'upsert' } = {}) =>
+  unary(raw.datastore, 'Commit', {
+    project_id: projectId,
+    mode: 'NON_TRANSACTIONAL',
+    mutations: [
+      {
+        [op]: { key: entityKey(projectId, kind, name), properties },
+        property_mask: { paths: mask },
+        property_transforms: transforms,
+      },
+    ],
+  })
+
 /** Four tasks of one kind, the dataset the query probes read. */
 const seedTasks = async (datastore, kind) => {
   await datastore.save([
@@ -340,6 +361,20 @@ export const datastoreProbes = [
         { names: /GQL/ },
       )
     },
+    // Dormant for Fireup; it exists so observe.mjs can measure GQL against an
+    // implementation that documents it, rather than taking the README's word.
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = await seedTasks(datastore, freshKind('gql'))
+      const response = await unary(raw.datastore, 'RunQuery', {
+        project_id: projectId,
+        partition_id: { project_id: projectId },
+        gql_query: { query_string: `SELECT * FROM ${kind}`, allow_literals: true },
+      })
+      const names = (response.batch?.entity_results ?? [])
+        .map((result) => result.entity?.key?.path?.at(-1)?.name)
+        .sort()
+      assert.deepEqual(names, ['a', 'b', 'c', 'd'], 'GQL must return the seeded entities')
+    },
   },
 
   {
@@ -551,11 +586,12 @@ export const datastoreProbes = [
       const key = datastore.key([kind, 'one'])
       await datastore.save({ key, data: { n: datastore.int(10) } })
 
-      // `property_mask` on a mutation is still unserved, so an unmasked update
-      // replaces the whole entity before the transform reads it: an increment
-      // accumulates only when the submitted entity carries the current value.
-      // Faithful to the proto, surprising in practice, so it is pinned here
-      // rather than left for somebody to discover as a lost counter.
+      // An *unmasked* update replaces the whole entity before the transform
+      // reads it, so an increment accumulates only when the submitted entity
+      // carries the current value. Faithful to the proto, surprising in
+      // practice, so it is pinned here rather than left for somebody to
+      // discover as a lost counter. The masked form, which does accumulate, is
+      // `datastore.property-mask.transform-accumulates` below.
       const response = await commitWithTransforms(raw, projectId, kind, 'one', [
         { property: 'n', increment: { integer_value: '5' } },
       ])
@@ -584,6 +620,194 @@ export const datastoreProbes = [
           }),
         { names: /nested property mask/i },
       )
+    },
+  },
+
+  {
+    id: 'datastore.property-mask.writes-a-carried-path',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('maskwrite')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { title: 'first', author: 'ada' } })
+
+      await commitMasked(raw, projectId, kind, 'one', ['title'], {
+        title: { string_value: 'second' },
+      })
+
+      assert.equal((await datastore.get(key))[0].title, 'second')
+    },
+  },
+
+  {
+    id: 'datastore.property-mask.deletes-an-omitted-path',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('maskdelete')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { title: 'first', draft: 1 } })
+
+      // The proto: "properties referenced in the mask but not in the entity are
+      // deleted". The mask names `draft`; the entity does not carry it.
+      await commitMasked(raw, projectId, kind, 'one', ['title', 'draft'], {
+        title: { string_value: 'second' },
+      })
+
+      const stored = (await datastore.get(key))[0]
+      assert.equal(stored.title, 'second')
+      assert.equal(
+        stored.draft,
+        undefined,
+        'a masked property the entity omits must be deleted, not left alone',
+      )
+    },
+  },
+
+  {
+    id: 'datastore.property-mask.leaves-unnamed-properties',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('maskleave')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { title: 'first', author: 'ada' } })
+
+      // The entity carries a different `author`, but the mask does not name it,
+      // so the stored value stands: "others are left untouched".
+      await commitMasked(raw, projectId, kind, 'one', ['title'], {
+        title: { string_value: 'second' },
+        author: { string_value: 'ignored' },
+      })
+
+      assert.equal((await datastore.get(key))[0].author, 'ada')
+    },
+  },
+
+  {
+    id: 'datastore.property-mask.key-is-accepted-and-ignored',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('maskkey')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { title: 'first' } })
+
+      // "None of the properties in the mask may have a reserved name, except
+      // for `__key__`." It names no field — the key travels in the entity's
+      // key — so a mask of only `__key__` writes no properties.
+      await commitMasked(raw, projectId, kind, 'one', ['__key__'], {
+        title: { string_value: 'ignored' },
+      })
+
+      const stored = (await datastore.get(key))[0]
+      assert.equal(stored.title, 'first', 'a __key__-only mask writes no properties')
+      assert.ok(stored[datastore.KEY], 'the entity still has its key')
+    },
+  },
+
+  {
+    id: 'datastore.property-mask.nested-path',
+    unimplemented: async ({ datastore, raw, projectId, freshKind, expectUnimplemented }) => {
+      const kind = freshKind('maskmutnested')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { title: 'first' } })
+
+      await expectUnimplemented(
+        () =>
+          commitMasked(raw, projectId, kind, 'one', ['author.name'], {
+            title: { string_value: 'second' },
+          }),
+        { names: /property_mask/i },
+      )
+      assert.equal(
+        (await datastore.get(key))[0].title,
+        'first',
+        'the refusal must happen before the store is touched',
+      )
+    },
+  },
+
+  {
+    id: 'datastore.property-mask.empty-path',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('maskempty')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { title: 'first' } })
+
+      // "A path must not be empty."
+      await expectCode(3, () =>
+        commitMasked(raw, projectId, kind, 'one', [''], { title: { string_value: 'second' } }),
+      )
+      assert.equal((await datastore.get(key))[0].title, 'first')
+    },
+  },
+
+  {
+    id: 'datastore.property-mask.reserved-path',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('maskreserved')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { title: 'first' } })
+
+      await expectCode(3, () =>
+        commitMasked(raw, projectId, kind, 'one', ['title', '__scatter__'], {
+          title: { string_value: 'second' },
+        }),
+      )
+      assert.equal((await datastore.get(key))[0].title, 'first')
+    },
+  },
+
+  {
+    id: 'datastore.property-mask.ignored-on-delete',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('maskondelete')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { title: 'first', author: 'ada' } })
+
+      // The proto: "this field is ignored for `delete`".
+      await unary(raw.datastore, 'Commit', {
+        project_id: projectId,
+        mode: 'NON_TRANSACTIONAL',
+        mutations: [
+          { delete: entityKey(projectId, kind, 'one'), property_mask: { paths: ['title'] } },
+        ],
+      })
+
+      assert.equal(
+        (await datastore.get(key))[0],
+        undefined,
+        'the whole entity goes, not just the masked property',
+      )
+    },
+  },
+
+  {
+    id: 'datastore.property-mask.transform-accumulates',
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = freshKind('masktransform')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { title: 'first', n: datastore.int(0) } })
+
+      // The whole point of the pairing: the mask keeps the write off `n`, so the
+      // increment reads the stored value and the counter climbs across commits
+      // without the client ever sending it. Contrast
+      // `datastore.transform.runs-after-the-operation`, where the unmasked form
+      // resets it each time.
+      for (const [round, want] of [['second', '1'], ['third', '2']]) {
+        const response = await commitMasked(
+          raw,
+          projectId,
+          kind,
+          'one',
+          ['title'],
+          { title: { string_value: round } },
+          { transforms: [{ property: 'n', increment: { integer_value: '1' } }] },
+        )
+        assert.equal(
+          response.mutation_results[0].transform_results[0].integer_value,
+          want,
+          'a masked transform must accumulate on the stored value',
+        )
+      }
+
+      const stored = (await datastore.get(key))[0]
+      assert.equal(Number(stored.n), 2)
+      assert.equal(stored.title, 'third')
     },
   },
 ]

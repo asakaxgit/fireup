@@ -311,7 +311,7 @@ pub fn apply_property_mask(entity: &mut DsEntity, paths: &[String]) -> Result<()
         return Ok(());
     }
     for path in paths {
-        if path.contains('.') || path.contains('`') {
+        if path.contains('.') || path.contains('`') || path.contains('\\') {
             return Err(Status::unimplemented(format!(
                 "fireup local does not support nested property masks yet (got {path:?})"
             )));
@@ -321,6 +321,81 @@ pub fn apply_property_mask(entity: &mut DsEntity, paths: &[String]) -> Result<()
         .properties
         .retain(|name, _| paths.iter().any(|path| path == name));
     Ok(())
+}
+
+/// Resolve a mutation's `property_mask` into the document fields a masked write
+/// touches, in mask order.
+///
+/// This is the write-side counterpart of [`apply_property_mask`], and it is a
+/// different question: a read mask *filters* what comes back, while a write mask
+/// decides, for each path, whether the stored field is overwritten or removed.
+/// Per the proto, "if the entity already exists, only properties referenced in
+/// the mask are updated, others are left untouched. Properties referenced in the
+/// mask but not in the entity are deleted" — so a path the entity carries maps
+/// to `Some(value)` and a path it omits maps to `None`, which
+/// [`Mutation::Merge`](crate::local::store::Mutation::Merge) applies as a
+/// deletion. Properties the entity carries that the mask does *not* name are
+/// simply not in the result and so are left untouched.
+///
+/// Values cross the same [`ds_value_to_fs`] conversion as an unmasked write, so
+/// a masked property is stored exactly as [`entity_to_document`] would have
+/// stored it — otherwise a later `increment` would read a differently tagged
+/// value depending on whether the property arrived through a mask.
+///
+/// Refusals, each matching a line of the proto:
+///
+/// * An empty path: "a path must not be empty".
+/// * A path containing `.` or `\`: a dot names a property *inside* an entity
+///   value, which is a nested document field, and the escape exists only to
+///   disambiguate that. Both stay refused exactly as they are for a transform's
+///   property and on the Firestore `update_mask` side, rather than guessing and
+///   overwriting the whole parent property.
+/// * A reserved property name other than `__key__`: "none of the properties in
+///   the mask may have a reserved name, except for `__key__`". `__key__` itself
+///   is accepted and dropped — the key is carried by the document name, so there
+///   is no field for it to write, and a mask that names only `__key__` is
+///   therefore a write of no properties rather than an error.
+pub fn masked_entity_fields(
+    entity: &DsEntity,
+    paths: &[String],
+    project_id: &str,
+    database_id: &str,
+) -> Result<Vec<(String, Option<FsValue>)>, Status> {
+    let mut fields = Vec::with_capacity(paths.len());
+    for path in paths {
+        if path.is_empty() {
+            return Err(Status::invalid_argument(
+                "a property mask path must not be empty",
+            ));
+        }
+        if path.contains('.') || path.contains('\\') {
+            return Err(Status::unimplemented(format!(
+                "fireup local does not support property paths in a mutation's property_mask yet \
+                 (got {path:?}); a masked property must be a top-level property. \
+                 See docs/local/README.md for the full fidelity matrix."
+            )));
+        }
+        if path == "__key__" {
+            continue;
+        }
+        if is_reserved_property_name(path) {
+            return Err(Status::invalid_argument(format!(
+                "property_mask may not name the reserved property {path:?}"
+            )));
+        }
+        let value = match entity.properties.get(path) {
+            Some(value) => Some(ds_value_to_fs(value, project_id, database_id)?),
+            None => None,
+        };
+        fields.push((path.clone(), value));
+    }
+    Ok(fields)
+}
+
+/// Whether `name` is a Datastore reserved property name — `__`-wrapped, as in
+/// `__key__`. Used to enforce the proto's restriction on mask paths.
+fn is_reserved_property_name(name: &str) -> bool {
+    name.len() > 4 && name.starts_with("__") && name.ends_with("__")
 }
 
 /// Resolve `Mutation.property_transforms` against the document fields the named

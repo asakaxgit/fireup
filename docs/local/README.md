@@ -153,11 +153,21 @@ Every row below is checked, not just written down:
 row with the official SDKs, and `cargo test --test fidelity_matrix_tests` fails
 if this table and that suite stop agreeing. See [Tests](#tests).
 
+For the same rows set beside Google's Firebase Emulator Suite and the production
+service, see [`COMPARISON.md`](COMPARISON.md) — most of whose emulator cells are
+measured by running the same probes against it
+([`measurements/`](measurements/README.md)). Two rows in the table below are
+known to be **wrong in Fireup's favour**, found that way: Fireup accepts an
+`order_by` with a term after `__name__`, and serves a descending `__name__`
+scan, where the emulator and production Firestore both reject them. Both have
+follow-up issues; the comparison quotes the emulator's verbatim error.
+
 ### RPCs
 
-All 17 RPCs of `google.firestore.v1.Firestore`. The 12 marked **served** are the
-v1 surface frozen in the `firestore-v1-contract` document on
-[SAK-163](/SAK/issues/SAK-163).
+All 17 RPCs of `google.firestore.v1.Firestore`. The first 12 marked **served**
+are the v1 surface frozen in the `firestore-v1-contract` document on
+[SAK-163](/SAK/issues/SAK-163); `Listen` was added in Phase 2.1
+([SAK-189](/SAK/issues/SAK-189)).
 
 | RPC | Status | Notes |
 |---|---|---|
@@ -173,7 +183,7 @@ v1 surface frozen in the `firestore-v1-contract` document on
 | `RunQuery` | served | See the query matrix below. Transactions and `new_transaction` supported; `read_time` and `explain_options` refused. |
 | `BatchWrite` | served | Deliberately **not** atomic, per the API: one status per write. Serves [field transforms](#field-transforms). |
 | `ListCollectionIds` | served | Paged by resume token. `read_time` refused. |
-| `Listen` | `UNIMPLEMENTED` | Realtime listeners. No change feed exists to drive them. The refusal is clear on the wire, but the Node SDK swallows it — see [Other known limits](#other-known-limits). |
+| `Listen` | served | Document and query watches. See the listener matrix below. |
 | `Write` (streaming) | `UNIMPLEMENTED` | `Commit` is the write path SDKs use. |
 | `RunAggregationQuery` | `UNIMPLEMENTED` | `count()`/`sum()`/`average()`. |
 | `PartitionQuery` | `UNIMPLEMENTED` | Parallel-scan partitioning, for data-pipeline clients. |
@@ -199,6 +209,7 @@ immediately rather than after a scan.
 | Cursors (`startAt`/`startAfter`/`endAt`/`endBefore`) | served, including `startAfter(documentSnapshot)` paging |
 | Nested field paths (`a.b`) in filters, orders, projections, and read masks | served, with `` `a.b` `` for a field whose name contains a dot |
 | Nested field paths in an `update_mask` | `UNIMPLEMENTED` — a mask writes whole top-level fields |
+| A top-level `update_mask` path the write does not carry | served — the field is **deleted**, which is how `FieldValue.delete()` reaches the wire |
 | A collection group query with no collection id | `UNIMPLEMENTED` — name the collection to scan |
 | Vector search (`find_nearest`) | `UNIMPLEMENTED` |
 | Aggregations (`count()`, `sum()`, `average()`) | `UNIMPLEMENTED` |
@@ -294,8 +305,9 @@ wrong:
 With `--postgres-url`, a query's equality and range predicates are translated
 into SQL so the database returns the rows that could match instead of the whole
 collection. It applies to both query reads — one collection, and the collection
-group form that spans every matching collection below the parent. The in-memory
-store does not do this and reads everything.
+group form that spans every matching collection below the parent — and to both
+read paths: `RunQuery`, and the per-change re-evaluation of a `Listen` query
+target. The in-memory store does not do this and reads everything.
 
 **It cannot change an answer.** The translation is *sound, not exact*: it must
 keep every row the query could match, and is free to keep rows the query will
@@ -400,6 +412,74 @@ effect 1 only. Per-field expression indexes would fix that and are deliberately
 not created — the server cannot know which fields a project queries, and
 guessing would cost every write.
 
+### Realtime listeners (Phase 2.1)
+
+`Listen` is served well enough for `onSnapshot()` in the official SDKs. A target
+is validated when it is added, and one this server cannot serve comes back as a
+`TargetChange` of type `REMOVE` carrying the cause — the contract's per-target
+error channel — so a bad target does not take down the other listeners a client
+multiplexed onto the same stream.
+
+| Feature | Status |
+|---|---|
+| `DocumentsTarget` (watch named documents) | served |
+| `QueryTarget` with any query shape from the matrix above | served — it is the same compiled query `RunQuery` uses |
+| `QueryTarget` over a collection group (`all_descendants`) | served — the watch covers that collection at any depth below the parent |
+| `DocumentChange` / `DocumentDelete` / `DocumentRemove` | served, and distinguished |
+| `TargetChange` `ADD` / `CURRENT` / `REMOVE` / `RESET` / `NO_CHANGE` | served |
+| `Target.once` | served — the target retires as soon as it is `CURRENT` |
+| `Target.target_id = 0` (server assigns one) | served |
+| `RemoveTarget` | served |
+| `Target.resume_token` | ignored; the target re-snapshots (see below) |
+| `Target.read_time` (resume at a point in time) | `UNIMPLEMENTED` |
+| `ExistenceFilter` / `Target.expected_count` | not sent; a client gets full changes instead |
+
+What to know before trusting a listener here:
+
+- **The feed is in-process.** A change reaches a listener because it passed
+  through *this process's* store. With `--postgres-url`, a document written by a
+  second `fireup local`, by `psql`, or by any other client of the same database
+  does **not** wake these listeners, because nothing polls the table. Single
+  process — which is what a local SDK test is — is complete.
+- **A query target is re-evaluated on every change to its collection.** That is
+  what makes `limit`, `offset`, cursors, and `orderBy` correct: a write that cannot
+  affect a limited result set produces no change, where matching each write
+  against the filter alone would wrongly report it. It also means a watched
+  collection is rescanned per change, which is fine for development volumes and
+  is not how production Firestore does it. The rescan goes through the same
+  [query pushdown](#query-pushdown-postgres-only) as `RunQuery`, so with
+  `--postgres-url` it reads the target's filtered rows rather than the whole
+  collection — the read that most needs narrowing, being one per write per
+  listener rather than one per request.
+- **No resume tokens are issued.** Every `TargetChange` carries an empty
+  `resume_token`, so an SDK has nothing to resume from and reconnects with a
+  full snapshot. A token that arrives anyway is ignored rather than honoured:
+  pretending to resume would make the client silently skip whatever changed
+  while it was away.
+- **A listener that falls behind is `RESET`, never silently truncated.** The feed
+  buffers a bounded number of events per listener; a listener that exceeds it
+  gets `RESET` plus a fresh snapshot, which is exactly what the protocol's
+  `RESET` is for.
+- **Writes through any surface notify.** The change feed sits *below* the data
+  plane, so a Datastore `Commit`, a `fireup local seed`, and every Firestore
+  write RPC all reach a Firestore listener — in this store they are the same
+  document.
+- **Shutting the server down ends its listeners.** A `Listen` stream is
+  open-ended, and gRPC graceful shutdown waits for in-flight requests, so the
+  server closes its listeners explicitly rather than hanging on Ctrl-C.
+- **A half-closed request stream finishes the `Listen` stream.** When a client
+  stops writing requests, this server treats that as "done with this stream" and
+  completes it — not as "done adding targets, keep streaming". That is the
+  narrower of the two legal readings of bidi gRPC, and it is the one the official
+  SDKs rely on: `unsubscribe()` in `@google-cloud/firestore` half-closes, drops
+  its reference, and never reads the stream again, as do its stream reset and
+  watch idle-timeout paths. A server that kept those streams open would leave one
+  live session behind per SDK idle cycle, and — because `terminate()` closes the
+  HTTP/2 session gracefully, waiting on open streams — a Node process that ever
+  called `onSnapshot()` would never exit. Corrected in
+  [SAK-220](/SAK/issues/SAK-220); until then hyper 0.14 dropped the connection on
+  the client's GOAWAY and hid both.
+
 ### Transactions
 
 - **Atomic:** every write in a `Commit` applies or none does.
@@ -426,7 +506,7 @@ guessing would cost every write.
 |---|---|---|
 | `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
 | `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`), `AND`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
-| `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` (below). |
+| `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` and `property_mask` (below). |
 | `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. |
 | `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
 | `ReserveIds` | served | Acknowledged; local allocations already avoid colliding with completed keys. |
@@ -475,13 +555,41 @@ refuses nested field paths for the same reason. Datastore escapes `.` and `\` in
 a property name, so a name containing either is refused too — incrementing the
 wrong property is worse than saying no.
 
-**A transform runs after the operation,** per the proto, and Fireup does not
-serve `property_mask` yet, so an `update` or `upsert` always replaces the whole
-entity before the transform reads it. An `increment` therefore accumulates only
-when the submitted entity carries the property's current value — the
-read-modify-write idiom inside a transaction. A mutation that omits the property
-resets it to the operand. This is the Datastore equivalent of `set()` clearing a
-field before the transform runs, noted above.
+**A transform runs after the operation,** per the proto, and the transforms apply
+"regardless of the property mask". Which operation the transform lands on top of
+is therefore what decides whether it accumulates:
+
+- *Without* a mask, an `update` or `upsert` replaces the whole entity first, so
+  an `increment` accumulates only when the submitted entity carries the
+  property's current value — the read-modify-write idiom inside a transaction. A
+  mutation that omits the property resets it to the operand. This is the
+  Datastore equivalent of `set()` clearing a field before the transform runs,
+  noted above.
+- *With* a mask that does not name the property, nothing in the write touches it,
+  so the transform reads the stored value and the counter climbs across commits
+  without the client ever sending it. `property_mask: {paths: ["title"]}` plus
+  `increment("hits", 1)` is the useful shape, and the same pairing as Firestore's
+  `update_mask` + `update_transforms`.
+
+#### Datastore `property_mask` on a mutation
+
+`Mutation.property_mask` restricts an `insert`/`update`/`upsert` to the
+properties it names, mapped onto the shared store's masked-write primitive:
+
+| Mask shape | Behaviour |
+|---|---|
+| A path the entity carries | Written, as an unmasked write would |
+| A path the entity omits | **Deleted**, per the proto |
+| A property the mask does not name | Left untouched, even if the entity carries a value for it |
+| `__key__` | Accepted and ignored — the key travels in the entity's key, so it names no field |
+| A property *path* (`foo.bar`) or an escaped name | `UNIMPLEMENTED`, as for a transform's property and the Firestore `update_mask` |
+| An empty path | `INVALID_ARGUMENT` — "a path must not be empty" |
+| Any other reserved (`__`-wrapped) name | `INVALID_ARGUMENT` |
+
+A mask does not weaken the operation's own precondition: a masked `insert` on an
+existing entity is still `ALREADY_EXISTS` and a masked `update` on a missing one
+is still `NOT_FOUND`. On a `delete` the mask is ignored, per the proto, so the
+whole entity is removed rather than some of its properties.
 
 ### Other known limits
 
@@ -495,23 +603,10 @@ field before the transform runs, noted above.
   collection group query reads every matching collection below its parent.
   Either way this is a local-development engine, not a production query planner:
   there is no cost model, no index selection, and no `EXPLAIN`.
-- **No `property_mask` on a Datastore mutation.** Masked entity updates are
-  still `UNIMPLEMENTED`, which is why a Datastore `increment` needs the written
-  entity to carry the current value (see above).
-- **`onSnapshot()` hangs instead of failing.** This is the one place the "a gap
-  is never a hang" rule does not reach the caller, and it is upstream rather
-  than ours. The server refuses `Listen` with a clear `UNIMPLEMENTED` — verified
-  on the wire — but `@google-cloud/firestore` marks the stream healthy before
-  the trailers-only status lands, so its `Watch` attaches its own error handler
-  too late, sees only the stream end, and synthesises
-  `GoogleError('Stream ended unexpectedly')` with code `UNKNOWN`, which it
-  treats as retryable. It then reopens the stream forever and the error callback
-  is never called. Nothing in this repository can fix that from the server side;
-  use a gRPC client directly if you need to see the refusal. The conformance
-  suite pins the behaviour (`limits.listen-sdk-retry-loop`) so it cannot change
-  silently, and that row goes away when `Listen` is served.
-- **No field deletion through a mask.** A masked field that the request does not
-  carry is left alone instead of being deleted.
+- **Nested mask paths are refused on both surfaces.** A Firestore `update_mask`
+  or a Datastore `property_mask` naming `foo.bar` is `UNIMPLEMENTED` rather than
+  overwriting the whole parent field; top-level paths are served, including the
+  field deletion a masked path with no submitted value means.
 - **No point-in-time reads.** The store keeps only the current version of a
   document, so any `read_time` consistency selector is refused rather than
   answered with current data.
@@ -842,6 +937,16 @@ The table is created in the connection's default schema, so a role whose
 `src/local/value_json.rs` owns that encoding; its tests round-trip every value
 type an SDK can store, including `int64` past 2^53 (written as a string),
 non-finite doubles, raw bytes, and nested maps and arrays.
+
+A timestamp is written as RFC 3339 with nanosecond precision and a `Z`, which
+is a fixed 30 bytes — the property the
+[pushdown](#query-pushdown-postgres-only) relies on to compare timestamps as
+text. That holds only for years 0001–9999, which is the range both
+`google.protobuf.Timestamp` and Firestore are specified for, so a timestamp
+outside it is refused with `INVALID_ARGUMENT` at the **write**, by both stores.
+Rows a build before that check wrote — the year appears signed and five digits
+wide, `+11476-…` — are still read back exactly, and are kept out of the text
+comparison rather than compared wrongly.
 
 ## Protos
 

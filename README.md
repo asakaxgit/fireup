@@ -1,5 +1,11 @@
 # Fireup — a PostgreSQL-backed migrator and local data plane for Firestore/Datastore
 
+[![CI](https://github.com/asakaxgit/fireup/actions/workflows/ci.yml/badge.svg)](https://github.com/asakaxgit/fireup/actions/workflows/ci.yml)
+[![Coverage](https://github.com/asakaxgit/fireup/actions/workflows/coverage.yml/badge.svg)](https://github.com/asakaxgit/fireup/actions/workflows/coverage.yml)
+[![line coverage](https://img.shields.io/badge/line%20coverage-%E2%89%A575%25-success)](#ci-and-coverage)
+[![fidelity matrix](https://img.shields.io/badge/fidelity%20matrix-92%2F119%20served-informational)](docs/local/README.md#fidelity-matrix)
+[![licence](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
+
 Fireup takes a managed Firestore/Datastore export and gives you **both** halves
 of a migration at once, on one PostgreSQL database:
 
@@ -39,6 +45,15 @@ Fireup's default port is `4589` specifically so it can run beside floci-gcp
 (`4588`) and Google's Firebase emulators (`8080`/`4000`) without an argument
 about ports.
 
+**[docs/local/COMPARISON.md](docs/local/COMPARISON.md)** is the feature matrix —
+Fireup, the Firebase Emulator Suite, and the production service — including the
+places where Fireup serves less and the places where it is more faithful. Most
+of the emulator column is **measured**: the conformance suite was pointed at the
+emulator Google ships and the raw per-row answers are committed in
+[`docs/local/measurements/`](docs/local/measurements/README.md). Every cell says
+which kind of evidence it is and which emulator version it is true of — four
+Fireup bugs and two corrections to our own document came out of measuring it.
+
 > **Independent implementation.** `fireup local` implements **public** Google API
 > contracts from public documentation and the public
 > [googleapis](https://github.com/googleapis/googleapis) protobuf definitions.
@@ -64,8 +79,8 @@ about ports.
 ### Local data plane
 
 - `google.firestore.v1.Firestore`: document CRUD, structured queries,
-  transactions, batch writes — 12 of the 17 RPCs, with the rest an explicit
-  `UNIMPLEMENTED`
+  transactions, batch writes, and realtime `onSnapshot()` listeners — 13 of the
+  17 RPCs, with the rest an explicit `UNIMPLEMENTED`
 - `google.datastore.v1.Datastore`: `Lookup`, `RunQuery`, `Commit`,
   transactions, id allocation — over the *same* rows, since kinds map to
   collections
@@ -276,6 +291,64 @@ scripts/smoke-local-auth.sh
 
 Durable-store tests skip unless you point them at a dedicated database you own;
 see [docs/local/README.md#tests](docs/local/README.md#tests).
+
+### CI and coverage
+
+Two workflows run on every commit, and the badges at the top of this file are
+those two plus two numbers:
+
+| Badge | What it actually means |
+|---|---|
+| **CI** | [`ci.yml`](.github/workflows/ci.yml) — two jobs. `test`: build plus every suite that needs nothing but a Rust toolchain — unit tests, the local data plane over real gRPC/HTTP, export parsing, the CLI and library surface, and the docs-vs-matrix checks. Red there means the code is broken, not that a service failed to start. `deny`: the supply-chain gate below. The badge is red if either fails. |
+| **Coverage** | [`coverage.yml`](.github/workflows/coverage.yml) — runs `scripts/coverage.sh` and **fails under 75% line coverage**. The full HTML report is attached to each run as the `coverage-report` artifact, and the summary table is printed in the run's summary. |
+| **line coverage** | The enforced floor, not a live reading. A number nobody checks drifts; a floor that fails the build does not. The real figure for a commit is in that run's summary. |
+| **fidelity matrix** | How many of the 119 documented `fireup local` behaviours are served, from [`tests/conformance/matrix.json`](tests/conformance/matrix.json). `cargo test --test fidelity_matrix_tests` fails if the badge and the matrix disagree, so it cannot go stale. |
+
+```bash
+scripts/coverage.sh          # the same thing CI runs; report in target/coverage/
+scripts/coverage.sh --open   # ... and open the HTML report
+FIREUP_COVERAGE_MIN=80 scripts/coverage.sh
+```
+
+It needs `cargo install cargo-llvm-cov --locked` and `rustup component add
+llvm-tools-preview` once. Scope is the `--lib` unit tests, which is why the
+number is a floor rather than a boast: the suites that need PostgreSQL, Node, or
+a running server are not counted, so the figure means the same thing on every
+machine.
+
+### Supply chain
+
+[`deny.toml`](deny.toml) is the policy; the `deny` job in
+[`ci.yml`](.github/workflows/ci.yml) enforces it on every commit. Run exactly
+what CI runs:
+
+```bash
+cargo install cargo-deny --locked   # once; or grab the prebuilt release binary
+cargo deny --locked check -D advisory-not-detected advisories licenses bans sources
+```
+
+Four checks, and what each one is for:
+
+| Check | Policy |
+|---|---|
+| **advisories** | RustSec vulnerabilities and yanked crates. Nothing is accepted: `[advisories] ignore` in `deny.toml` is empty, so every advisory fails the build. The one exception the repo ever carried, `RUSTSEC-2026-0258` in `h2 0.3.27`, was removed by the tonic 0.13 / prost 0.13 migration that fixed it. |
+| **licences** | Permissive only — the enforced form of the audit in [`docs/licenses/CARGO_LICENSE_AUDIT.md`](docs/licenses/CARGO_LICENSE_AUDIT.md). A dependency carrying a copyleft-only licence fails the build. |
+| **bans** | Wildcard version requirements fail. Duplicate major versions only warn: the tree has eleven of them from transitive pins, none of Fireup's doing. |
+| **sources** | crates.io only. A git or unknown-registry dependency fails. |
+
+`cargo audit` is deliberately **not** used. It reads the same RustSec database
+as `cargo deny check advisories`, so running both reports every vulnerability
+twice; cargo-deny also covers licences, duplicates, and provenance in one
+binary.
+
+The checks were verified to actually bite, not just to pass — see the negative
+controls recorded in [`docs/licenses/CARGO_LICENSE_AUDIT.md`](docs/licenses/CARGO_LICENSE_AUDIT.md#how-this-is-enforced).
+
+The two older workflows — [`local_firestore.yml`](.github/workflows/local_firestore.yml)
+(the official-SDK conformance suite) and [`integration_tests.yml`](.github/workflows/integration_tests.yml)
+— are still `workflow_dispatch` only. Turning them on is a separate decision
+from adding a badge: `integration_tests.yml` gates on `cargo fmt --check` and
+`cargo clippy -D warnings`, both of which currently fail on `main`.
 
 ### Docker Commands
 

@@ -285,12 +285,6 @@ fn key_columns(name: &str) -> StoreResult<DocumentKey> {
     })
 }
 
-fn encode_fields(name: &str, document: &Document) -> StoreResult<serde_json::Value> {
-    value_json::encode_fields(&document.fields).map_err(|error| {
-        StoreError::Unsupported(format!("document {name} cannot be stored: {error}"))
-    })
-}
-
 fn row_to_document(name: &str, row: &tokio_postgres::Row) -> StoreResult<Document> {
     let payload: serde_json::Value = row.try_get("fields").map_err(|error| StoreError::Corrupt {
         name: name.to_string(),
@@ -621,7 +615,9 @@ async fn upsert_document(
     key: &DocumentKey,
     document: &Document,
 ) -> StoreResult<()> {
-    let payload = encode_fields(name, document)?;
+    // Shared with `MemoryStore` so the two backends cannot disagree about
+    // which values are legal to store; see `store::encode_storable_fields`.
+    let payload = store::encode_storable_fields(document)?;
     let create_time = document.create_time.clone().unwrap_or_default();
     let update_time = document.update_time.clone().unwrap_or_default();
 

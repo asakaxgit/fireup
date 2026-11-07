@@ -273,6 +273,80 @@ async fn batch_get_reports_found_and_missing_documents() {
     server.shutdown().await.expect("clean shutdown");
 }
 
+/// A masked field the write does not carry is **deleted**, which is what
+/// Firestore means by an `update_mask` path with no value in the document — it
+/// is how `FieldValue.delete()` reaches the wire. Before field deletion existed
+/// in the store such a field was left alone instead; this pins the real rule, on
+/// the same primitive the Datastore `property_mask` path uses.
+#[tokio::test]
+async fn a_masked_field_the_write_omits_is_deleted() {
+    let (server, mut client) = start().await;
+    let name = format!("{ROOT}/users/bob");
+
+    client
+        .commit(CommitRequest {
+            database: "projects/fireup-test/databases/(default)".to_string(),
+            writes: vec![Write {
+                operation: Some(Operation::Update(Document {
+                    name: name.clone(),
+                    fields: fields([
+                        ("name", string_value("Bob")),
+                        ("nickname", string_value("Bobby")),
+                        ("age", integer_value(40)),
+                    ]),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("set commit succeeds");
+
+    client
+        .commit(CommitRequest {
+            database: "projects/fireup-test/databases/(default)".to_string(),
+            writes: vec![Write {
+                // The mask names `age` and `nickname`; the document carries only
+                // `age`, so `nickname` is deleted and `name` is untouched.
+                operation: Some(Operation::Update(Document {
+                    name: name.clone(),
+                    fields: fields([("age", integer_value(41))]),
+                    ..Default::default()
+                })),
+                update_mask: Some(DocumentMask {
+                    field_paths: vec!["age".to_string(), "nickname".to_string()],
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("masked commit succeeds");
+
+    let fetched = client
+        .get_document(GetDocumentRequest {
+            name: name.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("get after the masked write")
+        .into_inner();
+    assert_eq!(fetched.fields["age"], integer_value(41));
+    assert_eq!(
+        fetched.fields["name"],
+        string_value("Bob"),
+        "an unmasked field is still untouched"
+    );
+    assert!(
+        !fetched.fields.contains_key("nickname"),
+        "a masked field the write omits is deleted: {:?}",
+        fetched.fields.keys().collect::<Vec<_>>()
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
 #[tokio::test]
 async fn commit_applies_set_merge_and_delete_writes() {
     let (server, mut client) = start().await;

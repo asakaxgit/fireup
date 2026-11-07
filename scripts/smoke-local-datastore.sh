@@ -13,6 +13,10 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 smoke_dir="$repo_root/tests/local-smoke-datastore"
+# Honour CARGO_TARGET_DIR, or the binary we start is not the one we built —
+# which is every run from a git worktree, where the default target directory is
+# not $repo_root/target.
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 port="${1:-4589}"
 log="$(mktemp -t fireup-local-datastore-smoke.XXXXXX.log)"
 
@@ -42,7 +46,7 @@ else
 fi
 
 echo "==> starting fireup local on 127.0.0.1:$port"
-"$repo_root/target/debug/fireup" "${server_args[@]}" >"$log" 2>&1 &
+"$target_dir/debug/fireup" "${server_args[@]}" >"$log" 2>&1 &
 server_pid=$!
 
 for _ in $(seq 1 50); do
@@ -63,12 +67,18 @@ for _ in $(seq 1 50); do
 done
 
 echo "==> running the Datastore SDK smoke test"
+# Bounded for the reason given in `smoke-local-firestore.sh`: a client that hangs
+# should be a red test, not a stalled CI job.
 if DATASTORE_EMULATOR_HOST="127.0.0.1:$port" \
    FIREUP_SMOKE_PROJECT_ID=fireup-local \
-   node "$smoke_dir/smoke.mjs"; then
+   timeout 120 node "$smoke_dir/smoke.mjs"; then
   status=0
 else
   status=$?
+  if [[ "$status" -eq 124 ]]; then
+    echo "the Datastore SDK smoke test did not finish within 120s — the client \
+is hung, not slow" >&2
+  fi
   echo "--- fireup local log ---" >&2
   cat "$log" >&2
 fi

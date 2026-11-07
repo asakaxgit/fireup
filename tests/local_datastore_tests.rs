@@ -19,7 +19,7 @@ use fireup::protos::google::datastore::v1::run_query_request::QueryType;
 use fireup::protos::google::datastore::v1::value::ValueType;
 use fireup::protos::google::datastore::v1::{
     filter::FilterType, AllocateIdsRequest, ArrayValue, BeginTransactionRequest, CommitRequest,
-    Entity, Filter, Key, KindExpression, LookupRequest, Mutation, PropertyFilter,
+    Entity, Filter, Key, KindExpression, LookupRequest, Mutation, PropertyFilter, PropertyMask,
     PropertyReference, PropertyTransform, Query, RollbackRequest, RunAggregationQueryRequest,
     RunQueryRequest, Value,
 };
@@ -84,6 +84,24 @@ fn upsert_with_transforms(
 ) -> Mutation {
     Mutation {
         operation: Some(Operation::Upsert(entity(key, properties))),
+        property_transforms: transforms,
+        ..Default::default()
+    }
+}
+
+/// An `upsert` whose write is restricted to `mask`, with `transforms` applied
+/// after it — the shape `property_mask` exists for.
+fn masked_upsert(
+    key: Key,
+    properties: HashMap<String, Value>,
+    mask: &[&str],
+    transforms: Vec<PropertyTransform>,
+) -> Mutation {
+    Mutation {
+        operation: Some(Operation::Upsert(entity(key, properties))),
+        property_mask: Some(PropertyMask {
+            paths: mask.iter().map(|path| path.to_string()).collect(),
+        }),
         property_transforms: transforms,
         ..Default::default()
     }
@@ -894,6 +912,344 @@ async fn firestore_and_datastore_share_the_store() {
             )
         )
     );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// The point of the whole feature: a masked write plus a transform accumulates.
+///
+/// `property_transforms` run after the operation, so an *unmasked* update has
+/// already replaced the entity by the time the increment reads it — pinned in
+/// `property_transforms_apply_after_the_entity_and_report_their_results`, where
+/// an update that omits `hits` resets it. A mask that does not name `hits` keeps
+/// the write off it, so the increment reads what is stored and the counter
+/// climbs across commits without the client ever sending its value. This is the
+/// same pairing as Firestore's `update_mask` + `update_transforms`.
+#[tokio::test]
+async fn a_masked_upsert_lets_a_transform_accumulate_across_commits() {
+    let (server, mut client) = start().await;
+    let key = named_key("Page", "masked-counter");
+
+    // Seed the whole entity unmasked, including a property no later mask names.
+    client
+        .commit(commit_one(upsert_with_transforms(
+            key.clone(),
+            [
+                ("title".to_string(), string_value("first")),
+                ("hits".to_string(), integer_value(0)),
+                ("author".to_string(), string_value("ada")),
+            ]
+            .into_iter()
+            .collect(),
+            Vec::new(),
+        )))
+        .await
+        .expect("seed Commit");
+
+    // Three masked commits that only ever carry `title`.
+    for (title, expected_hits) in [("second", 1), ("third", 2), ("fourth", 3)] {
+        let response = client
+            .commit(commit_one(masked_upsert(
+                key.clone(),
+                [("title".to_string(), string_value(title))]
+                    .into_iter()
+                    .collect(),
+                &["title"],
+                vec![property_transform(
+                    "hits",
+                    TransformType::Increment(integer_value(1)),
+                )],
+            )))
+            .await
+            .expect("masked Commit")
+            .into_inner();
+        assert_eq!(
+            response.mutation_results[0].transform_results[0],
+            integer_value(expected_hits),
+            "the increment read the stored `hits`, not one the client sent"
+        );
+    }
+
+    let stored = lookup(&mut client, &key).await.expect("entity stored");
+    assert_eq!(stored.properties["title"], string_value("fourth"));
+    assert_eq!(stored.properties["hits"], integer_value(3));
+    assert_eq!(
+        stored.properties["author"],
+        string_value("ada"),
+        "a property the mask does not name is left untouched"
+    );
+    assert_eq!(
+        stored.properties.len(),
+        3,
+        "no extra properties appeared: {:?}",
+        stored.properties.keys().collect::<Vec<_>>()
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// The two halves of the proto's mask rule, which pull in opposite directions:
+/// a property the mask names but the entity omits is **deleted**, while a
+/// property the entity carries but the mask does not name is **left untouched**.
+#[tokio::test]
+async fn a_mask_deletes_what_it_names_and_ignores_what_it_does_not() {
+    let (server, mut client) = start().await;
+    let key = named_key("Post", "masked-delete");
+
+    client
+        .commit(commit_one(upsert_with_transforms(
+            key.clone(),
+            [
+                ("title".to_string(), string_value("draft title")),
+                ("draft".to_string(), integer_value(1)),
+                ("author".to_string(), string_value("ada")),
+            ]
+            .into_iter()
+            .collect(),
+            Vec::new(),
+        )))
+        .await
+        .expect("seed Commit");
+
+    client
+        .commit(commit_one(Mutation {
+            // The entity carries `title` and `author`; the mask names `title`
+            // and `draft`. So: `title` is written, `draft` is deleted because
+            // the mask names it and the entity does not carry it, and `author`
+            // is left alone because the mask does not name it — even though the
+            // entity carries a different value for it.
+            operation: Some(Operation::Update(entity(
+                key.clone(),
+                [
+                    ("title".to_string(), string_value("published title")),
+                    ("author".to_string(), string_value("ignored")),
+                ]
+                .into_iter()
+                .collect(),
+            ))),
+            property_mask: Some(PropertyMask {
+                paths: vec!["title".to_string(), "draft".to_string()],
+            }),
+            ..Default::default()
+        }))
+        .await
+        .expect("masked update Commit");
+
+    let stored = lookup(&mut client, &key).await.expect("entity stored");
+    assert_eq!(stored.properties["title"], string_value("published title"));
+    assert_eq!(
+        stored.properties["author"],
+        string_value("ada"),
+        "an unmasked property keeps its stored value even when the entity carries another"
+    );
+    assert!(
+        !stored.properties.contains_key("draft"),
+        "a masked property the entity omits is deleted: {:?}",
+        stored.properties.keys().collect::<Vec<_>>()
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// The proto: `property_mask` "is ignored for `delete`". So a delete carrying
+/// one removes the whole entity rather than some of its properties, and is not
+/// an error either.
+#[tokio::test]
+async fn property_mask_is_ignored_on_a_delete() {
+    let (server, mut client) = start().await;
+    let key = named_key("Post", "masked-delete-op");
+
+    client
+        .commit(commit_one(upsert_with_transforms(
+            key.clone(),
+            [
+                ("title".to_string(), string_value("doomed")),
+                ("author".to_string(), string_value("ada")),
+            ]
+            .into_iter()
+            .collect(),
+            Vec::new(),
+        )))
+        .await
+        .expect("seed Commit");
+
+    client
+        .commit(commit_one(Mutation {
+            operation: Some(Operation::Delete(key.clone())),
+            property_mask: Some(PropertyMask {
+                paths: vec!["title".to_string()],
+            }),
+            ..Default::default()
+        }))
+        .await
+        .expect("a delete with a property_mask is accepted");
+
+    assert!(
+        lookup(&mut client, &key).await.is_none(),
+        "the whole entity is gone, not just the masked property"
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// A mask changes which properties are written, not whether the operation's own
+/// precondition holds: a masked `insert` on an existing entity is still
+/// ALREADY_EXISTS, and a masked `update` on a missing one is still NOT_FOUND.
+#[tokio::test]
+async fn a_mask_does_not_weaken_the_insert_and_update_preconditions() {
+    let (server, mut client) = start().await;
+    let key = named_key("Post", "masked-precondition");
+
+    let masked_insert = |properties: HashMap<String, Value>| Mutation {
+        operation: Some(Operation::Insert(entity(key.clone(), properties))),
+        property_mask: Some(PropertyMask {
+            paths: vec!["title".to_string()],
+        }),
+        ..Default::default()
+    };
+
+    let missing = client
+        .commit(commit_one(Mutation {
+            operation: Some(Operation::Update(entity(
+                key.clone(),
+                [("title".to_string(), string_value("nope"))]
+                    .into_iter()
+                    .collect(),
+            ))),
+            property_mask: Some(PropertyMask {
+                paths: vec!["title".to_string()],
+            }),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("a masked update of a missing entity fails");
+    assert_eq!(missing.code(), Code::NotFound);
+
+    client
+        .commit(commit_one(masked_insert(
+            [("title".to_string(), string_value("first"))]
+                .into_iter()
+                .collect(),
+        )))
+        .await
+        .expect("a masked insert of a new entity succeeds");
+
+    let duplicate = client
+        .commit(commit_one(masked_insert(
+            [("title".to_string(), string_value("second"))]
+                .into_iter()
+                .collect(),
+        )))
+        .await
+        .expect_err("a masked insert of an existing entity fails");
+    assert_eq!(duplicate.code(), Code::AlreadyExists);
+
+    let stored = lookup(&mut client, &key).await.expect("entity stored");
+    assert_eq!(
+        stored.properties["title"],
+        string_value("first"),
+        "the refused insert wrote nothing"
+    );
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// The mask paths fireup refuses, each a line of the proto, and the one
+/// reserved name it accepts.
+#[tokio::test]
+async fn unservable_mask_paths_are_refused_and_write_nothing() {
+    let (server, mut client) = start().await;
+    let key = named_key("Post", "masked-refusals");
+
+    client
+        .commit(commit_one(upsert_with_transforms(
+            key.clone(),
+            [("title".to_string(), string_value("untouched"))]
+                .into_iter()
+                .collect(),
+            Vec::new(),
+        )))
+        .await
+        .expect("seed Commit");
+
+    let refused = |paths: &[&str]| {
+        commit_one(masked_upsert(
+            key.clone(),
+            [("title".to_string(), string_value("overwritten"))]
+                .into_iter()
+                .collect(),
+            paths,
+            Vec::new(),
+        ))
+    };
+
+    // "A path is a list of property names separated by dots" — a nested path
+    // names a property inside an entity value, which the Firestore update_mask
+    // side refuses too rather than overwriting the whole parent property.
+    let nested = client
+        .commit(refused(&["author.name"]))
+        .await
+        .expect_err("a nested mask path is refused");
+    assert_eq!(nested.code(), Code::Unimplemented);
+    // The escape exists only to disambiguate that, so it is refused with it.
+    let escaped = client
+        .commit(refused(&["author\\.name"]))
+        .await
+        .expect_err("an escaped mask path is refused");
+    assert_eq!(escaped.code(), Code::Unimplemented);
+
+    // "A path must not be empty."
+    let empty = client
+        .commit(refused(&[""]))
+        .await
+        .expect_err("an empty mask path is refused");
+    assert_eq!(empty.code(), Code::InvalidArgument);
+
+    // "None of the properties in the mask may have a reserved name, except for
+    // `__key__`."
+    let reserved = client
+        .commit(refused(&["title", "__scatter__"]))
+        .await
+        .expect_err("a reserved mask path is refused");
+    assert_eq!(reserved.code(), Code::InvalidArgument);
+
+    let stored = lookup(&mut client, &key).await.expect("entity stored");
+    assert_eq!(
+        stored.properties["title"],
+        string_value("untouched"),
+        "every refusal happened before the store was touched"
+    );
+
+    // `__key__` is the exception, and it names no field — the key travels in the
+    // entity's key — so a mask of only `__key__` writes no properties. The
+    // transforms still run: they apply "regardless of the property mask".
+    let key_masked = client
+        .commit(commit_one(masked_upsert(
+            key.clone(),
+            [("title".to_string(), string_value("ignored"))]
+                .into_iter()
+                .collect(),
+            &["__key__"],
+            vec![property_transform(
+                "hits",
+                TransformType::Increment(integer_value(7)),
+            )],
+        )))
+        .await
+        .expect("a __key__ mask is accepted")
+        .into_inner();
+    assert_eq!(
+        key_masked.mutation_results[0].transform_results[0],
+        integer_value(7)
+    );
+
+    let stored = lookup(&mut client, &key).await.expect("entity stored");
+    assert_eq!(
+        stored.properties["title"],
+        string_value("untouched"),
+        "a __key__-only mask wrote no properties"
+    );
+    assert_eq!(stored.properties["hits"], integer_value(7));
 
     server.shutdown().await.expect("clean shutdown");
 }

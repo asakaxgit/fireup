@@ -38,30 +38,6 @@ const expectCode = async (expected, fn) => {
   return error
 }
 
-/**
- * Resolve the first outcome of a snapshot listener, failing if neither a
- * snapshot nor an error arrives. A hang is the specific failure mode the
- * matrix promises not to have, so it is a failure here rather than a timeout
- * somebody has to interpret.
- */
-const firstListenOutcome = (query, timeoutMs = 10_000) =>
-  new Promise((resolvePromise, reject) => {
-    let unsubscribe = () => {}
-    const timer = setTimeout(() => {
-      unsubscribe()
-      reject(new Error(`the listener neither produced a snapshot nor failed within ${timeoutMs}ms`))
-    }, timeoutMs)
-    const settle = (fn, arg) => {
-      clearTimeout(timer)
-      unsubscribe()
-      fn(arg)
-    }
-    unsubscribe = query.onSnapshot(
-      (snapshot) => settle(resolvePromise, snapshot),
-      (error) => settle(reject, error),
-    )
-  })
-
 export const firestoreProbes = [
   {
     id: 'firestore.GetDocument',
@@ -340,9 +316,9 @@ export const firestoreProbes = [
 
   {
     id: 'firestore.Listen',
-    // Probed on the wire, not through onSnapshot(): the server's refusal is
-    // unambiguous here, and the SDK drops it on the floor
-    // (limits.listen-sdk-retry-loop pins that separately).
+    // Probed on the wire rather than through onSnapshot(): this layer asserts
+    // the protocol, and the SDK's own `onSnapshot()` path is covered by
+    // tests/local-smoke/smoke.mjs.
     unimplemented: async ({ raw, projectId, expectUnimplemented }) => {
       await expectUnimplemented(
         () =>
@@ -388,6 +364,30 @@ export const firestoreProbes = [
         { names: /Write/ },
       )
     },
+    // Dormant while the matrix says `unimplemented` — the runner only runs the
+    // branch the status names. It exists so observe.mjs can *measure* the row
+    // against an implementation that does serve it. That measurement is what
+    // turns a "Fireup refuses this" row in docs/local/COMPARISON.md from a claim
+    // about our own code into a recorded answer from a reference implementation
+    // — see docs/local/measurements/.
+    served: async ({ raw, projectId, runId }) => {
+      const message = await duplexFirstOutcome(raw.firestore, 'Write', {
+        database: databaseName(projectId),
+        writes: [
+          {
+            update: {
+              name: documentName(projectId, `conf_${runId}_streamwrite/d1`),
+              fields: { n: value.integer(1) },
+            },
+          },
+        ],
+      })
+      assert.ok(message, 'the streaming Write must answer, not just end the stream')
+      assert.ok(
+        message.stream_id !== undefined || (message.write_results?.length ?? 0) > 0,
+        `expected a stream id or a write result, got ${JSON.stringify(message)}`,
+      )
+    },
   },
 
   {
@@ -418,6 +418,31 @@ export const firestoreProbes = [
           }),
         { names: /PartitionQuery/ },
       )
+    },
+    // Dormant for Fireup; see the note on `firestore.Write`. A collection this
+    // small legitimately partitions into *nothing* — proto3 omits an empty
+    // repeated field, so a bare `{}` is a valid answer meaning "read it in one
+    // go". What this measures is whether the RPC is answered at all; what it
+    // pins is that any partition that does come back is a cursor.
+    served: async ({ raw, db, projectId, runId }) => {
+      const collection = `conf_${runId}_partition`
+      await db.doc(`${collection}/d1`).set({ n: 1 })
+
+      const response = await unary(raw.firestore, 'PartitionQuery', {
+        parent: `${documentsRoot(projectId)}/__partition__/__partition__`,
+        structured_query: {
+          from: [{ collection_id: collection, all_descendants: true }],
+          order_by: [{ field: { field_path: '__name__' }, direction: 'ASCENDING' }],
+        },
+        partition_count: '2',
+      })
+      assert.ok(response, 'PartitionQuery must answer')
+      for (const partition of response.partitions ?? []) {
+        assert.ok(
+          Array.isArray(partition.values),
+          `a partition must be a cursor over values, got ${JSON.stringify(partition)}`,
+        )
+      }
     },
   },
 
@@ -570,61 +595,26 @@ export const firestoreProbes = [
   },
 
   {
-    id: 'limits.listen-sdk-retry-loop',
-    'documented-divergence': async ({ freshCollection }) => {
-      const cities = freshCollection('listenretry')
-      await cities.doc('tokyo').set({ n: 1 })
-
-      // The server refuses Listen with a clear UNIMPLEMENTED (proved by
-      // firestore.Listen over raw gRPC). @google-cloud/firestore loses it:
-      // Firestore._initializeStream resolves the stream as "healthy" before the
-      // trailers-only status lands, so Watch attaches its own 'error' handler
-      // too late, sees only 'end', synthesises GoogleError('Stream ended
-      // unexpectedly') with code UNKNOWN — which its isPermanentWatchError()
-      // treats as retryable — and reopens the stream forever.
-      //
-      // So onSnapshot() against fireup hangs instead of failing, which is the
-      // one place the matrix's "a gap is never a hang" promise does not reach.
-      // Pinned rather than hidden: when SAK-189 serves Listen, or the SDK stops
-      // swallowing the status, this fails and says so.
-      let outcome = 'hung'
-      try {
-        await firstListenOutcome(cities, 6_000)
-        outcome = 'snapshot'
-      } catch (error) {
-        outcome = /neither produced a snapshot nor failed/.test(error.message)
-          ? 'hung'
-          : `failed with code ${error.code}`
-      }
-      assert.equal(
-        outcome,
-        'hung',
-        'docs/local/README.md records that onSnapshot() retries rather than surfacing the ' +
-          'refusal. That changed — update the README and this row.',
-      )
-    },
-  },
-
-  {
-    id: 'limits.masked-field-deletion',
-    'documented-divergence': async ({ freshCollection }) => {
+    id: 'query.masked-field-deletion',
+    served: async ({ freshCollection }) => {
       const docs = freshCollection('maskdelete')
       const ref = docs.doc('d1')
       await ref.set({ keep: 1, gone: 2 })
 
-      // FieldValue.delete() is sent as a masked field with no value in the
-      // document. Production Firestore deletes it; fireup leaves it alone. The
-      // divergence is documented, so pin it: if it ever changes, that is a
-      // behaviour change the README has to be updated for.
+      // FieldValue.delete() reaches the wire as an update_mask path the write
+      // carries no value for, which is what "deleted" means for a mask on both
+      // surfaces. This was a documented divergence — the field was left in
+      // place — until the shared store grew field deletion in SAK-203.
       await ref.update({ gone: FieldValue.delete() })
 
       const snapshot = await ref.get()
-      assert.equal(snapshot.get('keep'), 1)
+      assert.equal(snapshot.get('keep'), 1, 'an unmasked field is untouched')
       assert.equal(
         snapshot.get('gone'),
-        2,
-        'docs/local/README.md: a masked field the request does not carry is left alone',
+        undefined,
+        'docs/local/README.md: a masked path the write does not carry deletes the field',
       )
+      assert.deepEqual(Object.keys(snapshot.data()), ['keep'])
     },
   },
 ]

@@ -17,6 +17,7 @@
 //! | `RunQuery`           | served, see [`query`](crate::local::query) |
 //! | `ListDocuments`      | served, incl. `show_missing` |
 //! | `ListCollectionIds`  | served |
+//! | `Listen`             | served, see [`watch`](crate::local::watch) |
 //! | everything else      | `UNIMPLEMENTED` |
 //!
 //! A write's `update_transforms` — and a transform-only `DocumentTransform`
@@ -46,6 +47,7 @@ use crate::local::query::{self, Query};
 use crate::local::store::{self, now_timestamp, Mutation, PendingWrite, SharedStore, WriteEffect};
 use crate::local::transactions::Transactions;
 use crate::local::transforms;
+use crate::local::watch::{self, WatchHub};
 use crate::protos::google::firestore::v1::run_query_request::QueryType;
 use crate::protos::google::rpc::Status as RpcStatus;
 use crate::protos::google::firestore::v1::{
@@ -65,7 +67,7 @@ use crate::protos::google::firestore::v1::{
 const AUTO_ID_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const AUTO_ID_LENGTH: usize = 20;
 
-/// Streams we never produce. Phase 0 answers the streaming RPCs with
+/// Streams we never produce. The streaming RPCs that stay out of scope answer
 /// `UNIMPLEMENTED` before a stream is ever created, so the concrete type only
 /// has to satisfy the trait.
 type UnimplementedStream<T> = ReceiverStream<Result<T, Status>>;
@@ -190,9 +192,10 @@ fn apply_parsed_mask(document: &mut Document, mask: &Option<Vec<query::FieldPath
 
 /// The fields an update mask selects, in mask order.
 ///
-/// A masked field the document does not carry is dropped rather than written as
-/// null: Firestore treats that as "delete this field", and Phase 1 has no field
-/// deletion, so writing a null would be worse than leaving it alone.
+/// A masked field the document does not carry becomes a `None`, which
+/// [`Mutation::Merge`] applies as a **deletion** — the documented Firestore
+/// behaviour, and the reason the store grew a per-path `Option` rather than
+/// leaving such a field alone as it did before.
 ///
 /// Unlike a read mask, this one is still restricted to top-level fields. A
 /// nested update mask has to merge *into* a stored map, which is a change to
@@ -201,7 +204,7 @@ fn apply_parsed_mask(document: &mut Document, mask: &Option<Vec<query::FieldPath
 fn masked_fields(
     field_paths: &[String],
     document: &Document,
-) -> Result<Vec<(String, Value)>, Status> {
+) -> Result<Vec<(String, Option<Value>)>, Status> {
     for path in field_paths {
         if path.contains('.') || path.contains('`') {
             return Err(unimplemented(
@@ -212,13 +215,7 @@ fn masked_fields(
     }
     Ok(field_paths
         .iter()
-        .filter_map(|field| {
-            document
-                .fields
-                .get(field)
-                .cloned()
-                .map(|value| (field.clone(), value))
-        })
+        .map(|field| (field.clone(), document.fields.get(field).cloned()))
         .collect())
 }
 
@@ -333,13 +330,28 @@ pub struct FirestoreApi {
     /// Live transactions. Shared between clones of the API so every connection
     /// sees the same tokens.
     transactions: Arc<Transactions>,
+    /// The change feed `Listen` streams subscribe to. Shared for the same
+    /// reason: a write arriving on one connection has to reach a listener on
+    /// another.
+    watch: Arc<WatchHub>,
 }
 
 impl FirestoreApi {
+    /// Build an API over `store`, wrapping it in a change feed of its own.
+    ///
+    /// Use [`FirestoreApi::watching`] when another service shares the store, so
+    /// that writes through *that* service reach these listeners too.
     pub fn new(store: SharedStore) -> Self {
+        let (store, watch) = watch::attach(store);
+        Self::watching(store, watch)
+    }
+
+    /// Build an API over a store that is already wrapped in `watch`.
+    pub fn watching(store: SharedStore, watch: Arc<WatchHub>) -> Self {
         Self {
             store,
             transactions: Arc::new(Transactions::new()),
+            watch,
         }
     }
 
@@ -349,6 +361,10 @@ impl FirestoreApi {
 
     pub fn transactions(&self) -> &Transactions {
         &self.transactions
+    }
+
+    pub fn watch(&self) -> &Arc<WatchHub> {
+        &self.watch
     }
 
     /// Apply one write and report the time it landed and what its transforms
@@ -922,13 +938,24 @@ impl Firestore for FirestoreApi {
         ))
     }
 
-    type ListenStream = UnimplementedStream<ListenResponse>;
+    type ListenStream = ReceiverStream<Result<ListenResponse, Status>>;
 
     async fn listen(
         &self,
-        _request: Request<tonic::Streaming<ListenRequest>>,
+        request: Request<tonic::Streaming<ListenRequest>>,
     ) -> Result<Response<Self::ListenStream>, Status> {
-        Err(unimplemented("Listen", "realtime listeners phase"))
+        debug!("Listen");
+
+        // The stream is accepted unconditionally and each target is validated
+        // as it arrives: a target this server cannot serve is reported as a
+        // `TargetChange::REMOVE` carrying the cause, which is the contract's
+        // per-target error channel. Failing the whole call instead would take
+        // the client's other listeners down with the bad one.
+        Ok(Response::new(watch::listen(
+            self.store.clone(),
+            &self.watch,
+            request.into_inner(),
+        )))
     }
 
     async fn list_collection_ids(
@@ -1150,5 +1177,30 @@ mod tests {
             .expect("a top-level update mask is served");
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].0, "address");
+        assert!(
+            fields[0].1.is_some(),
+            "the document carries the field, so it is written rather than deleted"
+        );
+    }
+
+    #[test]
+    fn a_masked_path_the_document_lacks_becomes_a_deletion() {
+        let fields = masked_fields(
+            &["address".to_string(), "nickname".to_string()],
+            &nested_document(),
+        )
+        .expect("a top-level update mask is served");
+        assert_eq!(
+            fields
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["address", "nickname"],
+            "the result keeps mask order"
+        );
+        assert!(
+            fields[1].1.is_none(),
+            "an absent masked field is a deletion"
+        );
     }
 }

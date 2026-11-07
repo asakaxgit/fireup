@@ -34,6 +34,7 @@ use tonic::Status;
 
 use crate::local::query::Prefilter;
 use crate::local::transforms::{self, FieldTransform};
+use crate::local::value_json;
 use crate::protos::google::firestore::v1::{Document, Value};
 
 /// What went wrong in the storage layer.
@@ -55,6 +56,17 @@ pub enum StoreError {
     /// A document the caller handed us cannot be represented in this backend.
     #[error("{0}")]
     Unsupported(String),
+
+    /// A document the caller handed us carries a value no Firestore document
+    /// can hold, so the write is refused.
+    ///
+    /// Separate from [`StoreError::Unsupported`] because the two mean opposite
+    /// things to a client: `Unsupported` is "this build cannot do that yet",
+    /// which an SDK may surface as a missing feature, while this is "that
+    /// value is not legal", which is the caller's to fix and pointless to
+    /// retry.
+    #[error("{0}")]
+    InvalidDocument(String),
 
     /// A write precondition did not hold, so the whole batch was abandoned.
     #[error("{0}")]
@@ -102,6 +114,7 @@ impl From<StoreError> for Status {
                 Status::internal(error.to_string())
             }
             StoreError::Unsupported(_) => Status::unimplemented(error.to_string()),
+            StoreError::InvalidDocument(_) => Status::invalid_argument(error.to_string()),
             // These three codes are what the SDKs branch on: `create()` on an
             // existing document must be ALREADY_EXISTS and `update()` on a
             // missing one must be NOT_FOUND, or client-side error handling
@@ -141,9 +154,17 @@ pub enum Mutation {
     Put(Document),
     /// Replace only the named fields, creating the document if absent — the
     /// `update()` / `set(…, {merge: true})` path.
+    ///
+    /// A `None` value **deletes** that field rather than writing it. This is
+    /// what a mask path the request does not carry means on both surfaces:
+    /// Firestore's `update_mask` and Datastore's `property_mask` each say a
+    /// masked field missing from the submitted document is deleted. Keeping the
+    /// decision per-path (instead of a separate delete list) preserves mask
+    /// order, so a mask naming the same field twice resolves the same way the
+    /// request spelled it.
     Merge {
         name: String,
-        fields: Vec<(String, Value)>,
+        fields: Vec<(String, Option<Value>)>,
     },
     /// Remove the document. Idempotent: deleting a missing document succeeds.
     Delete { name: String },
@@ -212,6 +233,28 @@ impl PendingWrite {
             transforms,
         }
     }
+}
+
+/// Encode a document's fields for storage, refusing one that carries a value
+/// the mapping cannot represent.
+///
+/// Both backends go through here, for different reasons that have to produce
+/// the same answer. `PostgresStore` needs the payload. `MemoryStore` throws it
+/// away — it keeps `Value`s exactly as they arrived and so has no encode step
+/// of its own to fail, which without this would let it accept a document the
+/// durable store refuses. A divergence there is the worst kind: it appears
+/// only when somebody adds `--postgres-url` to a project that already works.
+///
+/// Validating by encoding, rather than with a cheaper check, is deliberate: a
+/// separate validator would be a second definition of "storable" to keep in
+/// step with [`value_json`](crate::local::value_json).
+pub(crate) fn encode_storable_fields(document: &Document) -> StoreResult<serde_json::Value> {
+    value_json::encode_fields(&document.fields).map_err(|error| {
+        StoreError::InvalidDocument(format!(
+            "document {} cannot be stored: {error}",
+            document.name
+        ))
+    })
 }
 
 /// Check `precondition` against the document currently stored under `name`.
@@ -297,7 +340,11 @@ pub(crate) fn mutate(
                 update_time: None,
             });
             for (field, value) in fields {
-                document.fields.insert(field, value);
+                match value {
+                    Some(value) => document.fields.insert(field, value),
+                    // A masked field the request did not carry: delete it.
+                    None => document.fields.remove(&field),
+                };
             }
             document
         }
@@ -511,11 +558,11 @@ pub trait Store: Send + Sync + 'static {
     }
 
     /// Merge `fields` into an existing document, creating it if absent. Only
-    /// the supplied field names are touched.
+    /// the supplied field names are touched; a `None` value deletes its field.
     async fn merge(
         &self,
         name: &str,
-        fields: Vec<(String, Value)>,
+        fields: Vec<(String, Option<Value>)>,
         now: Timestamp,
     ) -> StoreResult<WriteOutcome> {
         let mutation = Mutation::Merge {
@@ -648,6 +695,12 @@ impl Store for MemoryStore {
             }
 
             let (next, effect) = mutate(write, stored, &now);
+            // Checked here rather than before the mutation because a merge
+            // produces a document neither side held, and because this is
+            // where `PostgresStore` encodes too.
+            if let Some(document) = next.as_ref() {
+                encode_storable_fields(document)?;
+            }
             staged.insert(name, next);
             outcomes.push(effect);
         }
@@ -787,6 +840,7 @@ pub mod conformance {
         overwrite_drops_fields_absent_from_the_new_document(store, &name("replace")).await;
         merge_only_touches_named_fields(store, &name("merge")).await;
         merge_creates_a_missing_document(store, &name("merge-create")).await;
+        a_none_in_a_merge_deletes_the_field(store, &name("merge-delete")).await;
         delete_reports_whether_the_document_existed(store, &name("delete")).await;
         missing_documents_read_as_none(store, &name("absent")).await;
         writes_and_deletes_change_what_a_read_returns(store, &name("count")).await;
@@ -798,6 +852,59 @@ pub mod conformance {
         transforms_apply_after_the_mutation_they_ride_on(store, &name("transform-order")).await;
         collection_reads_return_only_direct_children(store, &name("scan")).await;
         collection_ids_include_collections_under_an_unwritten_parent(store, &name("ids")).await;
+        a_timestamp_no_document_can_hold_fails_the_write(store, &name("timestamp-range")).await;
+    }
+
+    /// A timestamp outside years 0001–9999 fails the **write**, in both
+    /// backends.
+    ///
+    /// It is in the shared contract precisely because the two reach the answer
+    /// differently: `PostgresStore` encodes to JSON and `MemoryStore` keeps the
+    /// `Value` as it arrived, so this is a rule they could easily drift on —
+    /// and a value one accepts and the other refuses only surfaces when
+    /// somebody adds `--postgres-url` to a project that already works.
+    ///
+    /// Before SAK-205 the write succeeded and then broke every later read of
+    /// the entire collection, because the encoding it produced was one the
+    /// read path refused.
+    async fn a_timestamp_no_document_can_hold_fails_the_write(store: &dyn Store, name: &str) {
+        let document = Document {
+            name: name.to_string(),
+            fields: [(
+                "joined".to_string(),
+                Value {
+                    value_type: Some(ValueType::TimestampValue(Timestamp {
+                        // Year 11476.
+                        seconds: 300_000_000_000,
+                        nanos: 0,
+                    })),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            create_time: None,
+            update_time: None,
+        };
+
+        let error = store
+            .put(document, ts(10))
+            .await
+            .expect_err("a timestamp past year 9999 must not be stored");
+        assert!(
+            matches!(error, StoreError::InvalidDocument(_)),
+            "wrong error for an out-of-range timestamp: {error}"
+        );
+        assert_eq!(
+            Status::from(error).code(),
+            tonic::Code::InvalidArgument,
+            "an SDK has to see this as its own bad argument, not a server fault"
+        );
+
+        // Refused means refused: nothing was left behind to read back.
+        assert!(
+            store.get(name).await.expect("get").is_none(),
+            "a refused write must not store a partial document"
+        );
     }
 
     async fn put_then_get_round_trips(store: &dyn Store, name: &str) {
@@ -859,7 +966,11 @@ pub mod conformance {
             .expect("put");
         assert_eq!(
             store
-                .merge(name, vec![("added".to_string(), string_value("x"))], ts(20))
+                .merge(
+                    name,
+                    vec![("added".to_string(), Some(string_value("x")))],
+                    ts(20),
+                )
                 .await
                 .expect("merge"),
             WriteOutcome::Updated
@@ -872,9 +983,46 @@ pub mod conformance {
         assert_eq!(found.update_time, Some(ts(20)));
     }
 
+    /// Both surfaces reach this through a mask path the request carries no value
+    /// for, so it has to mean the same thing in both backends — including that
+    /// deleting a field that was never there is not an error.
+    async fn a_none_in_a_merge_deletes_the_field(store: &dyn Store, name: &str) {
+        store
+            .put(doc(name, "keep", "v"), ts(10))
+            .await
+            .expect("put");
+        store
+            .merge(
+                name,
+                vec![
+                    ("added".to_string(), Some(string_value("x"))),
+                    ("keep".to_string(), None),
+                    ("never-there".to_string(), None),
+                ],
+                ts(20),
+            )
+            .await
+            .expect("merge with deletions");
+
+        let found = store.get(name).await.expect("get").expect("still present");
+        assert_eq!(found.fields["added"], string_value("x"));
+        assert!(
+            !found.fields.contains_key("keep"),
+            "a None value deletes the field: {:?}",
+            found.fields.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(found.fields.len(), 1);
+        assert_eq!(found.create_time, Some(ts(10)));
+        assert_eq!(found.update_time, Some(ts(20)));
+    }
+
     async fn merge_creates_a_missing_document(store: &dyn Store, name: &str) {
         let outcome = store
-            .merge(name, vec![("k".to_string(), string_value("v"))], ts(10))
+            .merge(
+                name,
+                vec![("k".to_string(), Some(string_value("v")))],
+                ts(10),
+            )
             .await
             .expect("merge");
 
@@ -1079,7 +1227,7 @@ pub mod conformance {
                     PendingWrite::guarded(
                         Mutation::Merge {
                             name: name.to_string(),
-                            fields: vec![("second".to_string(), string_value("v"))],
+                            fields: vec![("second".to_string(), Some(string_value("v")))],
                         },
                         // Only holds if the put above is already visible.
                         Some(Precondition::Exists(true)),

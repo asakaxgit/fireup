@@ -1,0 +1,95 @@
+name: Coverage
+
+# Runs automatically, unlike the older workflows in this directory: the README's
+# coverage badge is a claim about every commit, so it has to be measured on
+# every commit. The job is the unit-test scope only (`scripts/coverage.sh`),
+# which needs no PostgreSQL, no Node, and no running server — so it cannot go
+# red for a reason that has nothing to do with coverage.
+on:
+  push:
+    branches: [main]
+  # No branch filter on pull requests, on purpose. Overlapping work in this
+  # repository is stacked (one PR based on another, not on `main`), so a
+  # `branches: [main]` filter would skip exactly the PRs that most need
+  # checking — every layer of a stack but the bottom one.
+  #
+  # Removing the filter is necessary but not sufficient: GitHub only schedules a
+  # `pull_request` run for a workflow that already exists on the PR's **base**
+  # branch. Measured on this very PR — the layer above it (base
+  # `sak-206/badges-matrix`, which carries this file) got automatic CI, while
+  # this PR (base `sak-203/...`, which predates the file) got none and had to be
+  # checked by `workflow_dispatch`. That resolves itself the moment this lands on
+  # `main`; until then, dispatch manually and say so in the PR.
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The floor the badge in README.md advertises. scripts/coverage.sh defaults to
+  # the same number, and `cargo test --test fidelity_matrix_tests` fails if the
+  # three ever disagree.
+  FIREUP_COVERAGE_MIN: 75
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No toolchain action: the ubuntu runner image ships rustup and a current
+      # stable Rust, so the only thing missing is the profiling component. The
+      # two older workflows here still use `actions-rs/toolchain`, which has
+      # been archived upstream since 2023 — not something to add to on purpose.
+      - name: Add the llvm-tools component
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add llvm-tools-preview
+          cargo --version && rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # Keyed on the lock file, so the cache is invalidated by the exact
+          # resolved versions rather than by the semver ranges in Cargo.toml.
+          key: ${{ runner.os }}-coverage-${{ hashFiles('Cargo.lock') }}
+
+      # Deliberately `cargo install` rather than a third-party installer
+      # action: it is one less actor with a token in this repository's CI, and
+      # the binary is cached on the key above after the first run.
+      - name: Install cargo-llvm-cov
+        run: |
+          if ! cargo llvm-cov --version >/dev/null 2>&1; then
+            cargo install cargo-llvm-cov --locked
+          fi
+
+      - name: Measure coverage
+        run: scripts/coverage.sh
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo '## Line coverage'
+            echo
+            echo "Unit-test scope (\`cargo llvm-cov --lib\`), floor ${FIREUP_COVERAGE_MIN}%."
+            echo
+            echo '```'
+            cat target/coverage/summary.txt 2>/dev/null || echo 'no summary produced'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            target/coverage/html
+            target/coverage/lcov.info
+            target/coverage/summary.txt
+          retention-days: 14
