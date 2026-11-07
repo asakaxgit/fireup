@@ -250,15 +250,13 @@ impl Store for WatchedStore {
         self.inner.scan_collection(parent, collection_id).await
     }
 
-    async fn scan_kind(&self, documents_root: &str, kind: &str) -> StoreResult<Vec<Document>> {
-        self.inner.scan_kind(documents_root, kind).await
-    }
-
-    // The two pushdown reads must be forwarded explicitly. Their trait defaults
-    // are *correct* — they drop the prefilter and scan everything — so leaving
-    // them out costs no answer and fails no test, it just silently turns the
-    // Postgres pushdown off for the whole server, because the store the data
-    // plane holds is this decorator rather than the backend underneath.
+    // The filtered scans are *defaulted* trait methods whose default throws the
+    // pre-filter away and reads everything. Forwarding them is therefore not
+    // optional boilerplate: this decorator is what the data plane holds, so a
+    // missing forward here silently turns the Postgres pushdown off for every
+    // query the server serves, with every answer still correct. See
+    // `tests/local_pushdown_boundary_tests.rs`, which exists to catch exactly
+    // this. Any method added to `Store` later has to be forwarded here too.
     async fn scan_collection_filtered(
         &self,
         parent: &str,
@@ -268,6 +266,10 @@ impl Store for WatchedStore {
         self.inner
             .scan_collection_filtered(parent, collection_id, prefilter)
             .await
+    }
+
+    async fn scan_kind(&self, documents_root: &str, kind: &str) -> StoreResult<Vec<Document>> {
+        self.inner.scan_kind(documents_root, kind).await
     }
 
     async fn scan_kind_filtered(
@@ -489,11 +491,21 @@ async fn evaluate(store: &SharedStore, tracked: &Tracked) -> Result<Vec<Document
         }
         Tracked::Query { parent, query, .. } => {
             // The same two scans `RunQuery` picks between, so watching a query
-            // and reading it once see the same documents.
+            // and reading it once see the same documents — including the
+            // pre-filter, which matters more here than it does there. This runs
+            // once per change event per active target, so an unfiltered read
+            // turns every write into a full collection scan (a full *kind* scan
+            // for a collection group listener) for each listener watching it,
+            // rather than once per request.
+            let prefilter = query.prefilter();
             let documents = if query.all_descendants() {
-                store.scan_kind(parent, query.collection_id()).await?
+                store
+                    .scan_kind_filtered(parent, query.collection_id(), prefilter)
+                    .await?
             } else {
-                store.scan_collection(parent, query.collection_id()).await?
+                store
+                    .scan_collection_filtered(parent, query.collection_id(), prefilter)
+                    .await?
             };
             Ok(query.evaluate(documents).documents)
         }
@@ -1158,138 +1170,5 @@ mod tests {
         let _subscriber = hub.subscribe();
 
         conformance::assert_store_contract(store.as_ref(), ROOT).await;
-    }
-
-    /// A store that answers like `MemoryStore` but records which of the two
-    /// scan spellings the caller actually reached.
-    struct ScanRecorder {
-        inner: SharedStore,
-        filtered: Arc<std::sync::atomic::AtomicUsize>,
-        unfiltered: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl Store for ScanRecorder {
-        fn backend(&self) -> &'static str {
-            self.inner.backend()
-        }
-
-        async fn get(&self, name: &str) -> StoreResult<Option<Document>> {
-            self.inner.get(name).await
-        }
-
-        async fn contains(&self, name: &str) -> StoreResult<bool> {
-            self.inner.contains(name).await
-        }
-
-        async fn commit(
-            &self,
-            writes: Vec<PendingWrite>,
-            now: Timestamp,
-        ) -> StoreResult<Vec<WriteEffect>> {
-            self.inner.commit(writes, now).await
-        }
-
-        async fn scan_collection(
-            &self,
-            parent: &str,
-            collection_id: &str,
-        ) -> StoreResult<Vec<Document>> {
-            self.unfiltered
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner.scan_collection(parent, collection_id).await
-        }
-
-        async fn scan_collection_filtered(
-            &self,
-            parent: &str,
-            collection_id: &str,
-            prefilter: Prefilter<'_>,
-        ) -> StoreResult<Vec<Document>> {
-            self.filtered
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner
-                .scan_collection_filtered(parent, collection_id, prefilter)
-                .await
-        }
-
-        async fn scan_kind(&self, documents_root: &str, kind: &str) -> StoreResult<Vec<Document>> {
-            self.unfiltered
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner.scan_kind(documents_root, kind).await
-        }
-
-        async fn scan_kind_filtered(
-            &self,
-            documents_root: &str,
-            kind: &str,
-            prefilter: Prefilter<'_>,
-        ) -> StoreResult<Vec<Document>> {
-            self.filtered
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner
-                .scan_kind_filtered(documents_root, kind, prefilter)
-                .await
-        }
-
-        async fn child_segments(&self, prefix: &str) -> StoreResult<Vec<String>> {
-            self.inner.child_segments(prefix).await
-        }
-
-        async fn count(&self) -> StoreResult<usize> {
-            self.inner.count().await
-        }
-    }
-
-    /// The decorator has to forward the *pushdown* reads, not just the plain
-    /// ones.
-    ///
-    /// `scan_collection_filtered`/`scan_kind_filtered` have trait defaults that
-    /// discard the prefilter and scan the whole collection. That is a correct
-    /// answer, so if the decorator omits them nothing fails — the Postgres
-    /// pushdown is simply never reached, because the store the data plane holds
-    /// is this decorator and not the backend. Delete either forwarding method in
-    /// `impl Store for WatchedStore` and this test fails.
-    #[tokio::test]
-    async fn the_watched_store_forwards_the_pushdown_reads() {
-        let filtered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let unfiltered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let recorder = Arc::new(ScanRecorder {
-            inner: Arc::new(MemoryStore::new()),
-            filtered: filtered.clone(),
-            unfiltered: unfiltered.clone(),
-        });
-        let (store, _hub) = attach(recorder);
-
-        let empty: Vec<crate::local::query::FieldPath> = Vec::new();
-        let prefilter = || Prefilter {
-            filter: None,
-            required_fields: &empty,
-        };
-
-        store
-            .scan_collection_filtered(ROOT, "users", prefilter())
-            .await
-            .expect("filtered collection scan");
-        store
-            .scan_kind_filtered(ROOT, "users", prefilter())
-            .await
-            .expect("filtered kind scan");
-
-        let load =
-            |c: &Arc<std::sync::atomic::AtomicUsize>| c.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(
-            load(&filtered),
-            2,
-            "both pushdown reads must reach the backend; got {} filtered and {} unfiltered, \
-             which means a trait default scanned everything instead",
-            load(&filtered),
-            load(&unfiltered)
-        );
-        assert_eq!(
-            load(&unfiltered),
-            0,
-            "a pushdown read must not fall back to the unfiltered scan"
-        );
     }
 }

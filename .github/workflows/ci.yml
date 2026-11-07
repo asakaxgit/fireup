@@ -83,8 +83,13 @@ jobs:
       # `scan_collection` but not `scan_collection_filtered` — correct answers,
       # pushdown silently gone. Needs no database: it records the calls a
       # `MemoryStore` stack receives.
+      # `local_listen_pushdown_tests` is the same assertion for the other read
+      # path: a `Listen` query target is re-evaluated once per change, so losing
+      # the pushdown there costs a full collection scan per write per listener.
       - name: Data-plane boundary guards
-        run: cargo test --test local_pushdown_boundary_tests
+        run: |
+          cargo test --test local_pushdown_boundary_tests
+          cargo test --test local_listen_pushdown_tests
 
       # Each of these starts what it needs in-process and talks to it over real
       # gRPC or real HTTP/1.1.

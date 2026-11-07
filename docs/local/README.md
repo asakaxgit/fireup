@@ -299,8 +299,9 @@ wrong:
 With `--postgres-url`, a query's equality and range predicates are translated
 into SQL so the database returns the rows that could match instead of the whole
 collection. It applies to both query reads — one collection, and the collection
-group form that spans every matching collection below the parent. The in-memory
-store does not do this and reads everything.
+group form that spans every matching collection below the parent — and to both
+read paths: `RunQuery`, and the per-change re-evaluation of a `Listen` query
+target. The in-memory store does not do this and reads everything.
 
 **It cannot change an answer.** The translation is *sound, not exact*: it must
 keep every row the query could match, and is free to keep rows the query will
@@ -439,7 +440,11 @@ What to know before trusting a listener here:
   affect a limited result set produces no change, where matching each write
   against the filter alone would wrongly report it. It also means a watched
   collection is rescanned per change, which is fine for development volumes and
-  is not how production Firestore does it.
+  is not how production Firestore does it. The rescan goes through the same
+  [query pushdown](#query-pushdown-postgres-only) as `RunQuery`, so with
+  `--postgres-url` it reads the target's filtered rows rather than the whole
+  collection — the read that most needs narrowing, being one per write per
+  listener rather than one per request.
 - **No resume tokens are issued.** Every `TargetChange` carries an empty
   `resume_token`, so an SDK has nothing to resume from and reconnects with a
   full snapshot. A token that arrives anyway is ignored rather than honoured:

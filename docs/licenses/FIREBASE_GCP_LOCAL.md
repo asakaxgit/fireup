@@ -450,7 +450,6 @@ Firestore still rejects queries this serves.
 **Defect found, not fixed:** `value_json` cannot decode its own encoding of a
 timestamp outside years 0001–9999. Filed as SAK-205 rather than silently
 narrowed or worked around.
-
 ### SAK-203 notes — Datastore `property_mask` on a mutation
 
 **No new Google or Firebase artefact, no new proto, no new Rust dependency, and
