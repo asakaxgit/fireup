@@ -901,9 +901,12 @@ chrono = "0.4"                   # Date/time handling
 - **tests/fixtures/README.md** - Managed-export fixtures and their binary format
 
 #### Developer Documentation
-- **.kiro/specs/firestore-postgres-migration/requirements.md** - Complete requirements
-- **.kiro/specs/firestore-postgres-migration/design.md** - Architecture and design
-- **.kiro/specs/firestore-postgres-migration/tasks.md** - Implementation task tracking
+- **docs/local/README.md** - The `fireup local` data plane: what each surface
+  serves, how the store is laid out, and which behaviours are measured
+- **tests/conformance/README.md** - The fidelity matrix and the probe that holds
+  it to the code
+- **AGENTS.md** and **.cursor/rules/firebase-gcp-compliance.mdc** - The standing
+  rules for working in this repository
 - Inline code documentation throughout source files
 
 #### Operational Documentation
@@ -912,13 +915,54 @@ chrono = "0.4"                   # Date/time handling
 - PostgreSQL client connection guides
 - Troubleshooting sections in README and DEPLOYMENT.md
 
-**Documentation Quality:** Excellent - All major aspects covered
+**Documentation Quality:** Good where it is measured — the fidelity matrix, the
+licence ledger and the measurements under `docs/local/measurements/` are held to
+the code by tests. The rest is prose, including this file.
+
+### Documentation that was removed, and why (SAK-257)
+
+**`.kiro/specs/firestore-postgres-migration/`** — the original spec, written on
+2025-10-27 and last touched on 2025-10-31. It described a different product and
+was never retired:
+
+- `requirements.md` required a `SQL_Query_Engine` (Requirement 3) and a
+  PostgreSQL **wire protocol** server (Requirement 4). Neither was built, and
+  Requirement 3 is recorded above as *Not Implemented - By Design*. The spec
+  also contradicted itself: `design.md` opens by saying the PostgreSQL container
+  "eliminat[es] the need for a custom SQL Query Engine".
+- `design.md` prescribed `sqlparser` ("SQL parsing and AST manipulation"),
+  `rayon` ("parallel document processing") and `dashmap` ("query plan caching").
+  All three were declared in `Cargo.toml` and used by no code. The spec is where
+  they came from.
+- `tasks.md` ticked every box, including 10.4 *"Complete constraint and index
+  generation"* — the four modules in `src/schema_analyzer/` that nothing calls —
+  and 11 *"Fix crate::monitoring vs fireup::monitoring import path issues"*,
+  which is the duplicate `mod` tree that made the binary compile a second
+  private copy of seven modules.
+- It did not mention `src/local/`, which is 22,407 of the 42,381 lines in `src/`.
+
+It is in history, not gone: `git show 7d0f0f6:.kiro/specs/firestore-postgres-migration/design.md`.
+
+**`.github/copilot-instructions.md`** — reduced to a pointer. GitHub Copilot
+reads that path automatically, so the 355 lines there were being fed to every
+suggestion in this repository, and they had been describing a migration tool
+with "Standard SQL query support" and a five-module architecture since
+2025-11-22. The eight modules in `src/lib.rs`, `fireup local`, and 53% of the
+source were absent from it; `rayon` was recommended in it. The file now names
+the documents that are kept current instead of restating them a year late.
 
 ---
 
 ## Features Implemented vs. Planned
 
 ### Requirements Compliance
+
+The numbering below is the original spec's, which SAK-257 removed from the tree
+for the reasons given under *Documentation that was removed*. Read it at
+`git show 7d0f0f6:.kiro/specs/firestore-postgres-migration/requirements.md`. It
+is kept as the numbering of a historical audit, not as a statement that those
+five requirements are the product's current scope — Requirements 3 and 4 were
+answered by *not* building what they asked for.
 
 #### ⛔ Requirement 1: Firestore Backup Import
 - [x] Parse LevelDB backup files per Google's specification — 12 of 12 fixture
