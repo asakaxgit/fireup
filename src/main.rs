@@ -4,17 +4,13 @@ use tracing::{info, warn, Level};
 use tracing_subscriber;
 use std::path::PathBuf;
 
-mod error;
-mod types;
-mod protos;
-mod leveldb_parser;
-mod schema_analyzer;
-mod data_importer;
-mod monitoring;
-
-// The local data plane is consumed from the library crate rather than
-// re-declared here, so there is exactly one copy of it in the build.
-use fireup::local;
+// Every module is consumed from the library crate rather than re-declared with
+// `mod`, so there is exactly one copy of each in the build. Declaring them here
+// as well compiled a second, private copy of `error`, `types`, `protos`,
+// `leveldb_parser`, `schema_analyzer`, `data_importer` and `monitoring` into the
+// binary — 19,000 lines, including the generated protobuf stubs — and made
+// everything the CLI happens not to call look like dead code inside that copy.
+use fireup::{data_importer, error, leveldb_parser, local, monitoring, schema_analyzer, types};
 
 use error::FireupError;
 use leveldb_parser::{LevelDBParser, BackupValidatorImpl, ValidationResult};
