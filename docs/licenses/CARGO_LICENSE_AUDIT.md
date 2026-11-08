@@ -17,7 +17,7 @@ Rationale (CTO):
 - Explicit patent grant suits a Firebase-compatible local data plane
 - Aligns with vendored public `googleapis` protos (Apache-2.0)
 - Dependency tree is fully permissive-compatible (see counts below)
-- Apache-2.0 §6 already withholds trademark rights; `brand/LICENSE` states the carve-out explicitly
+- Apache-2.0 §6 already withholds trademark rights; [`TRADEMARKS.md`](../../TRADEMARKS.md) states the carve-out explicitly (it was `brand/LICENSE` from SAK-196 until SAK-257 moved the assets to a private repo)
 
 All 230 locked crates use permissive expressions (MIT and/or Apache-2.0,
 plus BSD/ISC/Zlib/BSL/Unicode/Unlicense as dual/triple options).
