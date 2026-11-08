@@ -1,8 +1,8 @@
 # Fireup — Firebase / GCP local & API license ledger
 
-> First-party Fireup code is licensed under **Apache-2.0** (see root `LICENSE`). Brand assets under `brand/` are carved out — see `brand/LICENSE`. Dependency-tree audit: [`CARGO_LICENSE_AUDIT.md`](CARGO_LICENSE_AUDIT.md).
+> First-party Fireup code is licensed under **Apache-2.0** (see root `LICENSE`). The Fireup name, mark and visual identity are carved out — see [`TRADEMARKS.md`](../../TRADEMARKS.md); the asset masters themselves are no longer in this repository (SAK-257). Dependency-tree audit: [`CARGO_LICENSE_AUDIT.md`](CARGO_LICENSE_AUDIT.md).
 
-**Status:** current as of SAK-220 — the gRPC stack moved from `tonic` 0.11 / `prost` 0.12 to `tonic` 0.13 / `prost` 0.13, which replaces the old HTTP/2 transport chain (`axum` 0.6 → `hyper` 0.14 → `h2` 0.3.27) with `axum` 0.8 → `hyper` 1.12 → `h2` 0.4.20 and so clears `RUSTSEC-2026-0258`; the accepted-vulnerability entry was deleted from `deny.toml` in the same change, leaving `[advisories] ignore` empty. These are version bumps inside the existing transitive gRPC transport, not new third-party components, and every replacement crate is MIT and/or Apache-2.0 — machine-checked by `cargo deny --locked check ... licenses` (`licenses ok`) against the permissive-only allow list, not asserted by hand. No Google/Firebase proto or generated stub changed; the same two service protos are compiled, by a newer `tonic-build`. Prior: SAK-217 — the comparison's emulator column replaced with **measured** conformance results (the first entry covering the *running* of third-party software). Prior: SAK-218 — `deny.toml` turns the permissive-only dependency policy into a CI gate instead of a periodic manual audit, and records the one accepted vulnerability (`RUSTSEC-2026-0258` in `h2`, via the pinned `tonic` 0.11); see [`CARGO_LICENSE_AUDIT.md#how-this-is-enforced`](CARGO_LICENSE_AUDIT.md#how-this-is-enforced); SAK-216 — `Cargo.lock` committed and `--locked` restored in CI, which turns every "see `Cargo.toml`" pin in this ledger from a semver range into one exact version per commit; SAK-206 README badges, coverage, and the comparison document (the first entry covering claims about third-party software); SAK-203 Datastore `property_mask` on a mutation (masked entity writes, paired with the SAK-198 property transforms); Phase 2.1 (SAK-189) Firestore `Listen` / realtime listeners; SAK-195 managed-export fidelity regression fixtures; SAK-193 Phase L.1 out-of-band email flows (no mail transport); SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
+**Status:** current as of SAK-257 — `brand/` and `site/` moved out to the private `saks-industries/fireup-cloud`, and the trademark carve-out that lived in `brand/LICENSE` is now root [`TRADEMARKS.md`](../../TRADEMARKS.md); no Google/Firebase artefact, proto, dependency or npm package changed. Prior: SAK-220 — the gRPC stack moved from `tonic` 0.11 / `prost` 0.12 to `tonic` 0.13 / `prost` 0.13, which replaces the old HTTP/2 transport chain (`axum` 0.6 → `hyper` 0.14 → `h2` 0.3.27) with `axum` 0.8 → `hyper` 1.12 → `h2` 0.4.20 and so clears `RUSTSEC-2026-0258`; the accepted-vulnerability entry was deleted from `deny.toml` in the same change, leaving `[advisories] ignore` empty. These are version bumps inside the existing transitive gRPC transport, not new third-party components, and every replacement crate is MIT and/or Apache-2.0 — machine-checked by `cargo deny --locked check ... licenses` (`licenses ok`) against the permissive-only allow list, not asserted by hand. No Google/Firebase proto or generated stub changed; the same two service protos are compiled, by a newer `tonic-build`. Prior: SAK-217 — the comparison's emulator column replaced with **measured** conformance results (the first entry covering the *running* of third-party software). Prior: SAK-218 — `deny.toml` turns the permissive-only dependency policy into a CI gate instead of a periodic manual audit, and records the one accepted vulnerability (`RUSTSEC-2026-0258` in `h2`, via the pinned `tonic` 0.11); see [`CARGO_LICENSE_AUDIT.md#how-this-is-enforced`](CARGO_LICENSE_AUDIT.md#how-this-is-enforced); SAK-216 — `Cargo.lock` committed and `--locked` restored in CI, which turns every "see `Cargo.toml`" pin in this ledger from a semver range into one exact version per commit; SAK-206 README badges, coverage, and the comparison document (the first entry covering claims about third-party software); SAK-203 Datastore `property_mask` on a mutation (masked entity writes, paired with the SAK-198 property transforms); Phase 2.1 (SAK-189) Firestore `Listen` / realtime listeners; SAK-195 managed-export fidelity regression fixtures; SAK-193 Phase L.1 out-of-band email flows (no mail transport); SAK-190 Firestore field transforms; SAK-196 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; SAK-174 seeding restores Datastore value types; Phase 4 (SAK-167) glue docs and the end-to-end demo; Phase 3 (SAK-166) Datastore and Phase L (SAK-168) Auth
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -708,6 +708,37 @@ scratch directory outside the repository and neither is vendored.
 |---|---|---|---|---|---|
 | Eclipse Temurin JRE/JDK | 21.0.13+9 | GPL-2.0-with-classpath-exception | [adoptium.net](https://adoptium.net/) | The JRE Google's emulator documents as a prerequisite ("a Java JRE version 21 or greater") | Public OSS runtime, run outside the repository; nothing links against it |
 | `firebase-tools` | 15.35.0 | MIT | [npm](https://www.npmjs.com/package/firebase-tools) | Downloads and starts Google's emulator. The JAR it fetches is closed-source and was **run, never inspected** | Google's own published CLI, used as published |
+
+### SAK-257 notes — brand assets moved to a private repo
+
+**No new Google or Firebase artefact, no new proto, no new Rust dependency, and
+no new npm package.** Nothing about the vendored googleapis pin, the compiled
+stubs, or the first-party Apache-2.0 grant changes; the dependency tree is
+untouched and `cargo deny ... licenses` sees the same graph.
+
+What changes is where the trademark carve-out is *stated*. Fireup now ships as
+an open core plus a private commercial repo: `brand/` and `site/` were deleted
+from this repository and imported, with their history, into the private
+`saks-industries/fireup-cloud`. The carve-out text that lived in `brand/LICENSE`
+from SAK-196 is now [`TRADEMARKS.md`](../../TRADEMARKS.md) at the repository
+root, and `NOTICE`, `README.md` and
+[`CARGO_LICENSE_AUDIT.md`](CARGO_LICENSE_AUDIT.md) point there instead.
+
+The SAK-196 entry above is left as written: it describes what SAK-196 did, and
+`brand/LICENSE` was the right path on that day.
+
+Two things this deliberately does **not** do. It does not narrow the terms —
+`TRADEMARKS.md` carries SAK-196's text forward and adds an explicit list of what
+needs no permission (describing compatibility, attributing a fork), which
+SAK-196 left implicit. And it does not rewrite this repository's history: the
+assets stay recoverable from it, because what protects the mark is the carve-out
+plus Apache-2.0 §6, not secrecy. A force-push would break every clone and fork
+and buy nothing a licence does not already give us.
+
+Nominative use of Google's marks is unaffected and restated in
+`TRADEMARKS.md`: "Firebase", "Firestore", "Datastore" and "Google Cloud" name
+the products whose public contracts Fireup implements, and Fireup remains an
+independent implementation with no Google affiliation.
 
 ## Existing Fireup notes (pre-local-cloud)
 

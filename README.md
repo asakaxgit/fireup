@@ -437,10 +437,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
-**Trademarks.** The Fireup name, mark, lockup, and other identity files under
-[`brand/`](brand/) are **not** licensed under Apache-2.0 — see
-[`brand/LICENSE`](brand/LICENSE). Using the code does not grant permission to
-use the brand.
+**Trademarks.** The Fireup name, mark, lockup and visual identity are **not**
+licensed under Apache-2.0 — see [`TRADEMARKS.md`](TRADEMARKS.md), which also
+says what you may do without asking (describing compatibility, attributing a
+fork). Using the code does not grant permission to use the brand. The asset
+masters and the marketing site built from them are held privately by Saks
+Industries and are not in this repository.
 
 Third-party material is recorded in
 [docs/licenses/FIREBASE_GCP_LOCAL.md](docs/licenses/FIREBASE_GCP_LOCAL.md) — most
