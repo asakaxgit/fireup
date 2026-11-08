@@ -1,412 +1,285 @@
-# Fireup Deployment Guide
+# Running Fireup against a local PostgreSQL
 
-This guide covers setting up Fireup for development and production environments.
+This file covers one thing: bringing up the PostgreSQL container this repository
+ships, and pointing the CLI at it on a development machine. That is what the
+repository supports today.
 
-## Development Environment Setup
+**It is not a production deployment guide.** Fireup's own status line reads
+*NOT production ready* (`PROJECT_STATUS.md`), nothing is deployed anywhere, and
+the version of this file that stood until SAK-257 described a production
+topology — a `docker-compose.prod.yml`, a long-running `fireup` service with
+`restart: always`, resource reservations, a backup rotation cron — for a
+one-shot CLI that nobody runs that way. It is in history, not gone:
+`git show 3305529:DEPLOYMENT.md`.
 
-### Prerequisites
+The clone/build/first-command walkthrough is in [README.md](README.md) and is
+not repeated here. `fireup local` — the Firestore/Datastore/Auth surface — is
+documented in [docs/local/README.md](docs/local/README.md); this file stops at
+the database underneath it.
 
-- **Rust**: Version 1.70 or higher
-- **Docker**: Version 20.10 or higher
-- **Docker Compose**: Version 2.0 or higher
-- **Git**: For cloning the repository
+## Prerequisites
 
-### Step-by-Step Setup
+- **A Rust toolchain.** CI builds with `rustup default stable`; the Dockerfile's
+  builder stage is `rust:1.75-slim`. `Cargo.toml` declares no `rust-version` and
+  no job tests an older compiler, so the "Rust 1.70+" quoted in `README.md` and
+  `PROJECT_STATUS.md` is a claim nothing measures. Build with stable.
+- **Docker and Compose v2.** The commands below use the `docker compose`
+  plugin spelling; older `docker-compose` invocations elsewhere in these docs
+  are the v1 binary.
+- **A PostgreSQL client** (`psql`) if you want to look at the result.
 
-1. **Clone the Repository**
-   ```bash
-   git clone <repository-url>
-   cd fireup
-   ```
+## 1. Start PostgreSQL
 
-2. **Environment Configuration**
-   ```bash
-   # Copy the example environment file
-   cp .env.example .env
-   
-   # Edit .env with your preferred settings
-   nano .env
-   ```
+```bash
+cp .env.example .env
+docker compose up -d postgres
+docker compose ps
+docker compose logs postgres
+```
 
-3. **Start PostgreSQL Backend**
-   ```bash
-   # Start PostgreSQL container
-   docker-compose up -d postgres
-   
-   # Verify container is running
-   docker-compose ps
-   
-   # Check logs for any issues
-   docker-compose logs postgres
-   ```
+Defaults, from `docker-compose.yml`:
 
-4. **Build the Application**
-   ```bash
-   # Build in development mode
-   cargo build
-   
-   # Or build optimized release version
-   cargo build --release
-   ```
+| | value |
+|---|---|
+| host port | **5433** (container 5432) |
+| database | `fireup_dev` |
+| user / password | `fireup` / `fireup_dev_password` |
+| data volume | `postgres_data` (survives `docker compose restart`) |
 
-5. **Verify Installation**
-   ```bash
-   # Test CLI help
-   cargo run -- --help
-   
-   # Test PostgreSQL connection
-   psql -h localhost -p 5433 -U fireup -d fireup_dev -c "SELECT version();"
-   ```
+### Do not rename the database or the user
 
-## Production Deployment
+`init.sql` is mounted into `/docker-entrypoint-initdb.d/` and runs once, the
+first time the volume is initialized. It **hardcodes** both names, while
+`docker-compose.yml` parameterizes them (`${POSTGRES_DB:-fireup_dev}`,
+`${POSTGRES_USER:-fireup}`) and `.env.example` sets them. Overriding either in
+`.env` breaks initialization.
 
-### Docker Compose Production Configuration
+Measured by running `init.sql` with `psql -v ON_ERROR_STOP=1` — the same flag
+the image's entrypoint uses — against PostgreSQL 18:
 
-Create a `docker-compose.prod.yml` for production:
+| `.env` change | what `init.sql` hits | psql exit |
+|---|---|---|
+| none (the defaults above) | runs to the end; inserts one `import_audit` row | **0** |
+| `POSTGRES_DB=anything_else` | line 11, `ALTER DATABASE fireup_dev …` → `ERROR: database "fireup_dev" does not exist` | **3** |
+| `POSTGRES_USER=anyone_else` | line 32, `GRANT … TO fireup` → `ERROR: role "fireup" does not exist` | **3** |
+
+The image's entrypoint runs under `set -Eeo pipefail` and executes each init
+file through `psql -v ON_ERROR_STOP=1`, so either error aborts initialization
+rather than leaving a half-configured database. (The psql arms above are
+measured; the container arm is not — Docker was not reachable from where they
+were run.)
+
+**The quiet case is worse than the loud one.** If a `fireup_dev` database
+already exists in the cluster and you point `POSTGRES_DB` at a *different*
+database, `init.sql` exits **0** — and `ALTER DATABASE fireup_dev …` sets the
+search path on the wrong database. Measured: the schema is created in the new
+database, the search path lands on `fireup_dev`, and an unqualified
+`CREATE TABLE` in the new database then goes to **`public`**, not `fireup_data`.
+Nothing reports this; the import simply lands somewhere other than where every
+query in these docs looks.
+
+### `sql/` is mounted but never runs
 
 ```yaml
-version: '3.8'
-
-services:
-  postgres:
-    image: postgres:15
-    container_name: fireup_postgres_prod
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
-    ports:
-      - "${POSTGRES_PORT}:5432"
-    volumes:
-      - postgres_prod_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
-    networks:
-      - fireup_network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-    restart: always
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-          cpus: '1.0'
-        reservations:
-          memory: 1G
-          cpus: '0.5'
-
-  fireup:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: fireup_app
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      RUST_LOG: ${RUST_LOG:-info}
-    volumes:
-      - ./backups:/app/backups:ro
-      - ./output:/app/output
-    networks:
-      - fireup_network
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-
-volumes:
-  postgres_prod_data:
-    driver: local
-
-networks:
-  fireup_network:
-    driver: bridge
+- ./sql:/docker-entrypoint-initdb.d/sql:ro
 ```
 
-### Production Environment Variables
+The entrypoint calls `docker_process_init_files /docker-entrypoint-initdb.d/*`
+and switch-cases each entry on `*.sh`, `*.sql`, `*.sql.gz`, `*.sql.xz`,
+`*.sql.zst`, with `*)` printing *"ignoring"*. A **directory** named `sql`
+matches none of those, and the loop does not recurse into it. (Same code in the
+15 and 17 entrypoints of `docker-library/postgres`; the image pinned here is
+`postgres:15`.)
 
-Create a `.env.prod` file:
+So `sql/01_development_setup.sql` never executes, and two things follow —
+both measured:
+
+- **`fireup_data.import_summary` does not exist** after `init.sql` alone
+  (`select count(*) from pg_views …` → `0`). Running the file by hand creates it
+  and exits 0, so this is a wiring problem, not broken SQL:
+  `psql -v ON_ERROR_STOP=1 "$URL" -f sql/01_development_setup.sql`.
+- **The view would be empty anyway.** It aggregates
+  `fireup_data.import_audit`, which no code writes to: after a successful
+  import of 7 records, that table still held only `init.sql`'s own
+  `database_init` row.
+
+Whether to mount the file at the top level or drop it along with the audit table
+is an open decision, not something this file should answer.
+
+## 2. Import a backup
 
 ```bash
-# PostgreSQL Configuration
-POSTGRES_HOST=postgres
-POSTGRES_PORT=5432
-POSTGRES_DB=fireup_production
-POSTGRES_USER=fireup_prod
-POSTGRES_PASSWORD=your_secure_password_here
-
-# Application Configuration
-FIREUP_MAX_BATCH_SIZE=5000
-FIREUP_CONNECTION_POOL_SIZE=20
-FIREUP_IMPORT_TIMEOUT_SECONDS=7200
-RUST_LOG=fireup=info,warn
-RUST_BACKTRACE=0
+export PGPASSWORD=fireup_dev_password
+cargo run --release -- import \
+  --backup-file /path/to/export \
+  --postgres-url postgresql://fireup@localhost:5433/fireup_dev
 ```
 
-### Security Considerations
+A URL with no password falls back to `PGPASSWORD`, and a URL with no user falls
+back to `PGUSER` (`src/data_importer/connection.rs`), which is how you keep the
+password out of your shell history. Measured against a server that requires
+`scram-sha-256` for that role, with the password absent from the URL in both
+arms:
 
-1. **Database Security**
-   - Use strong passwords for PostgreSQL
-   - Limit network access to PostgreSQL port
-   - Enable SSL/TLS for database connections
-   - Regular security updates for PostgreSQL image
+| arm | result |
+|---|---|
+| `PGPASSWORD` unset | three connection attempts, then `Import failed: Database connection error`, exit **1** |
+| `PGPASSWORD` set | `2 tables processed, 7/7 records imported, 0 failed`, exit **0** |
 
-2. **Application Security**
-   - Run containers as non-root user
-   - Use read-only file systems where possible
-   - Implement proper backup file validation
-   - Monitor for suspicious activity
+### Where the rows land
 
-3. **Network Security**
-   - Use Docker networks for service isolation
-   - Implement firewall rules
-   - Consider using reverse proxy for external access
+`init.sql` runs `ALTER DATABASE fireup_dev SET search_path TO fireup_data,
+public`, so the importer's unqualified DDL creates its tables in
+**`fireup_data`** — not `public`. Measured after the successful import above:
 
-## PostgreSQL Client Connection Guide
+```
+fireup_data.cities       5 rows
+fireup_data.users        2 rows
+fireup_data.import_audit 1 row    (init.sql's own)
+```
 
-### Command Line Tools
+That is why `\dt fireup_data.*` is the right way to look for imported tables.
 
-#### psql (PostgreSQL CLI)
+## 3. The knobs that exist
+
+**Flags on `fireup import`** (defaults from `src/main.rs`):
+
+| flag | default | what it does |
+|---|---|---|
+| `--batch-size` | 1000 | rows per bulk insert |
+| `--max-connections` | 5 | pool size |
+| `--timeout` | 300 | seconds per database operation |
+| `--skip-normalization` | off | import the documents as-is |
+| `--drop-existing` | off | drop the target tables first |
+| `--continue-on-error` | off | keep importing past constraint violations; the exit code still reports them |
+| `--generate-ddl FILE` | — | write the DDL out for review before importing |
+
+**Environment variables the binary actually reads:** `PGPASSWORD` and `PGUSER`,
+as above.
+
+**Environment variables nothing reads.** `FIREUP_MAX_BATCH_SIZE`,
+`FIREUP_CONNECTION_POOL_SIZE`, `FIREUP_IMPORT_TIMEOUT_SECONDS` and
+`DATABASE_URL` appear in no source file (`grep -rn … src/`), and `RUST_LOG` is
+set in `.env.example` and passed into the compose service but never consulted:
+the subscriber is built with `with_max_level()` from the CLI flags, not with an
+`EnvFilter`. Measured on `fireup validate` against the same fixture:
+
+| invocation | INFO lines printed |
+|---|---|
+| `RUST_LOG` unset (control) | 23 |
+| `RUST_LOG=error` | **23** |
+| `--log-level error` | **0** |
+
+So use `--log-level` / `--verbose` / `--json-logs` for logging, and the flags
+in the table above for tuning. The previous version of this file documented the
+three `FIREUP_*` variables as production tuning; they have never done anything.
+
+## 4. Looking at the data
 
 ```bash
-# Development environment
+# Connect
 psql -h localhost -p 5433 -U fireup -d fireup_dev
 
-# Production environment
-psql -h your-server -p 5432 -U fireup_prod -d fireup_production
+# Imported tables (the search path puts them in fireup_data)
+\dt fireup_data.*
+\d fireup_data.cities
 
-# Common commands once connected:
-\l                          # List databases
-\dt fireup_data.*          # List tables in fireup_data schema
-\d fireup_data.table_name  # Describe table structure
-\q                         # Quit
-```
-
-#### pg_dump (Backup)
-
-```bash
-# Backup imported data
+# Dump what was imported
 pg_dump -h localhost -p 5433 -U fireup -d fireup_dev \
-  --schema=fireup_data --data-only > fireup_backup.sql
+  --schema=fireup_data --data-only > fireup_data.sql
 
-# Backup schema only
+# Schema only
 pg_dump -h localhost -p 5433 -U fireup -d fireup_dev \
   --schema=fireup_data --schema-only > fireup_schema.sql
 ```
 
-### GUI Tools
+Any standard client works — the connection string is
+`postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev`, and GUI
+tools need the same four values (host `localhost`, port 5433, database
+`fireup_dev`, user `fireup`).
 
-#### pgAdmin
+## 5. `fireup local`
 
-1. **Installation**: Download from https://www.pgadmin.org/
-2. **Connection Setup**:
-   - Host: localhost (or your server IP)
-   - Port: 5433 (development) or 5432 (production)
-   - Database: fireup_dev or fireup_production
-   - Username: fireup or fireup_prod
-   - Password: (from your .env file)
-
-#### DBeaver
-
-1. **Installation**: Download from https://dbeaver.io/
-2. **Connection Setup**:
-   - Database: PostgreSQL
-   - Server Host: localhost
-   - Port: 5433
-   - Database: fireup_dev
-   - Username: fireup
-   - Password: fireup_dev_password
-
-### Programming Language Connections
-
-#### Python (psycopg2)
-
-```python
-import psycopg2
-from psycopg2.extras import RealDictCursor
-
-# Connection
-conn = psycopg2.connect(
-    host="localhost",
-    port=5433,
-    database="fireup_dev",
-    user="fireup",
-    password="fireup_dev_password"
-)
-
-# Query with cursor
-with conn.cursor(cursor_factory=RealDictCursor) as cur:
-    cur.execute("SELECT * FROM fireup_data.import_summary")
-    results = cur.fetchall()
-    for row in results:
-        print(row)
-
-conn.close()
-```
-
-#### Node.js (pg)
-
-```javascript
-const { Client } = require('pg');
-
-const client = new Client({
-  host: 'localhost',
-  port: 5433,
-  database: 'fireup_dev',
-  user: 'fireup',
-  password: 'fireup_dev_password',
-});
-
-async function queryData() {
-  await client.connect();
-  
-  const res = await client.query('SELECT * FROM fireup_data.import_summary');
-  console.log(res.rows);
-  
-  await client.end();
-}
-
-queryData().catch(console.error);
-```
-
-## Monitoring and Maintenance
-
-### Health Checks
+`docker-compose.yml` also defines a `fireup-local` service that serves the
+Firestore, Datastore and Identity Toolkit surfaces on one port (4589 by
+default), backed by the same PostgreSQL service, so the data survives a
+restart:
 
 ```bash
-# Check PostgreSQL health
-docker-compose exec postgres pg_isready -U fireup -d fireup_dev
-
-# Check application logs
-docker-compose logs -f fireup
-
-# Monitor resource usage
-docker stats
+docker compose up -d fireup-local
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:4589
+export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:4589
+curl http://127.0.0.1:4589/health
 ```
 
-### Database Maintenance
-
-```sql
--- Check database size
-SELECT pg_size_pretty(pg_database_size('fireup_dev'));
-
--- Check table sizes
-SELECT 
-    schemaname,
-    tablename,
-    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as size
-FROM pg_tables 
-WHERE schemaname = 'fireup_data'
-ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
-
--- Vacuum and analyze tables
-VACUUM ANALYZE;
-```
-
-### Backup and Recovery
-
-```bash
-# Create full backup
-docker-compose exec postgres pg_dump -U fireup fireup_dev > backup_$(date +%Y%m%d).sql
-
-# Restore from backup
-docker-compose exec -T postgres psql -U fireup fireup_dev < backup_20231201.sql
-
-# Automated backup script
-#!/bin/bash
-BACKUP_DIR="/backups"
-DATE=$(date +%Y%m%d_%H%M%S)
-docker-compose exec postgres pg_dump -U fireup fireup_dev > "$BACKUP_DIR/fireup_$DATE.sql"
-find "$BACKUP_DIR" -name "fireup_*.sql" -mtime +7 -delete
-```
+**Development machines only.** The auth surface mints unsigned tokens and
+verifies no credential; do not publish that port. Flags, the fidelity matrix
+and the storage layout are in
+[docs/local/README.md](docs/local/README.md); the end-to-end workflow is in
+[docs/local/END_TO_END.md](docs/local/END_TO_END.md).
 
 ## Troubleshooting
 
-### Common Issues and Solutions
-
-1. **Container Won't Start**
-   ```bash
-   # Check Docker daemon
-   docker info
-   
-   # Check port conflicts
-   netstat -tulpn | grep :5433
-   
-   # View detailed logs
-   docker-compose logs postgres
-   ```
-
-2. **Connection Refused**
-   ```bash
-   # Verify container is running
-   docker-compose ps
-   
-   # Check network connectivity
-   docker-compose exec postgres netstat -tlnp
-   
-   # Test connection from host
-   telnet localhost 5433
-   ```
-
-3. **Permission Denied**
-   ```bash
-   # Check PostgreSQL logs
-   docker-compose logs postgres | grep ERROR
-   
-   # Verify user permissions
-   docker-compose exec postgres psql -U fireup -d fireup_dev -c "\du"
-   ```
-
-4. **Out of Memory**
-   ```bash
-   # Check container memory usage
-   docker stats
-   
-   # Increase memory limits in docker-compose.yml
-   # Reduce batch size in application configuration
-   ```
-
-5. **Slow Performance**
-   ```sql
-   -- Check for missing indexes
-   SELECT * FROM pg_stat_user_tables WHERE schemaname = 'fireup_data';
-   
-   -- Analyze query performance
-   EXPLAIN ANALYZE SELECT * FROM fireup_data.your_table;
-   
-   -- Update table statistics
-   ANALYZE;
-   ```
-
-### Log Analysis
+**The container will not start.**
 
 ```bash
-# Application logs
-docker-compose logs fireup | grep ERROR
-
-# PostgreSQL logs
-docker-compose logs postgres | grep -E "(ERROR|FATAL|PANIC)"
-
-# Real-time monitoring
-docker-compose logs -f --tail=100
+docker compose logs postgres        # the entrypoint says which init file failed
+ss -ltn | grep 5433                 # host port already taken
+docker info                         # daemon reachable at all
 ```
 
-### Performance Tuning
+If the log ends in a `psql:/docker-entrypoint-initdb.d/init.sql:NN: ERROR`,
+read *Do not rename the database or the user* above — the two renames that
+cause it are the common ones. Initialization only runs on a fresh volume, so
+fixing `.env` is not enough on its own: `docker compose down -v` and start
+again, which also deletes anything already imported.
 
-1. **PostgreSQL Configuration**
-   - Adjust `shared_buffers` for available memory
-   - Tune `work_mem` for complex queries
-   - Configure `checkpoint_segments` for write-heavy workloads
+**Connection refused.**
 
-2. **Application Configuration**
-   - Increase `FIREUP_MAX_BATCH_SIZE` for faster imports
-   - Adjust `FIREUP_CONNECTION_POOL_SIZE` based on concurrent load
-   - Monitor memory usage and adjust accordingly
+```bash
+docker compose ps                   # healthy, or restarting?
+psql -h localhost -p 5433 -U fireup -d fireup_dev -c 'select 1'
+```
 
-3. **System Resources**
-   - Ensure adequate disk space for data and logs
-   - Monitor CPU usage during large imports
-   - Consider SSD storage for better I/O performance
+Port **5433** on the host, not 5432 — the CLI's own `--help` examples use 5432,
+which is the container-internal port.
+
+**Authentication failed, or `Database connection error` with no detail.** The
+importer reports a pool failure rather than the server's reason. Reproduce the
+same connection with `psql` to get the real message, and check `PGPASSWORD` is
+exported when the URL carries no password (the table in §2).
+
+**Tables are missing after an import that reported success.** Look in
+`fireup_data`, not `public` (§2). If they are in `public`, the search path never
+got set — the quiet `POSTGRES_DB` case above.
+
+**The import is slow, or runs out of memory.** `--batch-size` and
+`--max-connections` are the knobs, not the `FIREUP_*` environment variables
+(§3), and each applies to one invocation.
+
+**Queries are slow.**
+
+```sql
+ANALYZE;                                    -- refresh planner statistics
+SELECT * FROM pg_stat_user_tables WHERE schemaname = 'fireup_data';
+EXPLAIN ANALYZE SELECT * FROM fireup_data.cities;
+```
+
+## What this file no longer claims
+
+Removed in SAK-257, with the reason, so nobody restores it from memory:
+
+- **A production deployment section** — `docker-compose.prod.yml`, a `fireup`
+  application container with `restart: always`, CPU/memory reservations,
+  production environment variables, a security-hardening list and a backup
+  rotation script. None of it was ever run, the product is not production
+  ready, and the `fireup` CLI exits when its import finishes rather than
+  serving anything.
+- **`DATABASE_URL`** as the way to configure the connection. The flag is
+  `--postgres-url`; that variable is read nowhere.
+- **The `FIREUP_*` tuning variables** — measured above: inert.
+- **`SELECT * FROM fireup_data.import_summary`**, and the Python and Node
+  snippets that queried it. The view is not created by the container, and the
+  table it reads is never written.
+- **Performance-tuning advice** for `shared_buffers`, `work_mem` and
+  `checkpoint_segments` — the last of which PostgreSQL removed in 9.5.

@@ -187,12 +187,17 @@ Once data is imported, you can connect to PostgreSQL using any standard client:
 # Connect to the development database
 psql -h localhost -p 5433 -U fireup -d fireup_dev
 
-# List imported tables
+# List imported tables — they land in fireup_data, not public, because
+# init.sql sets the database search path
 \dt fireup_data.*
 
-# Query imported data
-SELECT * FROM fireup_data.import_summary;
+# Query imported data: one table per collection in the export
+SELECT * FROM fireup_data.cities LIMIT 10;
 ```
+
+`fireup_data.import_summary` used to be suggested here. The container never
+creates it, and the audit table it reads is never written — see
+[DEPLOYMENT.md](DEPLOYMENT.md#sql-is-mounted-but-never-runs).
 
 ### Using pgAdmin
 
@@ -251,21 +256,25 @@ proto/google/            # Vendored public googleapis .proto files (Apache-2.0)
 
 ### Environment Variables
 
-Copy `.env.example` to `.env` and customize:
+Copy `.env.example` to `.env`. It configures the Docker Compose services, not
+the binary:
 
 ```bash
-# PostgreSQL Configuration
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5433
-POSTGRES_DB=fireup_dev
-POSTGRES_USER=fireup
+# Read by docker-compose.yml
+POSTGRES_PORT=5433                  # host port; the container always listens on 5432
 POSTGRES_PASSWORD=fireup_dev_password
-
-# Application Configuration
-FIREUP_MAX_BATCH_SIZE=1000
-FIREUP_CONNECTION_POOL_SIZE=10
-RUST_LOG=fireup=debug,info
+POSTGRES_DB=fireup_dev              # do not rename: init.sql hardcodes it
+POSTGRES_USER=fireup                # do not rename: init.sql grants to this role
 ```
+
+Renaming either of the last two aborts the container's first-run
+initialization; both error messages are measured in
+[DEPLOYMENT.md](DEPLOYMENT.md#do-not-rename-the-database-or-the-user). The CLI
+itself is configured by flags — `--postgres-url`, `--batch-size`,
+`--max-connections`, `--timeout`, `--log-level` — plus `PGPASSWORD`/`PGUSER`
+when the URL omits them. `DATABASE_URL`, `RUST_LOG` and the `FIREUP_*`
+variables are read by nothing; see
+[DEPLOYMENT.md §3](DEPLOYMENT.md#3-the-knobs-that-exist).
 
 ### Running Tests
 
@@ -411,7 +420,7 @@ The application uses structured logging with the `tracing` crate:
 | [docs/local/END_TO_END.md](docs/local/END_TO_END.md) | The end-to-end workflow: export → SQL tables → live API → SQL, and its fidelity gaps |
 | [docs/local/README.md](docs/local/README.md) | `fireup local`: flags, fidelity matrix, auth surface, storage layout, tests |
 | [PROJECT_STATUS.md](PROJECT_STATUS.md) | What is proven, what is not, and the residual risks |
-| [DEPLOYMENT.md](DEPLOYMENT.md) | Deploying the migrator |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Running the migrator against the local PostgreSQL container: compose defaults, the `.env` renames that break it, where rows land, live and inert configuration |
 | [docs/INTEGRATION_TESTING.md](docs/INTEGRATION_TESTING.md) | The integration test suite |
 | [docs/licenses/FIREBASE_GCP_LOCAL.md](docs/licenses/FIREBASE_GCP_LOCAL.md) | Licence and attribution ledger for everything Google/Firebase-related |
 | [docs/licenses/CARGO_LICENSE_AUDIT.md](docs/licenses/CARGO_LICENSE_AUDIT.md) | `cargo license` audit that cleared Apache-2.0 for the dependency tree |
