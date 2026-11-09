@@ -1,6 +1,6 @@
 # Fireup Project Status
 
-**Last Updated:** November 7, 2026  
+**Last Updated:** November 8, 2026  
 **Version:** 0.1.0  
 **Status:** ⛔ NOT production ready — fixture path works; live GCP export + scale unproven
 
@@ -894,7 +894,10 @@ chrono = "0.4"                   # Date/time handling
 - **README.md** - Project overview and positioning, quick start, usage examples
 - **docs/local/END_TO_END.md** - The export → SQL → live API → SQL workflow
 - **docs/local/README.md** - `fireup local`: flags, fidelity matrix, auth surface, storage layout
-- **DEPLOYMENT.md** - Detailed deployment guide for development and production
+- **DEPLOYMENT.md** - Running the migrator against the local PostgreSQL
+  container: the compose defaults, the two `.env` renames that break
+  initialization, where imported rows land, and which flags and environment
+  variables are live. Not a production guide — there is no deployment (SAK-257)
 - **docs/INTEGRATION_TESTING.md** - Integration testing procedures
 - **tests/DEPLOYMENT_TESTING.md** - Deployment testing documentation
 - **docs/licenses/FIREBASE_GCP_LOCAL.md** - Licence and attribution ledger
@@ -911,7 +914,9 @@ chrono = "0.4"                   # Date/time handling
 
 #### Operational Documentation
 - Docker Compose configuration with comments
-- Environment variable documentation
+- Environment variables: `.env.example`, read with DEPLOYMENT.md §3 — four of
+  the variables that file sets (`DATABASE_URL`, the three `FIREUP_*`) and
+  `RUST_LOG` are consulted by no code, which is measured there
 - PostgreSQL client connection guides
 - Troubleshooting sections in README and DEPLOYMENT.md
 
@@ -1430,5 +1435,6 @@ acceptance tests in `tests/real_export_validation.rs`
 
 **For questions or issues, please refer to:**
 - [README.md](README.md) - General usage and quick start
-- [DEPLOYMENT.md](DEPLOYMENT.md) - Deployment procedures
+- [DEPLOYMENT.md](DEPLOYMENT.md) - Running the migrator against the local
+  PostgreSQL container, and its troubleshooting
 - [Issue Tracker](https://github.com/asakaxgit/fireup/issues) - Report bugs and feature requests
