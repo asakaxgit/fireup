@@ -230,7 +230,7 @@ fn import_rejects_an_unsupportable_sslmode() {
 }
 
 // ---------------------------------------------------------------------------
-// Edge-case fixtures (SAK-195)
+// Edge-case fixtures (#60)
 //
 // The CLI is the surface a migration actually runs through, so the edge-case
 // trees get driven end to end here too: `validate` and `analyze` need no

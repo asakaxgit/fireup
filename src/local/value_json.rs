@@ -15,7 +15,7 @@
 //! `encode` refuses anything outside it (property 2) rather than writing a
 //! payload the read path then rejects, which is what makes property 1 hold as
 //! stated. `decode` is deliberately the wider of the two — it also reads back
-//! the payloads a pre-SAK-205 build wrote, so a database that already holds
+//! the payloads a build predating #69 wrote, so a database that already holds
 //! one stays readable; see [`decode_timestamp`].
 //!
 //! The wire shape is the documented REST encoding of `google.firestore.v1.Value`
@@ -343,7 +343,7 @@ pub const ENCODED_TIMESTAMP_LEN: usize = 30;
 /// signed five-digit year — is not RFC 3339, is not what the REST API would
 /// ever emit, and is not the fixed width the pushdown's text comparison needs;
 /// writing one would succeed and then break every later read of the whole
-/// collection (SAK-205).
+/// collection (#69).
 fn encode_timestamp(timestamp: &Timestamp) -> Result<String> {
     let out_of_range = || ValueCodecError::TimestampOutOfRange {
         seconds: timestamp.seconds,
@@ -371,7 +371,7 @@ fn encode_timestamp(timestamp: &Timestamp) -> Result<String> {
 
 /// Read a timestamp back, including the one shape `encode` no longer writes.
 ///
-/// A build before SAK-205 encoded an out-of-range timestamp as chrono's signed
+/// A build before PR #69 encoded an out-of-range timestamp as chrono's signed
 /// expanded year (`+11476-08-15T05:20:00.000000000Z`), which
 /// `parse_from_rfc3339` rejects — and because a collection scan decodes every
 /// row it reads, one such row made the entire collection unreadable. Those
@@ -401,7 +401,7 @@ fn decode_timestamp(payload: &Json) -> Result<Timestamp> {
     })
 }
 
-/// The pre-SAK-205 spelling only: a leading `+`/`-` sign on the year, a `Z`
+/// The spelling used before #69 only: a leading `+`/`-` sign on the year, a `Z`
 /// offset, and otherwise the same fields. Anything else is not something this
 /// module ever wrote, so it stays an error.
 fn decode_expanded_year_timestamp(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -482,7 +482,7 @@ mod tests {
                 nanos: 1,
             })),
             // Both ends of the range, which is where an off-by-one in the
-            // check added for SAK-205 would show up.
+            // check added for PR #69 would show up.
             value(ValueType::TimestampValue(Timestamp {
                 seconds: TIMESTAMP_MIN_SECONDS,
                 nanos: 0,
@@ -663,7 +663,7 @@ mod tests {
         ]
     }
 
-    /// The bug SAK-205 reported, stated as the property that was violated:
+    /// The bug PR #69 reported, stated as the property that was violated:
     /// a write either fails or produces a payload the read path accepts.
     #[test]
     fn a_timestamp_outside_years_0001_9999_fails_the_write() {
@@ -710,7 +710,7 @@ mod tests {
         }
     }
 
-    /// A row a pre-SAK-205 build wrote stays readable, because refusing it
+    /// A row a build predating #69 wrote stays readable, because refusing it
     /// fails every scan of the collection holding it, not just that document.
     #[test]
     fn a_legacy_expanded_year_payload_is_still_readable() {

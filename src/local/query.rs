@@ -998,7 +998,7 @@ impl Query {
         // `orderBy('v', 'desc')` keeps working — and so is any predicate on a
         // field, down to `IS_NULL`. A predicate on `__name__` is not: it is a
         // range over the same forward-only store. Measured case by case
-        // against `cloud-firestore-emulator` v1.22.0 (SAK-223); fireup does
+        // against `cloud-firestore-emulator` v1.22.0 (#85); fireup does
         // not model indexes, so this is the one place their shape shows
         // through, and it is written as the rule rather than derived from one.
         if matches!(order.as_slice(), [key] if key.path == Path::Name && key.descending)
@@ -1665,7 +1665,7 @@ mod tests {
     // --- `order_by` shapes Firestore refuses --------------------------------
     //
     // Every expectation in this section was measured against
-    // `cloud-firestore-emulator` v1.22.0 over raw gRPC (SAK-223), one case at a
+    // `cloud-firestore-emulator` v1.22.0 over raw gRPC (#85), one case at a
     // time, rather than read off the documentation. Both rules are narrower
     // than they first look, so each test carries the shapes production *serves*
     // beside the ones it refuses: over-refusing here would break working code,

@@ -723,7 +723,7 @@ async fn run_query_with_no_matches_still_answers() {
     server.shutdown().await.expect("clean shutdown");
 }
 
-// --- Collection group queries (SAK-191) ------------------------------------
+// --- Collection group queries (#57) ----------------------------------------
 
 fn collection_group(collection_id: &str) -> Vec<CollectionSelector> {
     vec![CollectionSelector {
@@ -883,7 +883,7 @@ async fn a_collection_group_query_without_a_collection_id_is_refused() {
     server.shutdown().await.expect("clean shutdown");
 }
 
-// --- Cursors (SAK-191) -----------------------------------------------------
+// --- Cursors (#57) ---------------------------------------------------------
 
 fn cursor(values: Vec<Value>, before: bool) -> Option<Cursor> {
     Some(Cursor { values, before })
@@ -1126,7 +1126,7 @@ async fn a_cursor_the_query_cannot_position_is_an_invalid_argument() {
     server.shutdown().await.expect("clean shutdown");
 }
 
-// --- Nested field paths (SAK-191) ------------------------------------------
+// --- Nested field paths (#57) ----------------------------------------------
 
 fn map_value<const N: usize>(pairs: [(&str, Value); N]) -> Value {
     Value {
@@ -1991,7 +1991,7 @@ async fn a_seeded_export_reads_back_as_real_firestore_value_types() {
 }
 
 // ---------------------------------------------------------------------------
-// Field transforms (SAK-190)
+// Field transforms (#58)
 //
 // The values in these writes are computed by the server, so the assertions are
 // about two things an SDK depends on: what ends up stored, and what the

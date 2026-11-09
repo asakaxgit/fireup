@@ -1,7 +1,7 @@
 # Copilot instructions for Fireup
 
 GitHub Copilot reads this file automatically for every suggestion in this
-repository, which is why it must not restate anything. Until SAK-257 it held 355
+repository, which is why it must not restate anything. Until #117 it held 355
 lines written on 2025-11-22: they described Fireup as a migration tool with
 "Standard SQL query support", listed a five-module architecture that left out
 `src/local/` — 22,407 of the 42,381 lines in `src/` — and recommended `rayon`, a
@@ -39,6 +39,11 @@ Read, in this order:
 - [`deny.toml`](../deny.toml) — the permissive-only licence policy and the
   advisory gate, enforced by the `deny` job in [`ci.yml`](workflows/ci.yml). A
   copyleft-only dependency fails the build.
+- **This repository is public; the issue tracker is not.** Refer to work by its
+  pull request number — `#117` — in comments, documentation, commit messages,
+  branch names and PR titles. Never an internal ticket id and never a link to
+  the tracker: neither resolves for anyone outside the company.
+  `tests/public_repo_hygiene_tests.rs` fails the build on both.
 
 ## Before adding a dependency
 

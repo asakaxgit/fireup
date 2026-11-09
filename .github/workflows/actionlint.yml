@@ -12,9 +12,9 @@ name: actionlint
 # It has to run automatically or it is worthless. A linter whose job is to catch
 # a workflow file nobody can run only helps if it reports *before* somebody
 # tries to run it; on `workflow_dispatch` it would sit there until a human
-# remembered to dispatch the checker — which is exactly the failure that got
-# [SAK-215] filed, where a broken workflow stayed broken because the only person
-# who looked dispatched by hand and saw green.
+# remembered to dispatch the checker — which is exactly the failure #76 fixed,
+# where a broken workflow stayed broken because the only person who looked
+# dispatched by hand and saw green.
 #
 # Enabling triggers here is not a decision about re-enabling the test
 # workflows. When those come back on, they get their own triggers; this file

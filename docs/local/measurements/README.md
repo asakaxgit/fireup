@@ -2,7 +2,7 @@
 
 The JSON files beside this one are raw output from
 `scripts/conformance-target.sh`. They are the evidence behind the **measured**
-cells in [`../COMPARISON.md`](../COMPARISON.md). Before SAK-217 that document's
+cells in [`../COMPARISON.md`](../COMPARISON.md). Before PR #80 that document's
 emulator column was a reading of Google's documentation; these files are what
 replaced the reading with answers.
 
@@ -45,7 +45,7 @@ exactly this way:
   does not (serve|support)/`) from a stranger, which nothing else will ever say.
 
 Both are fixed. The control is how we knew. A third was caught the same way in
-SAK-223: a probe asserting three refusals through `@google-cloud/firestore`
+PR #85: a probe asserting three refusals through `@google-cloud/firestore`
 scored `timeout` against **fireup**, because the client retries a refused query
 with backoff and three of those overrun the 20s probe timeout. The fix is in
 the probe, not the timeout — see
@@ -56,7 +56,7 @@ the probe, not the timeout — see
 Measuring is not the deliverable; four rows moved because of it. The first run
 found four probes building an `order_by` shape production rejects, and two
 `order_by` shapes fireup served that production refuses — one of them with a
-matrix probe *asserting* the false parity. SAK-223 fixed the behaviour, inverted
+matrix probe *asserting* the false parity. PR #85 fixed the behaviour, inverted
 that probe, and rebuilt the four others on a shape production accepts:
 
 | Row | First run | Now |

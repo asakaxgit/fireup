@@ -451,7 +451,7 @@ fn numeric_comparison(
 /// RFC 3339 with four year digits, nine fractional digits and a `Z`, which is
 /// fixed-field, so byte order is chronological order.
 ///
-/// The guard on the stored side is for rows a pre-SAK-205 build wrote, whose
+/// The guard on the stored side is for rows a build predating #69 wrote, whose
 /// year sits outside 0001–9999 and whose encoding is therefore both wider and
 /// signed — `+11476-…` sorts *before* `2023-…` byte-wise, so comparing one
 /// would drop a row that matches. Such a row is kept as a candidate instead

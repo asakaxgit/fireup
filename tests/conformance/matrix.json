@@ -151,7 +151,7 @@
       "status": "served",
       "driver": "node-grpc",
       "python": false,
-      "note": "Probed on the wire and through the SDK: document and query watches, with create/update/delete reaching the watcher. Served as of SAK-189; the feed is in-process only."
+      "note": "Probed on the wire and through the SDK: document and query watches, with create/update/delete reaching the watcher. Served as of PR #67; the feed is in-process only."
     },
     {
       "id": "firestore.Write",
@@ -256,7 +256,7 @@
       "status": "served",
       "driver": "node-sdk",
       "python": false,
-      "note": "Ascending. SAK-223 inverted this probe: it asserted that a lone descending key scan returns documents in descending name order, which production refuses with FAILED_PRECONDITION, so the row published a parity claim that was false while the probe stayed green. The probe now asserts the refusal. A descending __name__ *after* an explicit term is still served — that is what every orderBy(field, 'desc') compiles to."
+      "note": "Ascending. PR #85 inverted this probe: it asserted that a lone descending key scan returns documents in descending name order, which production refuses with FAILED_PRECONDITION, so the row published a parity claim that was false while the probe stayed green. The probe now asserts the refusal. A descending __name__ *after* an explicit term is still served — that is what every orderBy(field, 'desc') compiles to."
     },
     {
       "id": "query.collection-group",
@@ -677,7 +677,7 @@
       "status": "served",
       "driver": "node-sdk",
       "python": false,
-      "note": "SAK-223. Refused with INVALID_ARGUMENT and production's own message, measured against cloud-firestore-emulator v1.22.0 over raw gRPC. `served` rather than `unimplemented` on purpose: this is not a gap, it is the behaviour the row promises, and `unimplemented` would demand gRPC UNIMPLEMENTED plus fireup's own refusal wording — wrong for a refusal Firestore owns. The official Node SDK builds this shape unprompted from orderBy('__name__') plus an inequality filter, which is why serving it locally broke a real query in production."
+      "note": "PR #85. Refused with INVALID_ARGUMENT and production's own message, measured against cloud-firestore-emulator v1.22.0 over raw gRPC. `served` rather than `unimplemented` on purpose: this is not a gap, it is the behaviour the row promises, and `unimplemented` would demand gRPC UNIMPLEMENTED plus fireup's own refusal wording — wrong for a refusal Firestore owns. The official Node SDK builds this shape unprompted from orderBy('__name__') plus an inequality filter, which is why serving it locally broke a real query in production."
     },
     {
       "id": "transaction.atomic-commit",
@@ -859,7 +859,7 @@
       "status": "served",
       "driver": "node-sdk",
       "python": false,
-      "note": "A documented divergence until SAK-203: the field was left in place. It is how FieldValue.delete() reaches the wire, so it is an SDK-visible row."
+      "note": "A documented divergence until PR #70: the field was left in place. It is how FieldValue.delete() reaches the wire, so it is an SDK-visible row."
     },
     {
       "id": "datastore.namespaces",
@@ -932,7 +932,7 @@
       "status": "documented-divergence",
       "driver": "auth-smoke",
       "python": false,
-      "note": "SAK-193 served the out-of-band flows. No SMTP: a generated link is read back from GET /emulator/v1/projects/{p}/oobCodes instead of arriving in a mailbox."
+      "note": "PR #61 served the out-of-band flows. No SMTP: a generated link is read back from GET /emulator/v1/projects/{p}/oobCodes instead of arriving in a mailbox."
     },
     {
       "id": "auth.batch-account-writes",

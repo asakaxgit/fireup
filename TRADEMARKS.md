@@ -34,7 +34,7 @@ marketing site built from them — are **not** in this repository. They are held
 privately by Saks Industries and are not distributed under any licence.
 
 Their absence here is not what protects them; this policy and Apache-2.0 §6
-are. The assets were part of this repository's public history until SAK-257 and
+are. The assets were part of this repository's public history until #114 and
 remain recoverable from it, by design: a logo is meant to be seen, and we have
 not rewritten history to chase those bytes. The terms above govern their use
 wherever you obtained them.
@@ -53,5 +53,5 @@ Open an issue, or contact Saks Industries.
 
 ---
 
-This file replaces `brand/LICENSE`, which stated the same terms from SAK-196
-until SAK-257. Nothing above narrows what that text allowed.
+This file replaces `brand/LICENSE`, which stated the same terms from PR #56
+until #114. Nothing above narrows what that text allowed.

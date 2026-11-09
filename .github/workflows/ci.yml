@@ -48,7 +48,7 @@ on:
 # by default (`persist-credentials: true`), written this token into `.git/config`.
 #
 # `dependency_pin_tests` fails if this block goes away or gains a `write`, for any
-# scope and in any job (SAK-240).
+# scope and in any job (#96).
 permissions:
   contents: read
 
@@ -98,6 +98,18 @@ jobs:
           cargo test --locked --test fidelity_matrix_tests
           cargo test --locked --test workflow_yaml_tests
 
+      # This repository is public; our issue tracker is not. This target keeps
+      # internal ticket ids and links to the tracker's host out of the
+      # published tree, where they name nothing a reader can open.
+      #
+      # It gets a step of its own rather than joining the one above on purpose.
+      # It and `workflow_yaml_tests` are a mutual pair — each asserts `ci.yml`
+      # still names the other, because neither can assert it is named itself:
+      # delete the step and the assertion goes with it. Collapsing the two into
+      # one step would mean a single deleted line silences both halves.
+      - name: Internal tracker references
+        run: cargo test --locked --test public_repo_hygiene_tests
+
       # Guards that assert *how* a request is served rather than what comes
       # back, so no other suite can see them fail. `local_pushdown_boundary_tests`
       # is the one that catches a `Store` decorator which forwards
@@ -113,7 +125,7 @@ jobs:
           cargo test --locked --test local_listen_pushdown_tests
 
       # The other half of that: the supply-chain facts only Cargo.lock and
-      # deny.toml record — and, since SAK-239 and SAK-240, two about this file.
+      # deny.toml record — and, since PR #95 and PR #96, two about this file.
       # The target reads all three off disk and needs no network and no
       # third-party binary, which is exactly why it belongs in this job and not
       # in `deny` below — and it has to be named here, because every cargo

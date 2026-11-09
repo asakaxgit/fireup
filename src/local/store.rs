@@ -864,7 +864,7 @@ pub mod conformance {
     /// and a value one accepts and the other refuses only surfaces when
     /// somebody adds `--postgres-url` to a project that already works.
     ///
-    /// Before SAK-205 the write succeeded and then broke every later read of
+    /// Before PR #69 the write succeeded and then broke every later read of
     /// the entire collection, because the encoding it produced was one the
     /// read path refused.
     async fn a_timestamp_no_document_can_hold_fails_the_write(store: &dyn Store, name: &str) {
@@ -1059,7 +1059,7 @@ pub mod conformance {
     /// test in its binary, and a sibling test writing in between made
     /// `before + 1` fail for a reason that has nothing to do with counting
     /// (~1 run in 8 once a second document-writing test joined that binary,
-    /// SAK-192). Asserting the *direction* of the change is no better — a
+    /// PR #65). Asserting the *direction* of the change is no better — a
     /// concurrent insert masks the delete, giving `11 -> 11`.
     ///
     /// Scoping the read to this test's own collection makes it exact again.

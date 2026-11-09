@@ -1005,7 +1005,7 @@ mod postgresql_importer_tests {
         assert!(result.is_successful());
     }
 
-    /// Reporting success while writing nothing is the defect SAK-142 was filed for.
+    /// Reporting success while writing nothing is the defect PR #42 fixed.
     #[test]
     fn test_zero_row_import_is_not_successful() {
         let result = FullImportResult {

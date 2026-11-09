@@ -10,9 +10,9 @@
 
 Fireup aims to migrate Firestore/Datastore backup data into PostgreSQL. The
 internal components are built out and unit-tested. Validated on 2026-11-02
-against spec-correct export fixtures (SAK-139), `fireup validate` reported
+against spec-correct export fixtures, `fireup validate` reported
 `No records found in LevelDB file` and zero of 12 entities were recovered.
-**The read path is now fixed** (SAK-141): `validate` reads all 12 entities of
+**The read path is now fixed** (#42): `validate` reads all 12 entities of
 the fixture tree across both kinds. The remaining gaps are downstream of
 parsing — see Residual Risks.
 
@@ -29,12 +29,12 @@ which exercised the real on-disk export format.
 - An export-fidelity regression suite over deliberately awkward fixtures —
   output shards, namespace partitions, key identity, numeric limits, property
   names PostgreSQL cannot store whole (`tests/export_fidelity_tests.rs`,
-  SAK-195)
+  PR #60)
 
 ### What works on a real export
 - Reading a managed export end to end: masked CRC32C framing, legacy
   `EntityProto` payloads, and every kind and `output-N` shard of the tree
-  (SAK-141)
+  (#42)
 
 ### What does not work yet
 - Confirmed round-trip against a **live GCP-captured** export (fixtures are
@@ -65,7 +65,7 @@ which exercised the real on-disk export format.
   every kind, aggregated, with `.export_metadata` files excluded
 - JSON Lines fallback path
 
-**Measured (2026-11-02, SAK-141):** `validate --backup-file
+**Measured (2026-11-02, PR #42):** `validate --backup-file
 tests/fixtures/export-onestore` reads 2 input files, 13 records, **12 of 12
 entities**, 2 collections, 0 errors. The same tree previously reported
 `No records found in LevelDB file`.
@@ -134,7 +134,7 @@ implementation.
 a live PostgreSQL  
 **Location:** `src/data_importer/importer.rs`, `src/data_importer/connection.rs`
 
-**Fixed under SAK-142** (the defects SAK-139 found by source inspection):
+**Fixed in #42** (the defects found by source inspection):
 - `src/main.rs` called only `create_schema` and then returned
   `total_records_imported: documents.len()` with `table_imports: vec![]`, so a
   successful-looking `import` wrote **zero rows**. The CLI now transforms the
@@ -159,13 +159,13 @@ a live PostgreSQL
 - Constraint validation after import
 - Integration with PostgreSQL Docker container
 
-**Measured (2026-11-02, SAK-142):** `tests/postgres_import_tests.rs` imports a
+**Measured (2026-11-02):** `tests/postgres_import_tests.rs` imports a
 25-document backup through the library path and a 12-document backup through the
 CLI, then counts the rows in PostgreSQL: one row per source document in both
 cases. Re-importing with `--drop-existing` leaves the same count rather than
 doubling it.
 
-**Identity:** rows use Datastore `key_path` as the primary key (SAK-143), so
+**Identity:** rows use Datastore `key_path` as the primary key (#42), so
 re-import is idempotent against the fixture tree.
 
 **Test Coverage:** library unit tests, plus `tests/postgres_import_tests.rs`
@@ -288,7 +288,7 @@ runs.
   export FIREUP_TEST_POSTGRES_URL='postgresql://fireup@127.0.0.1:55432/fireup_local_test'
   # …run tests, then: pg_ctl -D "$PGDIR/data" stop && rm -rf "$PGDIR"
   ```
-  Used on 2026-11-04 to verify the SAK-164 PostgreSQL store.
+  Used on 2026-11-04 to verify the PR #47 PostgreSQL store.
 
 **Functional sample-data ladder:**
 - Levels 1–4 generators live under `tests/data-generator/` (`npm run generate:level1` … `generate:level4`, or `generate:all-levels`).
@@ -311,7 +311,7 @@ is in force — measured both ways on this repository: it returned 404 when
 endpoint lists 5 effective rules. The 404 carries no information. Likewise, a
 ruleset that is `"enforcement": "active"` can still match nothing: this one sat
 active with `conditions.ref_name.include: []` — which matches no ref — so the
-repository looked configured while nothing was enforced (SAK-242).
+repository looked configured while nothing was enforced (#113).
 
 **In force on `main`:** `deletion`, `non_fast_forward`, `pull_request`
 (0 approvals required), `copilot_code_review`, and `required_status_checks`.
@@ -375,7 +375,7 @@ So, stated precisely:
 
 A skipped **job** reports Success and satisfies a required check. (A skipped
 **workflow** is different — its checks stay Pending and do block.) The two
-remaining holes are tracked as SAK-249 (`if:`) and SAK-251 (`checkout` inputs);
+remaining holes are tracked as PR #104 (`if:`) and #106 (`checkout` inputs);
 both are closable in-tree only by guards that live outside the job they guard,
 and both would close at once under the ruleset `workflows` rule type, whose
 availability on a free personal repository is unverified.
@@ -392,8 +392,8 @@ Emulator Suite, not affiliated with Google. See `docs/local/README.md`,
 `.cursor/rules/firebase-gcp-compliance.mdc`, and
 `docs/licenses/FIREBASE_GCP_LOCAL.md`.
 
-**Phase 0 (SAK-163)** — document CRUD over gRPC against an in-memory store.
-**Phase 1 (SAK-164, November 4 2026)** — durable storage and seeding:
+**Phase 0 (#45)** — document CRUD over gRPC against an in-memory store.
+**Phase 1 (PR #47, November 4 2026)** — durable storage and seeding:
 
 - `Store` trait with two implementations, held to one conformance suite:
   `MemoryStore` (default) and `PostgresStore` (`--postgres-url`).
@@ -407,7 +407,7 @@ Emulator Suite, not affiliated with Google. See `docs/local/README.md`,
   not written.
 - `docker compose up -d postgres fireup-local` runs it beside Compose Postgres.
 
-**Phase 2 (SAK-165, November 4 2026)** — queries, collection listings, and
+**Phase 2 (PR #49, November 4 2026)** — queries, collection listings, and
 transactions. The 12-RPC v1 surface is now served in full:
 
 - `RunQuery` over a `StructuredQuery`: AND/OR filters, all ten field operators,
@@ -447,10 +447,10 @@ point-in-time reads, and security rules. The fidelity matrix in
 `docs/local/README.md` is the authoritative list.
 
 Collection group queries, query cursors, and nested field paths in filters,
-orders, projections, and read masks are served as of SAK-191; field transforms
-as of SAK-190; realtime listeners as of SAK-189, below.
+orders, projections, and read masks are served as of PR #57; field transforms
+as of PR #58; realtime listeners as of PR #67, below.
 
-**Phase 2.1 (SAK-189, November 6 2026)** — realtime listeners:
+**Phase 2.1 (PR #67, November 6 2026)** — realtime listeners:
 
 - `Listen` is served for document watches (`DocumentsTarget`) and query watches
   (`QueryTarget`, every query shape the matrix already covers, collection group
@@ -468,7 +468,7 @@ as of SAK-190; realtime listeners as of SAK-189, below.
 - **Known limit:** the feed is in-process. With `--postgres-url`, a write by a
   *different* process does not wake these listeners — nothing polls the table.
 
-**Verified on 2026-11-06**, rebased onto `main` at the SAK-194 merge
+**Verified on 2026-11-06**, rebased onto `main` at the PR #64 merge
 (`0f54f83`) and re-run after that rebase: `cargo test --lib` (474), `--test
 local_firestore_listen_tests` (15, over the real bidirectional gRPC stream),
 `--test fidelity_matrix_tests` (5), `--test local_firestore_tests` (46),
@@ -489,7 +489,7 @@ result set; and `scripts/smoke-local-datastore.sh` green. The Python
 conformance layer skipped — its libraries are not installed in this
 environment.
 
-**Phase L (SAK-168, November 4 2026)** — Firebase Auth / Identity Platform, in
+**Phase L (PR #48, November 4 2026)** — Firebase Auth / Identity Platform, in
 parallel with Phase 2 and without waiting for a Phase 2 exit:
 
 - Public Identity Toolkit REST only, on the same port:
@@ -521,7 +521,7 @@ parallel with Phase 2 and without waiting for a Phase 2 exit:
 **Non-goals, answering `501` with a message naming the gap:** phone auth,
 multi-factor enrolment and the rest of the Identity Platform `v2` surface,
 federated/OAuth providers, production key material. (Out-of-band email flows
-were on this list until SAK-193, below.)
+were on this list until PR #61, below.)
 
 **Local development only:** unsigned tokens, no API-key or admin-credential
 check, and passwords hashed without a work factor. Anything that can reach the
@@ -536,7 +536,7 @@ a throwaway cluster: an account and its password digest survive a server
 restart, uniqueness is enforced by the database, five anonymous accounts
 coexist, and no row lands in the documents table). Full `cargo test` green.
 
-**Verified with the official SDKs (SAK-171):** `scripts/smoke-local-auth.sh`
+**Verified with the official SDKs (#50):** `scripts/smoke-local-auth.sh`
 31/31, against both the in-memory and the PostgreSQL account store. It drives
 the surface with `firebase-admin` 13 and the `firebase` client SDK 11 over
 `FIREBASE_AUTH_EMULATOR_HOST` — `createUser`, `getUser`, `getUserByEmail`,
@@ -546,7 +546,7 @@ the surface with `firebase-admin` 13 and the `firebase` client SDK 11 over
 a forced refresh extending the session. The deliberate gaps (batch account
 writes, out-of-band email flows, session cookies) are asserted to fail cleanly
 rather than left untested. (The out-of-band gap was promoted into real
-assertions by SAK-193, which is what that check exists to force.)
+assertions by PR #61, which is what that check exists to force.)
 
 That test found two real divergences that the Rust suite could not, because the
 Rust suite was written against the same reading of the contract as the code:
@@ -557,10 +557,10 @@ see the "Session claims vs account claims" section in `docs/local/README.md`.
 The lesson generalises: a passing test count proves self-consistency, not
 compatibility.
 
-**Phase 3 (SAK-166)** — the Datastore API over the same rows. See
+**Phase 3 (#52)** — the Datastore API over the same rows. See
 `docs/local/README.md#datastore-rpcs-phase-3`.
 
-**Phase 4 (SAK-167, November 4 2026)** — the migrator and the local data plane
+**Phase 4 (PR #53, November 4 2026)** — the migrator and the local data plane
 documented and demonstrated as one workflow:
 
 - `docs/local/END_TO_END.md` — export → `fireup import` (normalized SQL) →
@@ -584,7 +584,7 @@ ignored the tag, so that — not the parser — was where blobs, timestamps, geo
 points, and key references lost their type. No behaviour changed in Phase 4; the
 gap itself was closed next.
 
-**SAK-174 (November 4 2026)** — seeding restores Datastore value types. The gap
+**PR #54 (November 4 2026)** — seeding restores Datastore value types. The gap
 Phase 4 documented is closed: `src/local/seed.rs` reads the same
 `__fireup_type__` tags `fireup import` reads and produces `timestampValue`,
 `bytesValue`, `geoPointValue`, and `referenceValue` instead of a `mapValue`.
@@ -604,7 +604,7 @@ Phase 4 documented is closed: `src/local/seed.rs` reads the same
   `Timestamp`, a `Buffer`, a `GeoPoint`, and a followable `DocumentReference`.
 - Non-default namespaces remain skipped; that is unchanged and deliberate.
 
-**SAK-190 (November 6 2026)** — field transforms. `serverTimestamp`,
+**PR #58 (November 6 2026)** — field transforms. `serverTimestamp`,
 `increment`, `arrayUnion`, and `arrayRemove` are served on `Commit` and
 `BatchWrite`, both as a write's `update_transforms` and as a transform-only
 `DocumentTransform` write. This supersedes the Phase 2 "still unserved" line
@@ -632,7 +632,7 @@ above for field transforms.
   checks in `scripts/smoke-local-firestore.sh` — **33/33 against both stores**
   with Google's official client, including ten concurrent increments.
 
-**Phase L.1 (SAK-193, November 6 2026)** — the out-of-band email flows a sample
+**Phase L.1 (PR #61, November 6 2026)** — the out-of-band email flows a sample
 Firebase web app reaches after sign-up or sign-in. The Phase L non-goal is
 retired: `sendOobCode` / `resetPassword` no longer answer `501`.
 
@@ -678,7 +678,7 @@ covering `generatePasswordResetLink`, `generateEmailVerificationLink`,
 `sendEmailVerification` → `applyActionCode`, and `sendSignInLinkToEmail` →
 `isSignInWithEmailLink` → `signInWithEmailLink`.
 
-That smoke test earned its keep again, exactly as in SAK-171. The client SDK's
+That smoke test earned its keep again, exactly as in PR #50. The client SDK's
 `ActionCodeURL` parser asserts on `apiKey`, `oobCode` and a known `mode`
 *together* and yields nothing without all three, so a link built without an
 `apiKey` — a parameter that reads as optional, and which this surface does not
@@ -687,12 +687,12 @@ validate — made `isSignInWithEmailLink` quietly answer `false` and
 from the same reading of the link format as the code. The link now echoes the
 caller's own `?key=`, or a plainly-labelled placeholder.
 
-**SAK-198 (November 6 2026)** — the Datastore spelling of the same transforms.
+**PR #63 (November 6 2026)** — the Datastore spelling of the same transforms.
 `Mutation.property_transforms` is served on `Commit`, and
 `MutationResult.transform_results` reports what each one resolved to. This
-closes the one deliberate gap SAK-190 left.
+closes the one deliberate gap PR #58 left.
 
-- The question SAK-190 did not answer was the encoding, and that is where the
+- The question PR #58 did not answer was the encoding, and that is where the
   work went. A transform names a *property*, and the value it reads is whatever
   `entity_map::entity_to_document` left in the corresponding field, so the
   operands cross the same `Value` conversion the entity's own properties do. The
@@ -717,7 +717,7 @@ closes the one deliberate gap SAK-190 left.
   `scripts/smoke-local-datastore.sh`, passing **against both the in-memory and
   the PostgreSQL store** with Google's official client library.
 
-**SAK-192 (November 6 2026)** — Postgres pushdown for equality/range filters.
+**PR #65 (November 6 2026)** — Postgres pushdown for equality/range filters.
 Until now `RunQuery` read the whole collection and filtered in-process. It still
 *decides* in-process; it just no longer reads rows it cannot want.
 
@@ -770,14 +770,14 @@ owns its store (the in-memory unit test); the shared contract asserts the same
 property scoped to its own collection, which is race-free and still exact.
 0 failures in 30 runs after the fix.
 
-**Found, not fixed here (fixed in SAK-205, below):** `value_json` could not
+**Found, not fixed here (fixed in PR #69, below):** `value_json` could not
 decode its own encoding of a timestamp outside years 0001–9999 — it wrote
 `+11476-08-15T…` and `decode_timestamp` rejected it. A client that stored such
 a timestamp got a successful write and then an unreadable document, and the
 failure spread to every collection scan that included it. Unrelated to queries;
 surfaced while building the pushdown corpus.
 
-**SAK-205 (November 6 2026)** — that timestamp can no longer be written, and
+**PR #69 (November 6 2026)** — that timestamp can no longer be written, and
 the rows that already carry one can still be read.
 
 - `value_json::encode` refuses a timestamp outside years 0001–9999 — the range
@@ -812,11 +812,11 @@ must still answer identically both ways. Deleting the guard fails that test
 (`["Zoe", "bob"]` versus `["Zoe", "bob", "mallory"]`). `cargo test --lib` 489,
 `--test local_query_pushdown_tests` 6; `cargo test --lib --bins --tests` fully
 green against a throwaway PostgreSQL 18 cluster, re-run after rebasing onto the
-updated SAK-192 head. `rustfmt`/`cargo clippy --all-targets` introduce no new
+updated PR #65 head. `rustfmt`/`cargo clippy --all-targets` introduce no new
 finding on the changed files, measured as a per-file delta against the base.
 
-**SAK-203 (November 6 2026)** — `Mutation.property_mask` is served on `Commit`,
-which is the half that makes SAK-198's transforms useful. A masked
+**PR #70 (November 6 2026)** — `Mutation.property_mask` is served on `Commit`,
+which is the half that makes PR #63's transforms useful. A masked
 `insert`/`update`/`upsert` maps onto the store's masked-write primitive, so
 `property_mask: {paths: ["title"]}` plus `increment("hits", 1)` leaves `hits` for
 the transform to read and the counter climbs across commits — the Datastore
@@ -831,7 +831,7 @@ spelling of Firestore's `update_mask` + `update_transforms`.
   reading of the same sentence.
 - **That fixed a live Firestore bug.** `FieldValue.delete()` reaches the wire as
   an `update_mask` path the write carries no value for, so it was silently
-  leaving the field in place. SAK-194 had pinned it as a deliberate
+  leaving the field in place. PR #64 had pinned it as a deliberate
   `documented-divergence` (`limits.masked-field-deletion`); it is now the served
   row `query.masked-field-deletion`, asserted by the conformance probe and the
   Firestore SDK smoke.
@@ -845,13 +845,13 @@ spelling of Firestore's `update_mask` + `update_transforms`.
   assert it — and a new Firestore gRPC test plus unit test (47 and 475). New
   steps in both SDK smokes, with Google's official client libraries: Datastore
   10/10 **against both stores**, Firestore 51/51.
-- Nine new rows in SAK-194's conformance suite (`88/88 matrix features
+- Nine new rows in PR #64's conformance suite (`88/88 matrix features
   verified`, in-memory **and** PostgreSQL), seven of them a new
   `#### Datastore property_mask on a mutation` table in the fidelity matrix. The
   `fidelity_matrix_tests` drift gate caught the new README rows before they had
   probes, which is exactly what it is for.
-- Stacked on [SAK-189](/SAK/issues/SAK-189) (PR #67): both changes edit
-  `matrix.json` and `probes-firestore.mjs` in the same region, and SAK-189
+- Stacked on [#67](https://github.com/asakaxgit/fireup/pull/67): both changes edit
+  `matrix.json` and `probes-firestore.mjs` in the same region, and PR #67
   removes the `limits.listen-sdk-retry-loop` row this layer sits next to. All
   gates above were re-run after that rebase.
 
@@ -899,7 +899,7 @@ chrono = "0.4"                   # Date/time handling
 - **DEPLOYMENT.md** - Running the migrator against the local PostgreSQL
   container: the compose defaults, the two `.env` renames that break
   initialization, where imported rows land, and which flags and environment
-  variables are live. Not a production guide — there is no deployment (SAK-257)
+  variables are live. Not a production guide — there is no deployment (#119)
 - **docs/INTEGRATION_TESTING.md** - Integration testing procedures
 - **tests/DEPLOYMENT_TESTING.md** - Deployment testing documentation
 - **docs/licenses/FIREBASE_GCP_LOCAL.md** - Licence and attribution ledger
@@ -926,7 +926,7 @@ chrono = "0.4"                   # Date/time handling
 licence ledger and the measurements under `docs/local/measurements/` are held to
 the code by tests. The rest is prose, including this file.
 
-### Documentation that was removed, and why (SAK-257)
+### Documentation that was removed, and why
 
 **`.kiro/specs/firestore-postgres-migration/`** — the original spec, written on
 2025-10-27 and last touched on 2025-10-31. It described a different product and
@@ -964,7 +964,7 @@ the documents that are kept current instead of restating them a year late.
 
 ### Requirements Compliance
 
-The numbering below is the original spec's, which SAK-257 removed from the tree
+The numbering below is the original spec's, which #117 removed from the tree
 for the reasons given under *Documentation that was removed*. Read it at
 `git show 7d0f0f6:.kiro/specs/firestore-postgres-migration/requirements.md`. It
 is kept as the numbering of a historical audit, not as a statement that those
@@ -973,9 +973,9 @@ answered by *not* building what they asked for.
 
 #### ⛔ Requirement 1: Firestore Backup Import
 - [x] Parse LevelDB backup files per Google's specification — 12 of 12 fixture
-      entities read, across every kind and shard of the tree (SAK-141)
+      entities read, across every kind and shard of the tree (#42)
 - [x] Validate backup integrity with CRC32 checksums — masked CRC32C, verified
-      against the independently CRC-checked fixtures (SAK-141)
+      against the independently CRC-checked fixtures (#42)
 - [x] Provide detailed error messages for corrupted files
 - [ ] Import parsed data to PostgreSQL-compatible format — schema is created,
       no rows are written (residual risk 3)
@@ -1016,7 +1016,7 @@ answered by *not* building what they asked for.
 
 ## Residual Risks
 
-**Evidence basis.** All items below were observed on 2026-11-02 under SAK-139 by
+**Evidence basis.** All items below were observed on 2026-11-02 by
 running the CLI against `tests/fixtures/export-onestore/` and
 `tests/fixtures/export-v1-entity/`. Those fixtures are independently verified as
 spec-correct by `tests/fixtures/verify_datastore_export.py`, so these are tool
@@ -1024,7 +1024,7 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
 
 ### Critical — silent data loss
 
-1. ~~**Wrong record checksum algorithm**~~ — **resolved (SAK-141)**
+1. ~~**Wrong record checksum algorithm**~~ — **resolved (#42)**
    `calculate_crc32` compared an unmasked IEEE CRC-32 against LevelDB's masked
    CRC32C, so every record of a real export mismatched and
    `parse_block_records` advanced one byte at a time until the block was
@@ -1033,7 +1033,7 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
    masked with `((crc >> 15) | (crc << 17)) + 0xA282EAD8`; `crc32fast` cannot
    produce that, so the implementation is local and no dependency was added.
 
-2. ~~**Wrong payload protobuf schema**~~ — **resolved (SAK-141)**
+2. ~~**Wrong payload protobuf schema**~~ — **resolved (#42)**
    The decoder only handled `google.datastore.v1.Entity` (the API proto), while
    a managed export carries legacy `storage_onestore_v3.EntityProto`: unrelated
    field numbers, **proto2 groups** (which `prost` cannot represent at all), and
@@ -1045,7 +1045,7 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
    exports and chosen per record. Field-level notes remain in
    `tests/fixtures/README.md`.
 
-3. ~~**`import` reports rows it never wrote**~~ — **resolved (SAK-142)**
+3. ~~**`import` reports rows it never wrote**~~ — **resolved (#42)**
    Only `create_schema` was called and the result was then constructed with
    `total_records_imported: documents.len()`, so a run that created tables and
    inserted nothing reported a full successful import. `TableImportSpec` now
@@ -1058,14 +1058,14 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
    a transparent retry duplicates rows. `tests/postgres_import_tests.rs` asserts
    the row counts actually present in PostgreSQL after an import.
 
-4. ~~**Document identity is discarded**~~ — **resolved (SAK-141 + SAK-143)**
+4. ~~**Document identity is discarded**~~ — **resolved (#42)**
    Generated tables used `id UUID` populated from `uuid::Uuid::new_v4()`, and no
    column held the Datastore key name or id. Datastore keys are strings or
    `int64` (the fixture includes `ada`, `unicode-ユーザー`, and
    `4503599627370496`), so even a working import produced unjoinable,
-   non-idempotent rows. Parsing preserves the identity (SAK-141): both decoders
+   non-idempotent rows. Parsing preserves the identity (#42): both decoders
    emit the full `DatastoreKey` (namespace plus ancestor path). The generated
-   schema now carries it (SAK-143): every entity table has `key_path`
+   schema now carries it: every entity table has `key_path`
    (namespace-qualified, e.g. `[tenant]Users/ada/Orders/1001`) as its primary
    key, plus `key_namespace`, `key_kind`, `key_name`, `key_id BIGINT` and
    `parent_key_path` for the ancestor link. The surrogate UUID is gone, so
@@ -1073,7 +1073,7 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
 
 ### High — partial data loss or failed migrations
 
-5. ~~**Only one file of an export tree is read**~~ — **resolved (SAK-141)**
+5. ~~**Only one file of an export tree is read**~~ — **resolved (#42)**
    `resolve_backup_path` returned the first `output-0` it found, so every other
    kind and every shard past the first was dropped with no warning (the
    12-entity tree yielded one kind), and the resolver could also fall back to an
@@ -1082,14 +1082,14 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
    excludes metadata files, and both `FirestoreDocumentParser` and
    `BackupValidatorImpl` aggregate across all of them.
 
-6. ~~**Generated DDL is not always loadable**~~ — **resolved (SAK-143)**
+6. ~~**Generated DDL is not always loadable**~~ — **resolved (#42)**
    `Orders` DDL emitted `user TEXT NOT NULL` unquoted; `user` is reserved, so
    `psql` rejected it with `syntax error at or near "user"` and aborted every
    statement after it. Identifiers were never quoted, so table names also
    silently folded to lower case and disagreed with the names foreign keys used.
    Every generated identifier now goes through `ddl_generator::quote_identifier`
    (embedded quotes doubled), so reserved words load and `Users` stays `Users`.
-   **SAK-170** closed the other half: only the DDL side quoted, so `fireup
+   **PR #47** closed the other half: only the DDL side quoted, so `fireup
    import` still emitted `INSERT INTO Orders (…, user)` and failed against the
    `"Orders"` table the DDL had just created. The import path (`sql_generator`,
    the `TableImportSpec` INSERTs, and the constraint-validation queries) now
@@ -1099,14 +1099,14 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
    "object already exists — continuing" path no longer leaves the transaction
    aborted (`cli_import_handles_reserved_words_and_mixed_case_identifiers`).
 
-7. ~~**`NOT NULL` emitted for sparse fields**~~ — **resolved (SAK-143)**
+7. ~~**`NOT NULL` emitted for sparse fields**~~ — **resolved (#42)**
    `nickname` is null in 4 of 5 fixture users yet was generated `TEXT NOT NULL`,
    which any real import would violate. The cause was in the analyzer, not the
    threshold: `presence_percentage` counted explicit nulls as occurrences, so a
    field present-but-null in every document scored 100%. Nulls are now excluded
    from presence, and a column is `NOT NULL` only at 100% populated presence.
 
-8. ~~**Type mapping loses fidelity**~~ — **resolved (SAK-143)**
+8. ~~**Type mapping loses fidelity**~~ — **resolved (#42)**
    Observed in generated DDL: timestamp → `TEXT`, blob → `JSONB` (should be
    `BYTEA`), `int64` → `INTEGER` (overflows on auto-allocated key ids),
    nested map emitted both as `address JSONB` *and* flattened
@@ -1121,7 +1121,7 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
 
 ### Medium — operability
 
-9. ~~**Failures are reported as success**~~ — **resolved (SAK-142 + SAK-137).**
+9. ~~**Failures are reported as success**~~ — **resolved (#42).**
    `analyze` and `import` exit non-zero when a non-empty source yields 0
    documents, and `import` exits non-zero on a 0-row or partial import.
    `validate` (including `--check-quality`) now treats readable LevelDB records
@@ -1130,7 +1130,7 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
    quality check.
 
 10. ~~**Hardcoded credentials / ignored connection string**~~ — **resolved
-    (SAK-142).** `parse_postgres_url` validated only the `postgresql://` prefix
+    (#42).** `parse_postgres_url` validated only the `postgresql://` prefix
     and then returned a fixed `postgres:password@localhost:5432/fireup_test`.
     `data_importer::connection::parse_connection_url` now parses scheme, user,
     password, host (including bracketed IPv6), port, database and query
@@ -1139,14 +1139,14 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
     pool is built with `NoTls`. No credential remains in source: `--postgres-url`
     supplies them, with `PGUSER`/`PGPASSWORD` as the fallback.
 
-11. ~~**Library API panics**~~ — **resolved (SAK-142).**
+11. ~~**Library API panics**~~ — **resolved (#42).**
     `get_monitoring_system()` now lazily installs the default configuration
     instead of panicking, so `parse_documents()` works for a consumer that never
     called `initialize_monitoring()`. Guarded by
     `tests/library_api_tests.rs`, which runs in its own process so no other test
     can mask the regression.
 
-12. **`cargo test` does not compile** — **resolved (SAK-142).**
+12. **`cargo test` does not compile** — **resolved (#42).**
     `tests/integration_tests.rs` failed with 9 errors (`parse_backup` called
     without the `LevelDBParser` trait in scope; `ColumnDefinition.data_type`,
     renamed to `column_type`), pre-existing and reproduced at `fd24bf2`. Both
@@ -1154,11 +1154,11 @@ defects, not fixture artifacts. Severity is "does this silently lose data?".
     The 4 `functional_tests::level3_tests` tests it exposed were failing on a
     stale expectation — they asserted `name`/`age` on the `users` collection,
     which the generator never wrote — and were rewritten against the fixture's
-    actual `first`/`last`/`born`/`middle` fields in SAK-145. All 46 tests in
+    actual `first`/`last`/`born`/`middle` fields in #42. All 46 tests in
     `tests/integration_tests.rs` now pass with nothing ignored.
 
 13. **`--drop-existing`, `--batch-size`, `--continue-on-error`** — **resolved
-    (SAK-142).** `--drop-existing` was a log line with no effect; it now runs
+    (#42).** `--drop-existing` was a log line with no effect; it now runs
     `DROP TABLE IF EXISTS … CASCADE` for the schema's tables in one transaction.
     `--batch-size` sets the rows per multi-row INSERT (clamped to PostgreSQL's
     65535 bind-parameter limit) and `--continue-on-error` retries a failed batch
@@ -1400,10 +1400,10 @@ src/
 ## Conclusion
 
 Fireup is well-organized and broadly unit-tested. The real-export validation run
-under SAK-139 showed the end-to-end migration path did not work: 0 of 12
+on 2026-11-02 showed the end-to-end migration path did not work: 0 of 12
 entities were recovered from a spec-correct export, and `import` would have
 reported a full successful migration while writing no rows. The read side is now
-fixed — SAK-141 took the parser from 0 to 12 of 12 entities across every kind of
+fixed — PR #42 took the parser from 0 to 12 of 12 entities across every kind of
 the export tree — so the remaining work is downstream of parsing.
 
 The structure is sound and the gaps are specific and fixable — they are format
@@ -1425,9 +1425,9 @@ acceptance tests in `tests/real_export_validation.rs`
   files loads; the other is rejected — residual risk 6)
 
 ### Outstanding Items
-- ✅ Spec-correct managed-export fixtures read end to end (SAK-141)
-- ✅ `import` writes rows and fails on zero/partial imports (SAK-142)
-- ✅ Document identity preserved via `key_path` (SAK-143)
+- ✅ Spec-correct managed-export fixtures read end to end (#42)
+- ✅ `import` writes rows and fails on zero/partial imports (#42)
+- ✅ Document identity preserved via `key_path` (#42)
 - ⚠️ Real GCP-captured export still untested
 - ⚠️ Performance benchmarking pending
 - ⚠️ Production deployment configuration needed

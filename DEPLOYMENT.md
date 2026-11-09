@@ -6,7 +6,7 @@ repository supports today.
 
 **It is not a production deployment guide.** Fireup's own status line reads
 *NOT production ready* (`PROJECT_STATUS.md`), nothing is deployed anywhere, and
-the version of this file that stood until SAK-257 described a production
+the version of this file that stood until #119 described a production
 topology — a `docker-compose.prod.yml`, a long-running `fireup` service with
 `restart: always`, resource reservations, a backup rotation cron — for a
 one-shot CLI that nobody runs that way. It is in history, not gone:
@@ -88,7 +88,7 @@ There is no `sql/` directory any more, and the mount that used to carry it is
 gone too. The reason is worth keeping, because the mount looked like it worked:
 
 ```yaml
-# removed in SAK-257 — it never ran a single statement
+# removed in #120 — it never ran a single statement
 - ./sql:/docker-entrypoint-initdb.d/sql:ro
 ```
 
@@ -269,7 +269,7 @@ EXPLAIN ANALYZE SELECT * FROM fireup_data.cities;
 
 ## What this file no longer claims
 
-Removed in SAK-257, with the reason, so nobody restores it from memory:
+Removed from this file, with the reason, so nobody restores it from memory:
 
 - **A production deployment section** — `docker-compose.prod.yml`, a `fireup`
   application container with `restart: always`, CPU/memory reservations,
@@ -282,7 +282,7 @@ Removed in SAK-257, with the reason, so nobody restores it from memory:
 - **The `FIREUP_*` tuning variables** — measured above: inert.
 - **`SELECT * FROM fireup_data.import_summary`**, and the Python and Node
   snippets that queried it. The view and the `fireup_data.import_audit` table
-  it read are both deleted as of SAK-257, along with `sql/` and its mount.
+  it read are both deleted as of #120, along with `sql/` and its mount.
   Measured before deleting them, on one cluster, changing only `init.sql`:
   with the old file `fireup_data` held `import_audit` with 1 row — the one
   `init.sql` inserted about itself — and the `uuid-ossp` extension it needed;

@@ -593,7 +593,7 @@ export const firestoreProbes = [
       // FieldValue.delete() reaches the wire as an update_mask path the write
       // carries no value for, which is what "deleted" means for a mask on both
       // surfaces. This was a documented divergence — the field was left in
-      // place — until the shared store grew field deletion in SAK-203.
+      // place — until the shared store grew field deletion in PR #70.
       await ref.update({ gone: FieldValue.delete() })
 
       const snapshot = await ref.get()

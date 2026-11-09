@@ -24,7 +24,7 @@
 # in that case point it somewhere that refuses and let the report say so.
 #
 # What this is: black-box conformance testing of a published API contract using
-# the vendor's own open-source client libraries. The same method SAK-163
+# the vendor's own open-source client libraries. The same method PR #45
 # established for verifying fireup itself. Nothing here decompiles,
 # disassembles, or binary-analyses any artefact, and nothing is copied out of
 # the target — see `docs/licenses/FIREBASE_GCP_LOCAL.md`.

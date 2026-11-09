@@ -166,8 +166,8 @@ follow-up issues; the comparison quotes the emulator's verbatim error.
 
 All 17 RPCs of `google.firestore.v1.Firestore`. The first 12 marked **served**
 are the v1 surface frozen in the `firestore-v1-contract` document on
-[SAK-163](/SAK/issues/SAK-163); `Listen` was added in Phase 2.1
-([SAK-189](/SAK/issues/SAK-189)).
+[#45](https://github.com/asakaxgit/fireup/pull/45); `Listen` was added in Phase 2.1
+([#67](https://github.com/asakaxgit/fireup/pull/67)).
 
 | RPC | Status | Notes |
 |---|---|---|
@@ -490,7 +490,7 @@ What to know before trusting a listener here:
   live session behind per SDK idle cycle, and — because `terminate()` closes the
   HTTP/2 session gracefully, waiting on open streams — a Node process that ever
   called `onSnapshot()` would never exit. Corrected in
-  [SAK-220](/SAK/issues/SAK-220); until then hyper 0.14 dropped the connection on
+  [#81](https://github.com/asakaxgit/fireup/pull/81); until then hyper 0.14 dropped the connection on
   the client's GOAWAY and hid both.
 
 ### Transactions
@@ -887,7 +887,7 @@ change them.
 
 The frozen v1 RPC surface — what has to land before we call this
 "SDK-compatible CRUD + simple query" — is the `firestore-v1-contract` document on
-[SAK-163](/SAK/issues/SAK-163).
+[#45](https://github.com/asakaxgit/fireup/pull/45).
 
 ## Layout
 

@@ -767,7 +767,7 @@ async fn two_targets_on_one_stream_are_reported_independently() {
 
 #[tokio::test]
 async fn a_half_closed_request_stream_finishes_the_listen_stream() {
-    // This asserted the opposite until SAK-220: that a half-closed stream kept
+    // This asserted the opposite until PR #81: that a half-closed stream kept
     // its targets live, on the reading that half-close means "done adding
     // targets" rather than "done with this stream". That is legal bidi gRPC and
     // it is not what the official SDKs do. `Watch.shutdown()` in

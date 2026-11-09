@@ -6,7 +6,7 @@ This is what each one does, and — more usefully — where they disagree.
 Read the [fidelity matrix](README.md#fidelity-matrix) first if you only care
 about Fireup: it is the complete, checked statement of what `fireup local`
 serves and what it refuses. This document is the *comparison*, and until
-SAK-217 it was a much weaker kind of evidence: the emulator column was a
+PR #80 it was a much weaker kind of evidence: the emulator column was a
 reading of Google's documentation.
 
 **Most of that column is now measured.** The conformance probes — Google's own
@@ -80,8 +80,8 @@ implementation is the only reason these are known; each has a follow-up issue.
 |---|---|---|---|
 | Accepted an `order_by` with a term *after* `__name__`, including a duplicate `__name__` | `INVALID_ARGUMENT: order by clause cannot contain more fields after the key` | A query that passes locally fails in production. The official Node SDK emits this shape for `.where(…, '!=', …).orderBy('__name__')` | **fixed** — same status, same message |
 | Served a **descending `__name__` scan**, with a probe in `matrix.json` *asserting* it works | `FAILED_PRECONDITION: Firestore does not support descending key scans` | A matrix row claims parity that does not exist — the worst kind of row to have | **fixed** — and the probe now asserts the refusal |
-| `accounts:batchCreate` answered `405 "INVALID_ARGUMENT : accounts:batchCreate takes POST, not POST"` | `200` | A self-contradictory refusal, from a catch-all arm that fired regardless of method. The matrix promises refusals that name the gap. **Fixed by SAK-224** — now `501 OPERATION_NOT_ALLOWED : batch account import (create accounts one at a time) is not served by fireup local` | **fixed** |
-| `projects:createSessionCookie` answered `404 PROJECT_NOT_FOUND … not "fireup-local:createSessionCookie"` | `400 INVALID_ID_TOKEN` | The `{project}:customMethod` colon syntax was parsed into the project id, so the row refused with the wrong error. **Fixed by SAK-224** — now `501 OPERATION_NOT_ALLOWED : session cookies is not served by fireup local` | **fixed** |
+| `accounts:batchCreate` answered `405 "INVALID_ARGUMENT : accounts:batchCreate takes POST, not POST"` | `200` | A self-contradictory refusal, from a catch-all arm that fired regardless of method. The matrix promises refusals that name the gap. **Fixed by PR #82** — now `501 OPERATION_NOT_ALLOWED : batch account import (create accounts one at a time) is not served by fireup local` | **fixed** |
+| `projects:createSessionCookie` answered `404 PROJECT_NOT_FOUND … not "fireup-local:createSessionCookie"` | `400 INVALID_ID_TOKEN` | The `{project}:customMethod` colon syntax was parsed into the project id, so the row refused with the wrong error. **Fixed by PR #82** — now `501 OPERATION_NOT_ALLOWED : session cookies is not served by fireup local` | **fixed** |
 
 **What the harness still cannot measure**, said plainly so no cell pretends
 otherwise:
@@ -94,7 +94,7 @@ otherwise:
 - **15 rows have no `served` branch** to point at anything — mostly features
   Fireup refuses, where there was never a positive check to write. Three of the
   interesting ones (streaming `Write`, `PartitionQuery`, Datastore GQL) got one
-  in SAK-217 and are measured; the rest stay `[D]`.
+  in PR #80 and are measured; the rest stay `[D]`.
 - **The auth rows** are driven by `scripts/smoke-local-auth.sh`, which starts
   its own server, so they are not in the observation runner. The rows marked
   `[M]` below were measured with direct REST calls instead.
@@ -133,7 +133,7 @@ Datastore rows in Datastore mode, with one divergence. It measures like the
 reference implementation, which is what it is.
 
 The first measurement also found **four rows where the emulator rejected a
-query Fireup accepted**. There are none left: SAK-223 made Fireup
+query Fireup accepted**. There are none left: PR #85 made Fireup
 refuse the two `order_by` shapes behind them, and the four probes that were
 building a shape production rejects now build one it accepts. That is the
 comparison doing its job — the rows moved because Fireup changed, not because
@@ -221,7 +221,7 @@ changed. Fireup used to serve a **descending** key scan that the emulator and
 production both refuse (`FAILED_PRECONDITION: Firestore does not support
 descending key scans`) — with a `matrix.json` probe asserting Fireup's
 behaviour, so the false parity claim had a green check behind it the whole time.
-SAK-223 made Fireup refuse it, inverted the probe, and narrowed the row to
+PR #85 made Fireup refuse it, inverted the probe, and narrowed the row to
 "ascending only" in all three columns. A descending `__name__` *after* an
 explicit term is still served everywhere; that is what `orderBy(field, 'desc')`
 compiles to.
@@ -259,8 +259,8 @@ GCP somewhere; what matters is whether the difference is written down.
 | Phantom reads abort a transaction | no — a query's read set is the documents it returned | `[D]` "does not currently implement all transaction behavior seen in production"; locks "may take up to 30 seconds to be released" — **measured: a Datastore-mode transaction conflict blocked past the client's 60s deadline** | yes — production conflicts on the scanned range |
 | Transaction lifetime | 60s, matching the documented limit | not documented `[D]` | documented server deadlines |
 | Point-in-time reads (any `read_time` consistency selector) | `UNIMPLEMENTED` | yes `[M]` — within its retention window; an older `read_time` is `FAILED_PRECONDITION: The requested 'read_time' is too old` | yes |
-| An `order_by` term after `__name__` | served — refused with `INVALID_ARGUMENT: order by clause cannot contain more fields after the key`, as production does (was accepted until SAK-223) | the same `INVALID_ARGUMENT` `[M]` | rejected |
-| A lone descending `__name__` scan | refused with `FAILED_PRECONDITION: Firestore does not support descending key scans`, as production does (was served until SAK-223) | the same `FAILED_PRECONDITION` `[M]` | rejected |
+| An `order_by` term after `__name__` | served — refused with `INVALID_ARGUMENT: order by clause cannot contain more fields after the key`, as production does (was accepted until PR #85) | the same `INVALID_ARGUMENT` `[M]` | rejected |
+| A lone descending `__name__` scan | refused with `FAILED_PRECONDITION: Firestore does not support descending key scans`, as production does (was served until PR #85) | the same `FAILED_PRECONDITION` `[M]` | rejected |
 
 Publishing its divergences is the thing to actually look for in a local
 emulator, and the thing to look for after that is what happens to them over
@@ -272,7 +272,7 @@ guarantee. A probe keeps a row from changing silently; it does not keep the row
 from having been **wrong when it was written**. Both of those rows were
 divergences with *passing* probes the whole time, because the probe asserted
 what Fireup does. Nothing but the reference implementation was ever going to
-catch them, and SAK-223 closed both — which is why they now read as parity.
+catch them, and PR #85 closed both — which is why they now read as parity.
 
 The emulator's documented lock behaviour is also now a measured number rather
 than a caveat: two transaction-conflict probes that Fireup answers in
@@ -283,7 +283,7 @@ suite and a flake.
 
 ## Datastore
 
-Every cell in this column said `not emulated` until SAK-217 measured it. It was
+Every cell in this column said `not emulated` until PR #80 measured it. It was
 wrong — see the correction below the table.
 
 | RPC | fireup local | Firebase Emulator Suite | Datastore on GCP |
@@ -334,7 +334,7 @@ to be empty; it has now been asked directly, in Datastore mode.
 | An empty path | served | yes `[M]`, in Datastore mode | yes |
 | Any other reserved (`__`-wrapped) name | served | yes `[M]`, in Datastore mode | yes |
 
-Six of these seven rows are the ones SAK-203 implemented straight from the
+Six of these seven rows are the ones PR #70 implemented straight from the
 sentences in `datastore.proto`, with no way to check the reading against another
 implementation. Measurement is that check, and the reading was right: Fireup and
 the reference implementation agree on every one.
@@ -378,7 +378,7 @@ into the project id. Both rows are `UNIMPLEMENTED` in the matrix, which was
 always the right status — the refusals were the wrong shape, and the matrix
 promises a refusal that names the gap.
 
-SAK-224 fixed both, and the fireup side of those two rows was **re-measured, not
+PR #82 fixed both, and the fireup side of those two rows was **re-measured, not
 reworded** — against `fireup local` built from `main` at `5d015dc`, on
 2026-11-06, with the same direct REST calls that found them:
 

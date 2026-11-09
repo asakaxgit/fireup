@@ -188,7 +188,7 @@ async fn import_writes_one_row_per_source_document() {
     }
 }
 
-/// The CLI path is what SAK-142 was filed against: it must insert rows and exit 0.
+/// The CLI path is what PR #42 fixed: it must insert rows and exit 0.
 #[tokio::test]
 async fn cli_import_populates_postgres_and_exits_zero() {
     let Some(url) = test_url() else { return };
@@ -300,7 +300,7 @@ async fn continue_on_error_imports_the_remaining_rows() {
 
 /// Managed LevelDB export → parse → analyze → import in one CLI run.
 ///
-/// SAK-141 closed the read path and SAK-142/143 closed import/DDL; this is the
+/// PR #42 closed the read path, import and DDL; this is the
 /// remaining combination called out under "Not yet assessed" in PROJECT_STATUS.
 #[tokio::test]
 async fn cli_import_managed_export_fixture_into_postgres() {
@@ -338,7 +338,7 @@ async fn cli_import_managed_export_fixture_into_postgres() {
     assert_eq!(row_count(&importer, "Users").await, 5, "Users rows");
     assert_eq!(row_count(&importer, "Orders").await, 7, "Orders rows");
 
-    // SAK-195: blobs reach BYTEA as bytes, not as the ASCII of their base64.
+    // PR #60: blobs reach BYTEA as bytes, not as the ASCII of their base64.
     //
     // Asserting the column *type* is BYTEA cannot catch this: the pipeline
     // carries a blob as base64 text, and `$n::BYTEA` reads that text as a bytea
@@ -396,7 +396,7 @@ const EDGE_FIXTURE_TABLES: [&str; 6] =
 /// Deliberately one test rather than six: the kind names are fixed, so parallel
 /// tests importing the same tables would race each other.
 ///
-/// Each assertion below corresponds to a defect this fixture found (SAK-195).
+/// Each assertion below corresponds to a defect this fixture found (#60).
 /// `tests/export_fidelity_tests.rs` covers the same ground at the parser and
 /// schema level; only PostgreSQL can decide whether the *rows* survived.
 #[tokio::test]
@@ -504,7 +504,7 @@ async fn cli_import_edge_fixture_preserves_every_entity() {
         "non-finite doubles must reach PostgreSQL"
     );
 
-    // SAK-202: a Datastore double is IEEE 754 binary64, which has a signed
+    // PR #62: a Datastore double is IEEE 754 binary64, which has a signed
     // zero. `numeric` does not, so `-0.0` used to read back out of the column
     // as plain `0` — indistinguishable from the `+0.0` the next row carries.
     // The `= 0` term keeps "kept its sign" from being satisfiable by some
@@ -604,7 +604,7 @@ async fn cli_import_edge_fixture_preserves_every_entity() {
 
 /// Reserved words and mixed-case identifiers must survive the whole pipeline.
 ///
-/// SAK-170: the DDL quoted every identifier but the INSERT builder did not, so a
+/// PR #47: the DDL quoted every identifier but the INSERT builder did not, so a
 /// Firestore field called `user` produced `syntax error at or near "user"` and a
 /// kind called `Orders` produced an INSERT against the folded `orders`, which
 /// the `"Orders"` table creation had never created.
@@ -679,7 +679,7 @@ async fn cli_import_handles_reserved_words_and_mixed_case_identifiers() {
 }
 
 /// A connection string that cannot be honoured must fail, not fall back to some
-/// other target. Before SAK-142 the URL was discarded entirely.
+/// other target. Before PR #42 the URL was discarded entirely.
 #[tokio::test]
 async fn cli_import_honours_the_requested_database() {
     let Some(url) = test_url() else { return };

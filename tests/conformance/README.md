@@ -57,7 +57,7 @@ already carry both branches — `firestore.Listen`,
 `firestore.RunAggregationQuery`, `query.aggregations` — so for those the flip is
 the whole change.
 
-This is not hypothetical. SAK-190 and SAK-191 landed field transforms,
+This is not hypothetical. PR #58 and PR #57 landed field transforms,
 collection group queries, cursors, and nested field paths while this suite was
 being written; flipping four `status` values and filling in the `served`
 branches was the entire update, and the rows those changes *added* to the README
@@ -162,7 +162,7 @@ was `serves`.
 retries a failed query with backoff before surrendering the error, against
 *any* host — so a probe asserting three refusals through
 `@google-cloud/firestore` overruns the 20s timeout on fireup itself, which
-reads as a hang and is not one (SAK-223). Assert one refusal through the SDK,
+reads as a hang and is not one (#85). Assert one refusal through the SDK,
 where the point is that the SDK builds the shape, and send the rest with
 `serverStream`/`unary` from `grpc-client.mjs`: the raw clients do not retry and
 answer in milliseconds.
@@ -171,7 +171,7 @@ answer in milliseconds.
 assertions about who is answering, so a harness bug looks exactly like a
 competitor divergence. Fireup scoring anything other than "every row as the
 matrix claims" means the harness is broken, not the competitor. Two real harness
-bugs were caught this way in SAK-217 — see
+bugs were caught this way in PR #80 — see
 [`docs/local/measurements/README.md`](../../docs/local/measurements/README.md).
 
 ### A dormant `served` branch

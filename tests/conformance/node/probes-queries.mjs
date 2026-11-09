@@ -238,7 +238,7 @@ export const queryProbes = [
         'tokyo',
       ])
 
-      // Inverted by SAK-223. This asserted descending name order until SAK-217
+      // Inverted by PR #85. This asserted descending name order until PR #80
       // pointed the probes at Google's emulator and found that production
       // refuses a key scan it cannot read forwards. The matrix row claimed
       // parity, the probe was green, and the claim was false: the refusal is
