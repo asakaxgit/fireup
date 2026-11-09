@@ -880,7 +880,9 @@ chrono = "0.4"                   # Date/time handling
 
 ### Development Environment
 - Docker Compose configuration ready
-- PostgreSQL initialization scripts available (`init.sql`)
+- One PostgreSQL initialization script, `init.sql`: it creates the
+  `fireup_data` schema and grants it to the importer's role, and creates no
+  tables
 - Environment variable templates (`.env.example`)
 - Comprehensive documentation
 

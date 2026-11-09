@@ -59,9 +59,13 @@ the image's entrypoint uses — against PostgreSQL 18:
 
 | `.env` change | what `init.sql` hits | psql exit |
 |---|---|---|
-| none (the defaults above) | runs to the end; inserts one `import_audit` row | **0** |
-| `POSTGRES_DB=anything_else` | line 11, `ALTER DATABASE fireup_dev …` → `ERROR: database "fireup_dev" does not exist` | **3** |
-| `POSTGRES_USER=anyone_else` | line 32, `GRANT … TO fireup` → `ERROR: role "fireup" does not exist` | **3** |
+| none (the defaults above) | runs to the end; creates the schema and no tables | **0** |
+| `POSTGRES_DB=anything_else` | `psql:init.sql:15`, `ALTER DATABASE fireup_dev …` → `ERROR: database "fireup_dev" does not exist` | **3** |
+| `POSTGRES_USER=anyone_else` | `psql:init.sql:18`, `GRANT … TO fireup` → `ERROR: role "fireup" does not exist` | **3** |
+
+Those line numbers are psql's own prefix, not an annotation. The two failing
+arms were run against a cluster whose only role is `anyone_else`, so `fireup`
+is genuinely absent rather than merely unmentioned.
 
 The image's entrypoint runs under `set -Eeo pipefail` and executes each init
 file through `psql -v ON_ERROR_STOP=1`, so either error aborts initialization
@@ -78,9 +82,13 @@ database, the search path lands on `fireup_dev`, and an unqualified
 Nothing reports this; the import simply lands somewhere other than where every
 query in these docs looks.
 
-### `sql/` is mounted but never runs
+### Why a `sql/` directory mount does not work
+
+There is no `sql/` directory any more, and the mount that used to carry it is
+gone too. The reason is worth keeping, because the mount looked like it worked:
 
 ```yaml
+# removed in SAK-257 — it never ran a single statement
 - ./sql:/docker-entrypoint-initdb.d/sql:ro
 ```
 
@@ -89,22 +97,14 @@ and switch-cases each entry on `*.sh`, `*.sql`, `*.sql.gz`, `*.sql.xz`,
 `*.sql.zst`, with `*)` printing *"ignoring"*. A **directory** named `sql`
 matches none of those, and the loop does not recurse into it. (Same code in the
 15 and 17 entrypoints of `docker-library/postgres`; the image pinned here is
-`postgres:15`.)
+`postgres:15`.) So anything you add that way is silently skipped — put init
+files directly in `/docker-entrypoint-initdb.d/`, as `init.sql` is.
 
-So `sql/01_development_setup.sql` never executes, and two things follow —
-both measured:
-
-- **`fireup_data.import_summary` does not exist** after `init.sql` alone
-  (`select count(*) from pg_views …` → `0`). Running the file by hand creates it
-  and exits 0, so this is a wiring problem, not broken SQL:
-  `psql -v ON_ERROR_STOP=1 "$URL" -f sql/01_development_setup.sql`.
-- **The view would be empty anyway.** It aggregates
-  `fireup_data.import_audit`, which no code writes to: after a successful
-  import of 7 records, that table still held only `init.sql`'s own
-  `database_init` row.
-
-Whether to mount the file at the top level or drop it along with the audit table
-is an open decision, not something this file should answer.
+What the directory held was `01_development_setup.sql`: a `sample_users`
+fixture table nothing read, and a `fireup_data.import_summary` view over
+`fireup_data.import_audit`. Both are deleted, along with the audit table
+itself. The measurements behind that are in
+[What this file no longer claims](#what-this-file-no-longer-claims).
 
 ## 2. Import a backup
 
@@ -133,10 +133,12 @@ public`, so the importer's unqualified DDL creates its tables in
 **`fireup_data`** — not `public`. Measured after the successful import above:
 
 ```
-fireup_data.cities       5 rows
-fireup_data.users        2 rows
-fireup_data.import_audit 1 row    (init.sql's own)
+fireup_data.cities  5 rows
+fireup_data.users   2 rows
 ```
+
+Those are the only two tables in the database. `init.sql` creates none, and
+nothing lands in `public`.
 
 That is why `\dt fireup_data.*` is the right way to look for imported tables.
 
@@ -279,7 +281,20 @@ Removed in SAK-257, with the reason, so nobody restores it from memory:
   `--postgres-url`; that variable is read nowhere.
 - **The `FIREUP_*` tuning variables** — measured above: inert.
 - **`SELECT * FROM fireup_data.import_summary`**, and the Python and Node
-  snippets that queried it. The view is not created by the container, and the
-  table it reads is never written.
+  snippets that queried it. The view and the `fireup_data.import_audit` table
+  it read are both deleted as of SAK-257, along with `sql/` and its mount.
+  Measured before deleting them, on one cluster, changing only `init.sql`:
+  with the old file `fireup_data` held `import_audit` with 1 row — the one
+  `init.sql` inserted about itself — and the `uuid-ossp` extension it needed;
+  with the new file `fireup_data` holds no tables and no extension, and
+  `fireup import` still reports `2 tables processed, 7/7 records imported,
+  0 failed` at exit 0, landing the same 5 + 2 rows. Nothing else ever wrote
+  that table. Import auditing does exist, in `fireup::monitoring`
+  (`log_audit_entry`, called from the importer and the parser), but it keeps
+  entries in memory, caps them at 10,000, and writes them to no database — so
+  the SQL table was a second, unconnected design. Note the two disagreed on
+  their own vocabulary: the table had a `status` column, while
+  `monitoring::AuditResult` has `result`. **If a durable audit trail is wanted,
+  the work is persisting `fireup::monitoring`, not restoring this table.**
 - **Performance-tuning advice** for `shared_buffers`, `work_mem` and
   `checkpoint_segments` — the last of which PostgreSQL removed in 9.5.
