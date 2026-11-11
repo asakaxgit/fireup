@@ -2081,6 +2081,16 @@ struct DenyStep {
     /// pre-`check` position runs. So a guard reading `arguments` alone cannot
     /// see any of them, which is exactly the state this file was in.
     options: Vec<String>,
+    /// `true` if a `set … pipefail` line runs earlier in the same `run:` body.
+    ///
+    /// Read, not assumed. GitHub prints the shell it gave every step, and for
+    /// this workflow -- which declares no `shell:` -- run 42362531653 says
+    /// `shell: /usr/bin/bash -e {0}` on all ten of them. That is `-e` with no
+    /// `-o pipefail`, so a pipe takes the status of its *last* stage and the
+    /// gate's verdict is thrown away. This step's body has no `set` line at
+    /// all; the `Install cargo-deny` step's has `set -euo pipefail`, which is
+    /// where that protection does exist.
+    pipefail: bool,
 }
 
 /// The `deny` job's `cargo-deny … check` command, read out of `ci.yml`.
@@ -2225,6 +2235,13 @@ fn deny_step_checks(ci: &str) -> Result<DenyStep, String> {
         })?;
 
     Ok(DenyStep {
+        pipefail: logical
+            .iter()
+            .take_while(|line| line.as_str() != command.as_str())
+            .any(|line| {
+                let text = line.trim_start();
+                text.starts_with("set ") && text.contains("pipefail")
+            }),
         arguments: words[check_at + 1..]
             .iter()
             .map(|word| word.to_string())
@@ -2318,7 +2335,7 @@ fn redirecting_options(step: &DenyStep) -> Vec<String> {
 /// shape as (3), (4) and (6) in the header: cargo-deny cannot report it,
 /// because the thing that changed is its own invocation.
 ///
-/// **Two assertions, and deliberately only two.**
+/// **Three assertions, and deliberately only three.**
 ///
 /// 1. *Every* check in `DENY_CHECKS` is named, **or none is.** Given no check
 ///    names at all cargo-deny runs every check it has — measured, and it is
@@ -2326,6 +2343,8 @@ fn redirecting_options(step: &DenyStep) -> Vec<String> {
 ///    command, so a guard demanding the four names would be demanding the
 ///    longer spelling of a stronger gate.
 /// 2. The command's exit is not sent to `||`.
+/// 3. The command's exit is not sent to a **pipe**, unless the body turns
+///    `pipefail` back on.
 ///
 /// Deliberately **not** asserted: an unfamiliar extra check name. A check this
 /// list has not heard of is the gate getting stricter, and a guard that
@@ -2335,12 +2354,32 @@ fn redirecting_options(step: &DenyStep) -> Vec<String> {
 /// arguments and classifies nothing else: it never has to decide whether a
 /// word is a positional check name or some flag's value.
 ///
-/// `||` and nothing else, for assertion 2, because that is what measurement
-/// said rather than what looked likely. With `deny.toml`'s licence allowlist
-/// broken, the step exits 4 on its own; `|| true` after it exits **0**, while
-/// `; true`, `&& echo done` and `| tee /dev/null` all still exit 4 — `-e`
-/// leaves before the `;`, and the step's `-o pipefail` covers the pipe. An
-/// assertion rejecting a `;` or a pipe would be red on a command that works.
+/// Assertion 3 is a correction, not an addition (SAK-253). This doc used to
+/// say `||` "and nothing else", on the strength of arms replayed under
+/// `bash -e -o pipefail` — and attributed the pipe's safety to "the step's
+/// `-o pipefail`", a line this step does not have. The runner's shell is
+/// `bash -e` with **no** `pipefail`: measured from the `shell:` line GitHub
+/// prints for every step of run 42362531653. Re-measured with `deny.toml`'s
+/// licence allowlist broken, one variable being the shell:
+///
+/// | command tail | `bash -e` (the runner) | `bash -e -o pipefail` |
+/// |---|---|---|
+/// | *(none — shipped)* | 4 | 4 |
+/// | `\| tee /dev/null` | **0** | 4 |
+/// | `\| cat` | **0** | 4 |
+/// | `\| tee out.log` | **0** | 4 |
+/// | `> /dev/null` | 4 | 4 |
+/// | `; true` | 4 | 4 |
+/// | `\|\| true` | 0 | 0 |
+///
+/// With the shipped `deny.toml` every one of those is 0, so the red above is
+/// the broken allowlist and the difference between the columns is the shell.
+/// `;`, `&&` and a redirect are still allowed, still for the measured reason:
+/// `-e` leaves before the `;`. And a pipe under a body that opens with
+/// `set -o pipefail`, `set -eo pipefail` or `set -euo pipefail` is allowed,
+/// because all three were measured to keep the 4 — the assertion has to be
+/// satisfiable by something other than deleting the pipe, or it is a guard
+/// teaching people that a working command is broken.
 ///
 /// Also not asserted, and worth a ticket of its own rather than a guess here:
 /// `continue-on-error: true` on this step would discard the verdict too. It is
@@ -2381,9 +2420,27 @@ fn check_every_deny_check_runs(step: &DenyStep) -> Result<(), String> {
              the job reports green on a tree cargo-deny has just failed. Measured \
              (SAK-243) with deny.toml's licence allowlist broken: the command alone exits \
              4, and with `|| true` after it exits 0. If something after the gate has to \
-             run either way, use `;` — that keeps the failure (`-e` leaves before the \
-             `;`), as does a pipe (`-o pipefail`); both were measured and both pass this \
-             guard.",
+             run either way, use `;` — that keeps the failure, measured, because `-e` \
+             leaves before the `;`. Not a pipe: this workflow declares no `shell:`, so \
+             the runner gives it `bash -e` with no `-o pipefail` (run 42362531653), and \
+             a pipe discards the exit too — the assertion below rejects one unless the \
+             `run:` body opens with `set -o pipefail`.",
+            step.command
+        ));
+    }
+
+    if step.command.contains('|') && !step.pipefail {
+        return Err(format!(
+            "the `{DENY_STEP}` step in ci.yml pipes the gate's output: `{}`, and its \
+             `run:` body does not turn `pipefail` on. The step then exits with the \
+             *last* stage's status and cargo-deny's verdict is discarded, so the job \
+             reports green on a tree the gate has just failed. This workflow declares no \
+             `shell:`, so GitHub runs every step under `/usr/bin/bash -e {{0}}` — \
+             measured from the `shell:` line of run 42362531653 — which is `-e` without \
+             `-o pipefail`. Measured (SAK-253) with deny.toml's licence allowlist \
+             broken: the command alone exits 4; `| tee /dev/null` exits 0; the same pipe \
+             under a shell with `-o pipefail` exits 4. Put `set -o pipefail` above the \
+             command in the same body — measured, and accepted here — or drop the pipe.",
             step.command
         ));
     }
@@ -3420,6 +3477,29 @@ fn has_sha256_literal(line: &str) -> bool {
     false
 }
 
+/// The value `name` is given in the install step's `env:`, if it is given one.
+///
+/// `env` entries arrive as `KEY: value` with comments already stripped, so the
+/// split is on the first colon only: a value may itself contain one.
+fn env_value<'a>(env: &'a [String], name: &str) -> Option<&'a str> {
+    env.iter().find_map(|entry| {
+        let (key, value) = entry.split_once(':')?;
+        (key.trim() == name).then_some(value.trim())
+    })
+}
+
+/// Whether `value` is a digest *this commit* fixes.
+///
+/// Two conditions, and the second is the one the first does not cover. A
+/// 64-character hex run makes it a digest; the absence of `${{` makes it one
+/// the repository holds. `${{ vars.CARGO_DENY_SHA256 }}` satisfies neither,
+/// and `${{ vars.X || '<64 hex>' }}` satisfies only the first while still
+/// letting a value set outside the tree win -- so a fallback default is
+/// refused rather than read as a pin.
+fn is_a_pinned_digest(value: &str) -> bool {
+    has_sha256_literal(value) && !value.contains("${{")
+}
+
 /// The `Install cargo-deny` step, read out of `ci.yml`.
 ///
 /// Read rather than written down a second time for the same reason
@@ -3614,7 +3694,11 @@ fn check_install_verifies_its_download(step: &InstallStep) -> Result<(), String>
         // fetched from the same release alongside the tarball is signed by
         // whoever served the tarball, so it attests to nothing.
         let read = shell_vars(line);
-        let pinned_by_env = read.iter().any(|name| declared.contains(&name.as_str()));
+        let from_env: Vec<&String> = read
+            .iter()
+            .filter(|name| declared.contains(&name.as_str()))
+            .collect();
+        let pinned_by_env = !from_env.is_empty();
         if !pinned_by_env && !has_sha256_literal(line) && !read.is_empty() {
             return Err(format!(
                 "the `{INSTALL_STEP}` step in ci.yml compares against {read:?}, and this step \
@@ -3634,6 +3718,41 @@ fn check_install_verifies_its_download(step: &InstallStep) -> Result<(), String>
                  the same host as the tarball and attests to nothing. If the digest is in a \
                  checked-in file, this reader cannot tell that from a downloaded one, so it \
                  fails closed: say so in a ticket and widen it deliberately."
+            ));
+        }
+
+        // The name being declared here is not the same question as the value
+        // being fixed by this commit. `CARGO_DENY_SHA256: ${{ vars.X }}` is a
+        // declared name whose value lives in the repository's web settings --
+        // the same place SAK-240 found `default_workflow_permissions` and
+        // SAK-242 found the ruleset, changeable with no commit, no diff and no
+        // review.
+        if pinned_by_env
+            && !from_env
+                .iter()
+                .any(|name| env_value(&step.env, name).is_some_and(is_a_pinned_digest))
+        {
+            let values: Vec<(&str, &str)> = from_env
+                .iter()
+                .map(|name| (name.as_str(), env_value(&step.env, name).unwrap_or("")))
+                .collect();
+            return Err(format!(
+                "the `{INSTALL_STEP}` step in ci.yml compares against an `env:` name this \
+                 step declares but whose value this commit does not fix: {values:?}. \
+                 Measured by replaying the step body the way the runner does, with the \
+                 step's own `env:` map applied and the `${{{{ }}}}` filled from outside: \
+                 against the shipped literal pin the tree decides the bytes -- an outside \
+                 value of 0.19.9 plus its digest still installs 0.20.2 at step exit 0 -- \
+                 while with `CARGO_DENY_SHA256: ${{{{ vars.S }}}}` the same tree installs \
+                 0.20.2 or 0.19.9 at step exit 0 depending on a value held outside the \
+                 repository. The comparison is not off: an outside digest that does not \
+                 match is step exit 1 with nothing installed, and an unset one is the \
+                 same. What moved is who chooses the number. Write the digest out as a \
+                 64-character hex literal, in this `env:` or on the comparison line. Only \
+                 the digest needs it: `CARGO_DENY_VERSION: ${{{{ vars.V }}}}` with the \
+                 digest left literal gives an outside value no new freedom -- measured, it \
+                 can only pick the version the digest already pins (0.20.2 exit 0, 0.19.9 \
+                 exit 1, unset exit 1)."
             ));
         }
 
@@ -5947,23 +6066,41 @@ include-build = false
         )
         .expect_err("any `||` after the gate must fail");
         assert!(error.contains("discards the verdict"), "{error}");
+
+        // The *advice* in that message is why SAK-253 had to reopen this guard:
+        // the old one read "as does a pipe (`-o pipefail`)", crediting a `set`
+        // line this step does not have. No test read the prose, so nothing
+        // reported it. These two do — one for the wrong recommendation, one for
+        // the sentence finishing at all.
+        assert!(
+            !error.contains("as does a pipe"),
+            "the `||` message must not offer a bare pipe as a safe alternative: {error}"
+        );
+        assert!(
+            error.contains("set -o pipefail"),
+            "the `||` message must name the one spelling that does keep the gate's exit \
+             through a pipe: {error}"
+        );
     }
 
-    /// The direction control for the arm above, and the one that measurement
-    /// corrected a wrong guess about.
+    /// The direction control for the arm above: the trailing constructs that
+    /// really do keep the gate's exit.
     ///
-    /// `;`, `&&` and a pipe all *keep* the gate's exit: with `deny.toml`'s
-    /// licence allowlist broken the step exits 4 under every one of them, and 0
-    /// only under `||`. An assertion that rejected a trailing `;` or a pipe
-    /// would be red on a command that works, which is the failure mode this
-    /// whole ticket is trying not to introduce.
+    /// With `deny.toml`'s licence allowlist broken the step exits 4 under each
+    /// of these on the runner's own shell (`bash -e`, run 42362531653), so an
+    /// assertion rejecting them would be red on a command that works -- the
+    /// failure mode this whole ticket is trying not to introduce.
+    ///
+    /// A pipe used to be on this list. It is not any more, and the arm below
+    /// is where it went: that entry was measured under a replay harness with
+    /// `-o pipefail`, which the runner does not give this workflow (SAK-253).
     #[test]
     fn the_trailing_constructs_that_keep_the_exit_status_pass() {
         for trailing in [
             "; true",
             "&& echo done",
-            "| tee /dev/null",
             "&& echo 'supply chain ok'",
+            "> /dev/null",
         ] {
             let step = deny_step_checks(&deny_job_with(&format!(
                 "{SHIPPED_DENY_COMMAND} {trailing}"
@@ -5976,13 +6113,56 @@ include-build = false
             );
         }
 
-        // And the word boundary that makes the pipe arm work: an operator ends
-        // a word, so a name cannot hide against one.
+        // And the word boundary the arms rely on: an operator ends a word, so
+        // a check name cannot hide against one.
         let step = deny_step_checks(&deny_job_with(
-            "cargo-deny --locked check advisories licenses bans sources|tee /dev/null",
+            "cargo-deny --locked check advisories licenses bans sources;echo done",
         ))
         .expect("readable");
         assert!(check_every_deny_check_runs(&step).is_ok(), "{step:?}");
+    }
+
+    /// A pipe discards the gate's verdict on the shell the runner actually
+    /// gives this workflow, and the only thing that brings it back is a `set`
+    /// line in the same body.
+    ///
+    /// Three arms, because two of them are what make the first one a finding
+    /// rather than a preference. The pipe is rejected; the same pipe under
+    /// `set -o pipefail` is accepted, so the assertion is satisfiable without
+    /// deleting it; and a redirect -- which is not a pipe and never discarded
+    /// anything -- stays accepted, so this is about the operator and not about
+    /// punctuation in general.
+    #[test]
+    fn piping_the_gates_output_without_pipefail_is_caught() {
+        for trailing in [
+            "| tee /dev/null",
+            "| cat",
+            "|tee out.log",
+            "| tee out.log | cat",
+        ] {
+            let step = deny_step_checks(&deny_job_with(&format!(
+                "{SHIPPED_DENY_COMMAND} {trailing}"
+            )))
+            .expect("readable");
+            let error = check_every_deny_check_runs(&step)
+                .expect_err("a pipe with no pipefail discards the verdict");
+            assert!(error.contains("does not turn `pipefail` on"), "{error}");
+        }
+
+        for body in ["set -o pipefail", "set -eo pipefail", "set -euo pipefail"] {
+            let step = deny_step_checks(&deny_job_with(&format!(
+                "{body}\n{SHIPPED_DENY_COMMAND} | tee /dev/null"
+            )))
+            .expect("readable");
+            assert!(
+                step.pipefail,
+                "`{body}` should be read as turning pipefail on"
+            );
+            assert!(
+                check_every_deny_check_runs(&step).is_ok(),
+                "`{body}` keeps the gate's exit through a pipe (measured) and must pass"
+            );
+        }
     }
 
     /// Every spelling of `-A`/`-W` that cargo-deny 0.20.2 accepts, and each one
@@ -7065,6 +7245,117 @@ include-build = false
         assert!(install_arm(VERIFY_LINE, &format!("{VERIFY_LINE}\n          set +e")).is_ok());
     }
 
+    /// The digest the comparison reads has to be a number this commit holds.
+    ///
+    /// The name being declared in this step's `env:` was the whole of the
+    /// earlier question, and a declared name's *value* can still live outside
+    /// the repository. Measured by replaying the step body the way the runner
+    /// does, with the step's own `env:` map applied and `${{ }}` filled from
+    /// outside:
+    ///
+    /// ```text
+    ///   tree                  outside says            step exit  installed
+    ///   shipped literal       nothing                     0      0.20.2
+    ///   shipped literal       0.19.9 + its digest          0      0.20.2   <- the tree decides
+    ///   `${{ vars.* }}`       0.20.2 + its digest          0      0.20.2
+    ///   `${{ vars.* }}`       0.19.9 + its digest          0      0.19.9   <- outside decides
+    ///   `${{ vars.* }}`       0.19.9 + wrong digest        1      none
+    ///   `${{ vars.* }}`       nothing                      1      none
+    /// ```
+    ///
+    /// Row two is the control that makes row four a finding: with the literal
+    /// in place an outside value changes nothing at all. Rows five and six are
+    /// the other control — the comparison still runs and still fails closed on
+    /// a mismatch, so what the fourth row shows is not verification being off
+    /// but the number being chosen somewhere this repository cannot see. Each
+    /// arm was `181 passed` and `actionlint` rc 0 before this assertion
+    /// existed.
+    #[test]
+    fn a_digest_supplied_from_outside_the_repository_fails() {
+        for value in [
+            "${{ vars.CARGO_DENY_SHA256 }}",
+            "${{ secrets.CARGO_DENY_SHA256 }}",
+            "${{ env.CARGO_DENY_SHA256 }}",
+            "${{ github.event.inputs.sha }}",
+            // A literal is present, and an outside value still wins over it.
+            // This is why `is_a_pinned_digest` asks two things rather than one.
+            concat!(
+                "${{ vars.CARGO_DENY_SHA256 || '",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "' }}"
+            ),
+            // Not a digest at all. Fail-closed at run time — an empty or
+            // malformed checksum line is `sha256sum` exit 1 with nothing
+            // installed — but unreadable to this guard either way, and the
+            // rule everywhere else in this file is that an unreadable pin
+            // fails rather than passes.
+            "\"\"",
+            "latest",
+        ] {
+            let why = install_arm(
+                SHA_PIN_LINE,
+                &format!("          CARGO_DENY_SHA256: {value}"),
+            )
+            .expect_err(
+                "a digest whose value this commit does not hold is not a pin, and the \
+                 earlier `declared` check passes it: the name is right there in `env:`",
+            );
+            assert!(
+                why.contains("does not fix"),
+                "the failure must say the value is not fixed by this commit, said: {why}"
+            );
+            assert!(
+                why.contains("CARGO_DENY_SHA256"),
+                "the failure must name the env key whose value moved, said: {why}"
+            );
+        }
+    }
+
+    /// And a digest this commit does hold stays green, including the shapes
+    /// that are stricter than the one shipped.
+    ///
+    /// Without these the cheapest way back to green would be to delete the
+    /// assertion above — the mistake SAK-241 undid in
+    /// `the_permissions_reader_finds_exactly_the_live_keys`.
+    #[test]
+    fn a_digest_this_commit_holds_passes() {
+        // The base's own literal, quoted and unquoted.
+        assert!(install_arm(SHA_PIN_LINE, SHA_PIN_LINE).is_ok());
+        assert!(install_arm(
+            SHA_PIN_LINE,
+            &format!("          CARGO_DENY_SHA256: \"0000000000000000000000000000000000000000000000000000000000000000\"")
+        )
+        .is_ok());
+        // Under a different name, still written out here.
+        assert!(install_arm(
+            SHA_PIN_LINE,
+            &format!("          CARGO_DENY_SHA256: 0000000000000000000000000000000000000000000000000000000000000000\n          GATE_DIGEST: 0000000000000000000000000000000000000000000000000000000000000000")
+        )
+        .is_ok());
+        // The *version* from outside, with the digest left literal. Measured:
+        // this gives an outside value no new freedom — it can only pick the
+        // version the digest already pins (0.20.2 exit 0, 0.19.9 exit 1, unset
+        // exit 1). Only the digest is load-bearing for which bytes run, so
+        // only the digest is asked for, and this arm is what keeps the
+        // assertion from over-reaching to both pins.
+        assert!(install_arm(
+            "          CARGO_DENY_VERSION: 0.0.0",
+            "          CARGO_DENY_VERSION: ${{ vars.CARGO_DENY_VERSION }}"
+        )
+        .is_ok());
+        // A comparison line that reads two declared names, only one of which
+        // is a digest. This is why the check asks whether *any* name it reads
+        // is a pinned digest rather than whether all of them are: the version
+        // is a declared name and is not a digest, and a tree that builds the
+        // filename out of it is pinned just the same.
+        assert!(install_arm(
+            VERIFY_LINE,
+            "          echo \"${CARGO_DENY_SHA256}  cargo-deny-${CARGO_DENY_VERSION}.tar.gz\" \
+             | sha256sum -c -"
+        )
+        .is_ok());
+    }
+
     /// Shapes the reader cannot read fail rather than passing.
     #[test]
     fn an_unreadable_install_step_fails() {
@@ -7302,5 +7593,1076 @@ fn nothing_in_ci_yml_switches_off_this_files_own_reporter_guard() {
                 CONDITIONS_THAT_STILL_RUN
             );
         }
+    }
+}
+
+/// The action every job in `ci.yml` uses to put the tree on disk.
+const CHECKOUT_ACTION: &str = "actions/checkout";
+
+/// `actions/checkout` inputs that change *which tree* a job then checks.
+///
+/// Each of these leaves a workflow that lints clean and runs to a green
+/// conclusion while the gate -- and this file's own guards -- read a tree
+/// nobody proposed. Measured on the real `ci.yml` (SAK-251):
+///
+/// | input | actionlint | dependency_pin_tests | the gate |
+/// |---|---|---|---|
+/// | none (shipped) | ok | ok 173 | exit 0 |
+/// | `ref: 5d015dc` on the `deny` job | **ok** | **ok 173** | reads another tree |
+/// | `repository: someone/else` on the `deny` job | **ok** | **ok 173** | reads another repo |
+/// | `github-server-url: https://ghe.example.com` | **ok** | **ok 180** | reads another server |
+/// | `bogus-input: x` | **rc 1** | -- | -- |
+///
+/// The `bogus-input` row is the control: actionlint does validate this block,
+/// so the clean rows are a shippable workflow rather than one that fails to
+/// parse. Compare `continue-on-error: 'false'`, which actionlint rejects and
+/// `unquote_condition` therefore tolerates.
+///
+/// `github-server-url` was found by asking actionlint for the list rather than
+/// by reading the ones this hole was reported with: rejecting `bogus-input`
+/// prints every input `actions/checkout@v4` accepts, and that enumeration is
+/// what the three rows above and the fifteen in the exclusion list below are
+/// measured against. It is the same key as `repository:` one level out -- the
+/// repository path stays `${{ github.repository }}` and the *server* it is
+/// fetched from moves -- and the `ok 180` row is against the guard as first
+/// committed, which read only `ref` and `repository`.
+///
+/// What makes the verdict follow the tree, same binary and same pins, only the
+/// checkout differing:
+///
+/// | tree | the gate's step |
+/// |---|---|
+/// | the proposed one, `"MIT"` dropped from `allow` | exit 4, 48 `rejected` |
+/// | the one a `ref:` points at | **exit 0, `licenses ok`** |
+///
+/// and the same one variable against this file's own guards, with
+/// `unsound = "all"` dropped: **1 failed** in the proposed tree, **ok 173** in
+/// the tree the `ref:` points at.
+///
+/// Deliberately *not* listed. The other fifteen inputs in actionlint's list,
+/// each measured on the real `ci.yml` rather than assumed -- all fifteen are
+/// `actionlint` ok and `180 passed`, so what separates them from the three
+/// above is the direction, not the silence:
+///
+/// - `fetch-depth`, `fetch-tags`, `filter`, `lfs`, `clean`, `show-progress`,
+///   `set-safe-directory`, `sparse-checkout-cone-mode`, `submodules`,
+///   `persist-credentials` -- neutral or stricter. `persist-credentials: false`
+///   narrows the token this job hands to the third-party binary it runs, so a
+///   guard reddening on it would be failing a tree safer than the one shipped,
+///   which is the mistake SAK-241 undid in the `permissions` reader. (`clean`
+///   is neutral because both jobs are `runs-on: ubuntu-latest`: there is no
+///   workspace to leave dirty. On a self-hosted runner it would need its own
+///   look, which is why the reason is written down rather than the verdict.)
+/// - `token`, `ssh-key`, `ssh-user`, `ssh-known-hosts`, `ssh-strict` -- the
+///   credential and transport, not the tree. They change how the same
+///   `repository` at the same `ref` is fetched. `token` is the one worth
+///   naming: handing the checkout a different credential is a real question,
+///   but it is SAK-240's question about what the job can *do*, not this one's
+///   about which bytes it reads.
+/// - `path` and `sparse-checkout` -- fail-closed, not silent. Both leave files
+///   the gate needs missing: `path` moves the tree into a subdirectory while
+///   the step's working directory stays the workspace root, which is the
+///   measured "no manifest" case -- with `deny.toml` simply absent the gate
+///   exits 4 with 216 errors, and with `.github/` absent this target reports 37
+///   failures. A direction that is loud needs no guard (SAK-247's `--locked`).
+///
+/// So the list is the inputs whose failure direction is **fail-open**, and only
+/// those. Three fail-open, two loud, fifteen neutral is every input the action
+/// has; the exclusions are enumerated rather than summarised so that a new
+/// input in `actions/checkout@v5` is visibly not yet classified.
+const CHECKOUT_REDIRECTING_INPUTS: &[&str] = &["ref", "repository", "github-server-url"];
+
+/// One live `actions/checkout` step in `ci.yml`.
+#[derive(Debug, PartialEq, Eq)]
+struct CheckoutStep {
+    /// The job it belongs to, in the words the failure message uses.
+    job: String,
+    /// Its `with:` input names, comments stripped. Every one of them, not just
+    /// the redirecting ones, so a reader that silently found nothing is
+    /// distinguishable from a step that really declares nothing.
+    inputs: Vec<String>,
+}
+
+/// Every live `actions/checkout` step in `ci.yml`, with the inputs it declares.
+///
+/// Reads both spellings of a step, because a reader that knew only the shipped
+/// one would be fail-open on the other:
+///
+/// ```yaml
+/// - uses: actions/checkout@v4          # what ci.yml ships
+///
+/// - name: Checkout                     # equally valid, and `with:` sits in
+///   uses: actions/checkout@v4          # exactly the same place
+///   with:
+///     ref: whatever
+/// ```
+///
+/// so the step is located by walking back from the `uses:` line to the `- `
+/// that opens it, and the inputs are read as siblings of that line rather than
+/// at a depth guessed from the shipped file's layout.
+///
+/// `Err` when `jobs:` cannot be found, when a `uses:` line is not inside any
+/// step, or when the file declares no checkout at all. Fail-closed for the
+/// reason `deny_gate_conditions` is: every promise below is about checkouts
+/// this reader located, so a reader that located none must refuse to pass
+/// rather than report a clean file.
+fn checkout_steps(ci: &str) -> Result<Vec<CheckoutStep>, String> {
+    let lines: Vec<&str> = ci.lines().collect();
+    let jobs_at = sole_line(&lines, "jobs:", "the workflow's jobs")?;
+    let jobs_body = block_under(&lines, jobs_at);
+    let Some(job_indent) = jobs_body.iter().map(|(_, line)| indent_of(line)).min() else {
+        return Err(
+            "ci.yml's `jobs:` has no body, so there are no checkouts to read and \
+                    nothing below is about the gate as it ships."
+                .to_string(),
+        );
+    };
+
+    // Which job each line belongs to, by the nearest job key above it.
+    let mut job_of: Vec<(usize, String)> = Vec::new();
+    for (at, line) in &jobs_body {
+        if indent_of(line) == job_indent {
+            let name = without_comment(line)
+                .trim()
+                .trim_end_matches(':')
+                .to_string();
+            job_of.push((*at, name));
+        }
+    }
+
+    let mut steps = Vec::new();
+    for (at, line) in &jobs_body {
+        if !without_comment(line).contains(CHECKOUT_ACTION) {
+            continue;
+        }
+        // Walk back to the `- ` that opens this step. `uses:` may be its first
+        // key or a later one.
+        let opens_step = |at: usize| without_comment(lines[at]).trim_start().starts_with("- ");
+        let mut root = *at;
+        while root > jobs_at && !opens_step(root) {
+            root -= 1;
+        }
+        if !opens_step(root) {
+            return Err(format!(
+                "ci.yml line {} uses `{CHECKOUT_ACTION}` but is not inside a step this \
+                 reader can find the start of, so it cannot tell which inputs belong to \
+                 it. It fails rather than passing: an unread checkout is one that could \
+                 be pointing the gate at another tree.",
+                at + 1
+            ));
+        }
+
+        let key_indent = indent_of(lines[root]) + 2;
+        let mut inputs = Vec::new();
+        for (with_at, with_line) in block_under(&lines, root) {
+            if indent_of(with_line) != key_indent {
+                continue;
+            }
+            if without_comment(with_line).trim() != "with:" {
+                continue;
+            }
+            for (_, input_line) in block_under(&lines, with_at) {
+                let body = without_comment(input_line).trim();
+                if let Some((key, _)) = body.split_once(':') {
+                    inputs.push(key.trim().to_string());
+                }
+            }
+        }
+
+        let job = job_of
+            .iter()
+            .rev()
+            .find(|(job_at, _)| *job_at <= root)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| "an unnamed job".to_string());
+        steps.push(CheckoutStep { job, inputs });
+    }
+
+    if steps.is_empty() {
+        return Err(format!(
+            "ci.yml declares no `{CHECKOUT_ACTION}` step. Every assertion in this file \
+             is about files read out of a checkout, so with none to read this guard \
+             reports nothing rather than reporting a clean file."
+        ));
+    }
+    Ok(steps)
+}
+
+/// No checkout in `ci.yml` redirects its job to a different tree.
+fn check_no_checkout_redirects_the_tree(steps: &[CheckoutStep]) -> Result<(), String> {
+    for step in steps {
+        for input in &step.inputs {
+            if !CHECKOUT_REDIRECTING_INPUTS.contains(&input.as_str()) {
+                continue;
+            }
+            // The evidence is per input, not one sentence reused for all
+            // three: the `ref:` measurement is a statement about `ref:`, and
+            // quoting it under `github-server-url:` would be reporting a
+            // number nobody took.
+            let measured = match input.as_str() {
+                "ref" => {
+                    "same command, same binary, same pins, only the tree differing: with \
+                     the proposed tree's `allow` missing `\"MIT\"` the gate's step exits 4 \
+                     with 48 `rejected`, and against the tree a `ref:` points at it exits \
+                     0 with `licenses ok`"
+                }
+                "repository" => {
+                    "`repository: someone/else` on this job is `actionlint` ok and leaves \
+                     this target green, and the tree the gate then reads is whatever that \
+                     other repository's default branch holds"
+                }
+                "github-server-url" => {
+                    "`github-server-url: https://ghe.example.com` is `actionlint` ok and \
+                     left this target at `180 passed` before it was listed here; the \
+                     repository path stays `${{ github.repository }}` and the server the \
+                     whole tree is cloned from moves"
+                }
+                _ => "measured as fail-open, see `CHECKOUT_REDIRECTING_INPUTS`",
+            };
+            return Err(format!(
+                "the `{}` job's checkout declares `{input}:`, which chooses the tree that \
+                 job then reads. Measured: {measured}. Nothing else reports this -- \
+                 actionlint accepts it, and the gate reads whatever is on disk. If a \
+                 redirect is genuinely wanted, say which of \
+                 {CHECKOUT_REDIRECTING_INPUTS:?} and why in the same diff; the other \
+                 fifteen inputs, such as `fetch-depth` and `persist-credentials`, are \
+                 not reported.",
+                step.job
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The gate, and this file's own guards, read the tree that was proposed.
+///
+/// Scope, stated exactly, because half of this is not closeable from here.
+///
+/// The `deny` job's checkout **is**: it is a different job, so when it is
+/// redirected this target still runs against the real tree and sees the
+/// `ref:`. That half is what this test reports.
+///
+/// The `test` job's checkout is **not**, and no guard in this repository can
+/// be. Redirect it and this target compiles from the tree the `ref:` points
+/// at, reads that tree's `ci.yml`, finds no `ref:` in it, and reports
+/// `ok 173` -- the same self-reference that put the reporter guard in
+/// `fidelity_matrix_tests` (SAK-249), except that moving it there does not help:
+/// both reporters run in the `test` job, so one `ref:` takes them together.
+///
+/// Note it is also not closed by a required status check, which is the fix
+/// SAK-242 is weighing for the neighbouring `if:`-on-the-job hole. A skipped
+/// job and a redirected one differ here: the redirected job really runs and
+/// really succeeds, so a required check is *satisfied*. What would close it is
+/// a reader of this file hosted in a job with its own checkout -- the SAK-249
+/// mutual arrangement one level up, at job rather than target granularity.
+/// Left to SAK-242, which already owns the `test` job's other job-level hole,
+/// rather than done here: it adds a step to `ci.yml`, which is a change to the
+/// gate's own file and not to this file's reader.
+#[test]
+fn no_checkout_in_ci_yml_points_a_job_at_another_tree() {
+    let steps = checkout_steps(&repo_file(".github/workflows/ci.yml"))
+        .unwrap_or_else(|why| panic!("{why}"));
+    if let Err(why) = check_no_checkout_redirects_the_tree(&steps) {
+        panic!("{why}");
+    }
+}
+
+#[cfg(test)]
+mod checkout_scope_controls {
+    use super::*;
+
+    /// The real `ci.yml` with every checkout's `with:` block removed.
+    ///
+    /// Normalising first is what keeps each arm measuring the inputs *it*
+    /// added, for the reason `ci_yml_base` gives: with the raw file as the
+    /// base, a real `ref:` on the shipped checkout reddened **five** tests here
+    /// instead of one, and the four extra failures were these controls reading
+    /// a file carrying both their own inputs and the mutation. The test that
+    /// reads the shipped file unnormalised, and so is the one that goes red
+    /// when a redirect really lands there, is
+    /// `no_checkout_in_ci_yml_points_a_job_at_another_tree`.
+    ///
+    /// The base has to lack what the arms add -- a `with:` block -- and these
+    /// arms remove nothing, so stripping is the whole of it. SAK-245 needed
+    /// both directions; this one does not.
+    fn ci_yml_checkout_base() -> String {
+        let ci = repo_file(".github/workflows/ci.yml");
+        let lines: Vec<&str> = ci.lines().collect();
+        let mut drop: Vec<usize> = Vec::new();
+        for (at, line) in lines.iter().enumerate() {
+            if !without_comment(line).contains(CHECKOUT_ACTION) {
+                continue;
+            }
+            let mut root = at;
+            while root > 0 && !without_comment(lines[root]).trim_start().starts_with("- ") {
+                root -= 1;
+            }
+            let key_indent = indent_of(lines[root]) + 2;
+            for (with_at, with_line) in block_under(&lines, root) {
+                if indent_of(with_line) != key_indent
+                    || without_comment(with_line).trim() != "with:"
+                {
+                    continue;
+                }
+                drop.push(with_at);
+                drop.extend(block_under(&lines, with_at).iter().map(|(at, _)| *at));
+            }
+        }
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| !drop.contains(at))
+            .map(|(_, line)| format!("{line}\n"))
+            .collect()
+    }
+
+    /// `ci_yml_checkout_base()` with `inputs` given to the checkout of `job`.
+    fn ci_yml_with_checkout_inputs(job: &str, inputs: &[&str]) -> String {
+        let ci = ci_yml_checkout_base();
+        let lines: Vec<&str> = ci.lines().collect();
+        let job_at = lines
+            .iter()
+            .position(|line| without_comment(line).trim() == format!("{job}:"))
+            .unwrap_or_else(|| panic!("ci.yml has no `{job}:` job"));
+        let uses_at = (job_at..lines.len())
+            .find(|at| without_comment(lines[*at]).contains(CHECKOUT_ACTION))
+            .unwrap_or_else(|| panic!("the `{job}` job has no checkout step"));
+
+        let mut out: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+        let mut block = vec!["        with:".to_string()];
+        for input in inputs {
+            block.push(format!("          {input}"));
+        }
+        out.splice(uses_at + 1..uses_at + 1, block);
+        out.join("\n")
+    }
+
+    /// The reader itself, before anything is asserted about what it read.
+    ///
+    /// Only that the checkouts are **locatable**, and that it reads the inputs
+    /// it is handed. Nothing here pins the shipped file's input list, for the
+    /// reason `the_gate_condition_reader_finds_the_live_gate` gives: today
+    /// every checkout declares no inputs at all, and a guard asserting that
+    /// would redden on `persist-credentials: false`, a stricter tree.
+    #[test]
+    fn the_checkout_reader_finds_every_live_checkout() {
+        let steps = checkout_steps(&repo_file(".github/workflows/ci.yml")).expect("readable");
+        let jobs: Vec<&str> = steps.iter().map(|step| step.job.as_str()).collect();
+        assert!(
+            jobs.contains(&"deny") && jobs.contains(&"test"),
+            "both jobs' checkouts must be found, read {jobs:?}"
+        );
+
+        let read = checkout_steps(&ci_yml_with_checkout_inputs(
+            "deny",
+            &["ref: 5d015dc", "fetch-depth: 0"],
+        ))
+        .expect("readable");
+        let deny = read
+            .iter()
+            .find(|step| step.job == "deny")
+            .expect("deny job");
+        assert_eq!(
+            deny.inputs,
+            vec!["ref".to_string(), "fetch-depth".to_string()]
+        );
+    }
+
+    /// The hole: a one-line input that leaves everything green while the gate
+    /// and the guards read a tree nobody proposed.
+    #[test]
+    fn a_checkout_that_redirects_the_tree_fails() {
+        for (job, inputs) in [
+            ("deny", vec!["ref: 5d015dc"]),
+            ("test", vec!["ref: 5d015dc"]),
+            ("deny", vec!["repository: someone/else"]),
+            ("test", vec!["repository: someone/else"]),
+            // The same redirect one level out: the repository path is left
+            // alone and the server it is fetched from moves.
+            ("deny", vec!["github-server-url: https://ghe.example.com"]),
+            ("test", vec!["github-server-url: https://ghe.example.com"]),
+            // Quoting changes nothing: it is the key that selects the tree.
+            ("deny", vec!["ref: 'main'"]),
+            ("deny", vec!["ref: \"main\""]),
+            // Hidden among inputs that are themselves fine.
+            (
+                "deny",
+                vec![
+                    "fetch-depth: 0",
+                    "ref: 5d015dc",
+                    "persist-credentials: false",
+                ],
+            ),
+        ] {
+            let steps =
+                checkout_steps(&ci_yml_with_checkout_inputs(job, &inputs)).expect("readable");
+            let why = check_no_checkout_redirects_the_tree(&steps)
+                .expect_err(&format!("{inputs:?} on the `{job}` job redirects its tree"));
+            assert!(
+                why.contains(job),
+                "the failure must name the job whose tree moved, said: {why}"
+            );
+            // And the evidence it quotes has to be the evidence for *this*
+            // input. One sentence reused across the three would read as a
+            // measurement of a key nobody measured.
+            let redirect = inputs
+                .iter()
+                .find_map(|input| {
+                    let key = input.split_once(':')?.0.trim();
+                    CHECKOUT_REDIRECTING_INPUTS
+                        .iter()
+                        .find(|listed| **listed == key)
+                })
+                .expect("each arm carries one redirecting input");
+            assert!(
+                why.contains(*redirect),
+                "the failure must name `{redirect}`, the input that moved the tree, \
+                 said: {why}"
+            );
+        }
+    }
+
+    /// Each listed input is reported with its own measurement.
+    ///
+    /// The control for a template, rather than for the predicate: one
+    /// `{input}` hole in one sentence would make the `ref:` numbers read as
+    /// evidence for `repository:` and `github-server-url:` as well, and the
+    /// reader of the failure would have no way to tell. So the three failures
+    /// must differ by more than the key's name.
+    #[test]
+    fn each_redirecting_input_is_reported_with_its_own_evidence() {
+        let mut said: Vec<String> = Vec::new();
+        for input in CHECKOUT_REDIRECTING_INPUTS {
+            let steps = checkout_steps(&ci_yml_with_checkout_inputs(
+                "deny",
+                &[&format!("{input}: whatever")],
+            ))
+            .expect("readable");
+            let why = check_no_checkout_redirects_the_tree(&steps)
+                .expect_err("a listed input redirects the tree");
+            // Strip every key's name, so what is left is only the evidence.
+            let evidence = CHECKOUT_REDIRECTING_INPUTS
+                .iter()
+                .fold(why.clone(), |acc, key| acc.replace(key, ""));
+            assert!(
+                !said.contains(&evidence),
+                "`{input}:` is reported with evidence already used for another input, \
+                 which would be quoting a measurement nobody took for it: {why}"
+            );
+            said.push(evidence);
+        }
+    }
+
+    /// Inputs that are neutral, stricter, or fail-closed must pass.
+    ///
+    /// Without these arms the guard could be spelled "a checkout declares no
+    /// `with:` at all", which would redden on `persist-credentials: false` --
+    /// a tree safer than the one shipped, and the direction that teaches
+    /// people to delete a guard rather than fix it.
+    ///
+    /// Every input `actions/checkout@v4` accepts and
+    /// `CHECKOUT_REDIRECTING_INPUTS` does not list appears here, taken from
+    /// actionlint's own rejection message rather than from the three the hole
+    /// was reported with. That is how `github-server-url` turned out to belong
+    /// on the other list, so the enumeration earns its length: an input missing
+    /// from both lists is an input nobody decided about.
+    #[test]
+    fn inputs_that_do_not_move_the_tree_pass() {
+        for inputs in [
+            // Neutral or stricter.
+            vec!["fetch-depth: 0"],
+            vec!["fetch-tags: true"],
+            vec!["filter: blob:none"],
+            vec!["lfs: true"],
+            vec!["clean: false"],
+            vec!["show-progress: false"],
+            vec!["set-safe-directory: false"],
+            vec!["sparse-checkout-cone-mode: false"],
+            vec!["submodules: false"],
+            vec!["persist-credentials: false"],
+            // The credential and the transport, not the tree: the same
+            // repository at the same ref, fetched differently.
+            vec!["token: ${{ secrets.OTHER }}"],
+            vec!["ssh-key: ${{ secrets.KEY }}"],
+            vec!["ssh-user: git"],
+            vec!["ssh-known-hosts: example.com ssh-ed25519 AAAA"],
+            vec!["ssh-strict: false"],
+            // Fail-closed, not silent: both leave files the gate needs
+            // missing. `path` puts the tree in a subdirectory while the step's
+            // working directory does not move, which is the measured
+            // no-manifest case (gate exit 4).
+            vec!["path: sub"],
+            vec!["sparse-checkout: src"],
+            vec!["fetch-depth: 0", "persist-credentials: false"],
+        ] {
+            for job in ["deny", "test"] {
+                let steps =
+                    checkout_steps(&ci_yml_with_checkout_inputs(job, &inputs)).expect("readable");
+                assert!(
+                    check_no_checkout_redirects_the_tree(&steps).is_ok(),
+                    "`{inputs:?}` on the `{job}` job does not choose a different tree and \
+                     must not be reported as a hole"
+                );
+            }
+        }
+    }
+
+    /// A commented-out redirect is not a redirect, and a trailing comment does
+    /// not hide a live one.
+    ///
+    /// Which code this actually covers, because the first draft of this test
+    /// claimed more than it tested. Deleting `checkout_steps`' own
+    /// `without_comment` call on an input line left all 180 tests green, and
+    /// the reason is that `block_under` has already dropped comment-only lines
+    /// before the input loop sees them. So the comment-only arm below is a
+    /// statement about `block_under`, not about this reader, and this reader's
+    /// `without_comment` call only trims a comment *trailing* a real input --
+    /// cosmetic, since the key sits before the first colon either way. That
+    /// line is therefore deliberately left unguarded: its failure direction is
+    /// to report a spurious extra input name, never to hide a real one, and a
+    /// guard is worth writing only where the direction is fail-open (SAK-241's
+    /// `without_comment` call sites, same question and same answer).
+    #[test]
+    fn a_commented_out_redirect_passes() {
+        let steps = checkout_steps(&ci_yml_with_checkout_inputs(
+            "deny",
+            &["# ref: 5d015dc", "fetch-depth: 0"],
+        ))
+        .expect("readable");
+        let deny = steps
+            .iter()
+            .find(|step| step.job == "deny")
+            .expect("deny job");
+        assert_eq!(deny.inputs, vec!["fetch-depth".to_string()]);
+        assert!(check_no_checkout_redirects_the_tree(&steps).is_ok());
+
+        // The other direction: a live redirect wearing a comment is still one.
+        let dressed = checkout_steps(&ci_yml_with_checkout_inputs(
+            "deny",
+            &["ref: 5d015dc  # pinned deliberately"],
+        ))
+        .expect("readable");
+        check_no_checkout_redirects_the_tree(&dressed)
+            .expect_err("a trailing comment does not stop `ref:` choosing the tree");
+    }
+
+    /// The other spelling of a step, which a reader keyed on `- uses:` would
+    /// have read as declaring nothing.
+    #[test]
+    fn a_named_checkout_step_is_read_too() {
+        // Synthetic rather than a rewrite of the shipped file: this is a
+        // statement about the reader, and an arm built by editing `ci.yml`
+        // measured the edit as well as the reader -- it reddened a second time
+        // when a real `ref:` landed on the shipped checkout.
+        let ci = "\
+name: CI
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: 5d015dc
+
+      - name: cargo deny check
+        run: cargo-deny --locked check advisories licenses bans sources
+";
+        let steps = checkout_steps(ci).expect("readable");
+        let named = steps
+            .iter()
+            .find(|step| step.job == "deny")
+            .expect("the `- name:` spelling must still be found as a checkout");
+        assert_eq!(
+            named.inputs,
+            vec!["ref".to_string()],
+            "`with:` sits in the same place in both spellings; a reader keyed on \
+             `- uses:` read this step as declaring nothing"
+        );
+        let plain = steps
+            .iter()
+            .find(|step| step.job == "test")
+            .expect("test job");
+        assert_eq!(plain.inputs, Vec::<String>::new());
+        check_no_checkout_redirects_the_tree(&steps)
+            .expect_err("a redirect in the other step spelling is still a redirect");
+    }
+
+    /// Shapes this reader cannot evaluate fail closed.
+    #[test]
+    fn a_checkout_this_reader_cannot_find_fails_closed() {
+        let ci = repo_file(".github/workflows/ci.yml");
+        for (what, broken) in [
+            (
+                "no checkout at all",
+                ci.replace(CHECKOUT_ACTION, "actions/nothing"),
+            ),
+            ("no jobs:", ci.replace("\njobs:\n", "\nnot-jobs:\n")),
+        ] {
+            checkout_steps(&broken)
+                .expect_err(&format!("`{what}` must fail closed, not read as clean"));
+        }
+    }
+}
+
+/// The libtest arguments that narrow which tests in a target actually run.
+///
+/// Each was measured on this tree against a `deny.toml` widened so that one
+/// assertion in *this* target fails -- these are cargo's and libtest's own
+/// semantics, so they do the same to the sibling target this guard watches.
+/// The shipped command exits 101 and reports it; each of these leaves the step
+/// at **exit 0** (SAK-253):
+///
+/// | command tail | step exit | test result line |
+/// |---|---|---|
+/// | *(none — shipped)* | **101** | `FAILED. 182 passed; 1 failed` |
+/// | `-- --skip deny_` | 0 | `ok. 162 passed; 0 failed; 21 filtered out` |
+/// | `-- --exact no_such_test` | 0 | `ok. 0 passed; 0 failed; 183 filtered out` |
+/// | `-- --ignored` | 0 | `ok. 0 passed; 0 failed; 183 filtered out` |
+/// | `-- --list` | 0 | *(no test result line at all)* |
+///
+/// `--exact` is on the list even though it needs a name beside it to be
+/// useful, because the useless spelling is the dangerous one: `--exact` with a
+/// name no test has selects **nothing** and still reads `ok`.
+const TEST_FILTERING_ARGS: &[&str] = &["--skip", "--exact", "--ignored", "--list"];
+
+/// libtest arguments whose value is the *next* word rather than glued on with
+/// `=`, so that a reader looking for a bare positional filter does not mistake
+/// the `1` in `--test-threads 1` for one.
+///
+/// Both spellings of that flag were measured and both keep the step at exit
+/// 101, so both have to stay green.
+const LIBTEST_ARGS_WITH_A_VALUE: &[&str] = &[
+    "--test-threads",
+    "--logfile",
+    "--color",
+    "--format",
+    "--shuffle-seed",
+    "-Z",
+];
+
+/// The command a reporter step hands to the shell, plus whether that body
+/// turns `pipefail` on above it.
+#[derive(Debug, PartialEq, Eq)]
+struct ReporterCommand {
+    /// The one logical command that runs the target: `\`-continuations joined,
+    /// comment stripped. Kept as text because two of the questions below are
+    /// about shell operators rather than about words.
+    command: String,
+    /// `true` if a `set … pipefail` line runs earlier in the same `run:` body.
+    ///
+    /// Read, not assumed. The runner gives this workflow `/usr/bin/bash -e
+    /// {0}` — measured from the `shell:` line GitHub prints for every step of
+    /// run 42362531653 — and that is `-e` **without** `-o pipefail`, so a pipe
+    /// discards the command's exit status unless the body asks for it back.
+    pipefail: bool,
+}
+
+/// The command on the `ci.yml` step that runs `target`.
+///
+/// Anchored on the command for the reason `sibling_reporter_conditions` gives:
+/// renaming a
+/// step does not stop it running. `Err` in every case where the reader cannot
+/// say which command runs the target, for the reason it gives too — the
+/// reporter gone is worse than anything written on it.
+fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
+    let lines: Vec<&str> = ci.lines().collect();
+    let needle = format!("--test {target}");
+
+    let found: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| without_comment(line).contains(&needle))
+        .map(|(at, _)| at)
+        .collect();
+    let at = match found[..] {
+        [at] => at,
+        [] => {
+            return Err(format!(
+                "ci.yml runs no `{needle}`, so nothing in CI reports the {target} \
+                 assertions."
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "ci.yml has {} steps running `{needle}`; which of them is the reporter \
+                 is not something this reader can tell.",
+                found.len()
+            ))
+        }
+    };
+
+    let mut start = None;
+    for above in (0..=at).rev() {
+        if without_comment(lines[above]).trim_start().starts_with("- ") {
+            start = Some(above);
+            break;
+        }
+    }
+    let Some(start) = start else {
+        return Err(format!(
+            "ci.yml's `{needle}` is not inside a step -- no `- ` line opens a block \
+             above it, and this reader only understands the step list form."
+        ));
+    };
+
+    // The `run:` that holds it: either the needle's own line, or a block
+    // scalar opened above it inside the same step.
+    let run_at = (start..=at)
+        .rev()
+        .find(|above| {
+            without_comment(lines[*above])
+                .trim_start()
+                .starts_with("run:")
+        })
+        .ok_or_else(|| {
+            format!("ci.yml's `{needle}` is not under a `run:` key this reader can find.")
+        })?;
+
+    let run_line = without_comment(lines[run_at]);
+    let run_body = run_line.trim_start();
+    let run_indent = run_line.len() - run_body.len();
+    let inline = run_body.strip_prefix("run:").unwrap_or_default().trim();
+
+    let mut raw: Vec<&str> = Vec::new();
+    if inline.starts_with('|') || inline.starts_with('>') {
+        for next in &lines[run_at + 1..] {
+            let bare = without_comment(next);
+            let body = bare.trim_start();
+            if body.is_empty() {
+                continue;
+            }
+            if bare.len() - body.len() <= run_indent {
+                break;
+            }
+            raw.push(body);
+        }
+    } else if !inline.is_empty() {
+        raw.push(inline);
+    }
+    if raw.is_empty() {
+        return Err(format!(
+            "the step running `{needle}` in ci.yml has an empty `run:` body."
+        ));
+    }
+
+    // Join `\`-continuations: one logical command per entry.
+    let mut logical: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in raw {
+        match line.strip_suffix('\\') {
+            Some(head) => {
+                current.push_str(head.trim_end());
+                current.push(' ');
+            }
+            None => {
+                current.push_str(line);
+                logical.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    if !current.is_empty() {
+        logical.push(current);
+    }
+
+    let running: Vec<usize> = logical
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(&needle))
+        .map(|(at, _)| at)
+        .collect();
+    // No control covers the `_` arm below, and that is deliberate rather than
+    // an oversight: `found` above counts the *lines* carrying the needle and
+    // already refuses more than one, so by here the body holds exactly one.
+    // The arm stays because it fails closed if that ever stops being true --
+    // measured by disabling it (SAK-253), and every control stayed green,
+    // which is how we know it is unreachable rather than unguarded.
+    let command_at = match running[..] {
+        [one] => one,
+        _ => {
+            return Err(format!(
+                "the step's `run:` body has {} commands running `{needle}`; this reader \
+                 reports on one or on none.",
+                running.len()
+            ))
+        }
+    };
+
+    Ok(ReporterCommand {
+        pipefail: logical[..command_at].iter().any(|line| {
+            let text = line.trim_start();
+            text.starts_with("set ") && text.contains("pipefail")
+        }),
+        command: logical[command_at].clone(),
+    })
+}
+
+/// `Ok` if that command runs the whole target and its verdict survives.
+///
+/// Three assertions, each for a measured fail-open — the step stays at exit 0
+/// while an assertion in the target is failing:
+///
+/// 1. The exit is not handed to `||`.
+/// 2. The exit is not handed to a **pipe**, unless the body turns `pipefail`
+///    back on. See `ReporterCommand::pipefail`: the runner's shell is `bash -e`
+///    with no `pipefail`, so `| tee` exits 0 on a failing command.
+/// 3. Nothing narrows the set of tests that run: no `--no-run`, none of
+///    `TEST_FILTERING_ARGS`, and no bare positional filter after `--`.
+///
+/// Deliberately **not** asserted, all measured on the widened tree and all
+/// still exit 101, so a guard reddening them would be reddening a command that
+/// works: `--all-features`, `--frozen`, `--no-fail-fast`, `; true`,
+/// `> /dev/null`, `-- --nocapture`, `-- --test-threads=1`, `-- --test-threads 1`,
+/// `-- --include-ignored` and an unfamiliar `-- --format=terse`. An unknown
+/// libtest flag passes on purpose: it is as likely to widen as to narrow, and
+/// the three families above are every documented way libtest subtracts.
+fn check_the_reporter_runs_every_test(
+    reporter: &ReporterCommand,
+    target: &str,
+) -> Result<(), String> {
+    let command = &reporter.command;
+
+    if command.contains("||") {
+        return Err(format!(
+            "ci.yml's `{target}` step sends that target's exit status to `||`: \
+             `{command}`. The tests still run and still print `FAILED`, and the step \
+             exits 0 anyway. Measured (SAK-253) with one assertion in the target \
+             failing: the command alone exits 101, and with `|| true` after it exits 0 \
+             while the log still says `182 passed; 1 failed`. Use `;` if something has \
+             to run either way -- that keeps the failure, measured."
+        ));
+    }
+
+    if command.contains('|') && !reporter.pipefail {
+        return Err(format!(
+            "ci.yml's `{target}` step pipes that target's output: `{command}`, and the \
+             body does not turn `pipefail` on. This workflow declares no `shell:`, so \
+             GitHub runs every step under `/usr/bin/bash -e {{0}}` -- measured from the \
+             `shell:` line of run 42362531653 -- and that is `-e` without `-o pipefail`, \
+             so the step takes the *last* command's status and the test failure is \
+             discarded. Measured (SAK-253) with one assertion failing: the command alone \
+             exits 101; `| tee /dev/null` exits 0; the same pipe under a shell with \
+             `-o pipefail` exits 101. Add `set -o pipefail` above it in the same `run:` \
+             body -- measured, and accepted here -- or drop the pipe."
+        ));
+    }
+
+    let words: Vec<&str> = command
+        .split_whitespace()
+        .filter(|word| *word != "\\")
+        .collect();
+
+    if words.iter().any(|word| *word == "--no-run") {
+        return Err(format!(
+            "ci.yml's `{target}` step runs cargo test with `--no-run`: `{command}`. That \
+             compiles the target and runs none of it, and the step exits 0 with no test \
+             result line at all. Measured (SAK-253): with one assertion in the target \
+             failing, the shipped command exits 101 and this exits 0."
+        ));
+    }
+
+    let Some(separator) = words.iter().position(|word| *word == "--") else {
+        return Ok(());
+    };
+    let mut at = separator + 1;
+    while at < words.len() {
+        let word = words[at];
+        let name = word.split('=').next().unwrap_or(word);
+
+        if TEST_FILTERING_ARGS.contains(&name) {
+            return Err(format!(
+                "ci.yml's `{target}` step narrows which tests run with `{word}`: \
+                 `{command}`. The tests it filters out cannot report anything, and the \
+                 step exits 0 reading `ok`. Measured (SAK-253) with one assertion in the \
+                 target failing: `-- --skip deny_` exits 0 at `162 passed; 21 filtered \
+                 out`, `-- --exact no_such_test` and `-- --ignored` exit 0 at `0 passed; \
+                 183 filtered out`. Narrowing arguments are {TEST_FILTERING_ARGS:?}."
+            ));
+        }
+
+        if !word.starts_with('-') {
+            return Err(format!(
+                "ci.yml's `{target}` step passes `{word}` as a positional test filter: \
+                 `{command}`. Only tests whose name contains it then run. Measured \
+                 (SAK-253) with one assertion failing: `-- the_committed_lock` exits 0 \
+                 at `2 passed; 181 filtered out`, and `-- negative_controls` exits 0 at \
+                 `150 passed; 33 filtered out` -- 150 green tests and the one that had \
+                 something to say filtered away."
+            ));
+        }
+
+        if LIBTEST_ARGS_WITH_A_VALUE.contains(&name) && !word.contains('=') {
+            at += 1;
+        }
+        at += 1;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn nothing_in_ci_yml_narrows_this_files_own_reporter_guard() {
+    let ci = repo_file(".github/workflows/ci.yml");
+    let reporter = match reporter_command(&ci, SIBLING_REPORTER_TARGET) {
+        Ok(reporter) => reporter,
+        Err(why) => panic!("{why}"),
+    };
+    if let Err(why) = check_the_reporter_runs_every_test(&reporter, SIBLING_REPORTER_TARGET) {
+        panic!("{why}");
+    }
+}
+
+#[cfg(test)]
+mod reporter_command_controls {
+    use super::*;
+
+    /// A `ci.yml` whose reporter step runs `tail`, reduced to the parts this
+    /// reader looks at.
+    ///
+    /// Synthetic rather than the real file so that one mutation reddens one
+    /// test: an arm built by editing the real file reddens every control that
+    /// also reads it.
+    fn ci_running(tail: &str) -> String {
+        format!(
+            "name: CI\non:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+             steps:\n      - uses: actions/checkout@v4\n\n      - name: Unit tests\n        \
+             run: cargo test --locked --lib\n\n      - name: Supply-chain pins\n        \
+             run: cargo test --locked --test fidelity_matrix_tests{tail}\n"
+        )
+    }
+
+    fn verdict(tail: &str) -> Result<(), String> {
+        let ci = ci_running(tail);
+        let reporter = reporter_command(&ci, SIBLING_REPORTER_TARGET).expect("located");
+        check_the_reporter_runs_every_test(&reporter, SIBLING_REPORTER_TARGET)
+    }
+
+    #[test]
+    fn the_shipped_reporter_command_is_read_and_passes() {
+        let ci = repo_file(".github/workflows/ci.yml");
+        let reporter = reporter_command(&ci, SIBLING_REPORTER_TARGET).expect("the real ci.yml");
+        assert!(
+            reporter.command.contains("cargo test"),
+            "the reader found `{}` rather than a cargo test command, so the assertions \
+             below describe a command that is not the one CI runs",
+            reporter.command
+        );
+        assert_eq!(verdict(""), Ok(()));
+    }
+
+    #[test]
+    fn swallowing_the_verdict_is_caught() {
+        assert!(verdict(" || true").is_err());
+        assert!(verdict(" ||true").is_err());
+        assert!(verdict(" | tee /dev/null").is_err());
+        assert!(verdict(" | cat").is_err());
+    }
+
+    #[test]
+    fn a_pipe_under_a_body_that_restores_pipefail_passes() {
+        // The one spelling that measurably keeps the failure on the runner's
+        // own shell. Without this arm the pipe assertion would have no way to
+        // be satisfied except by deleting the pipe, which is a guard telling
+        // people a working command is broken.
+        let ci = "name: CI\njobs:\n  test:\n    steps:\n      - name: Supply-chain pins\n        \
+                  run: |\n          set -o pipefail\n          cargo test --locked --test \
+                  fidelity_matrix_tests | tee out.log\n";
+        let reporter = reporter_command(ci, SIBLING_REPORTER_TARGET).expect("located");
+        assert!(reporter.pipefail);
+        assert_eq!(
+            check_the_reporter_runs_every_test(&reporter, SIBLING_REPORTER_TARGET),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_pipefail_body_does_not_excuse_a_double_pipe() {
+        // The control that makes the `||` assertion its own. `|| true` contains
+        // a `|`, so with a bare pipe already rejected the pipe assertion covers
+        // it -- until the body turns `pipefail` on, at which point the pipe
+        // assertion passes it and only the `||` assertion is left. Measured:
+        // `-o pipefail` does nothing for `||` at all (exit 0 under both
+        // shells), so this has to be rejected whatever the body says.
+        let ci = "name: CI\njobs:\n  test:\n    steps:\n      - name: Supply-chain pins\n        \
+                  run: |\n          set -o pipefail\n          cargo test --locked --test \
+                  TARGET || true\n";
+        let ci = ci.replace("TARGET", SIBLING_REPORTER_TARGET);
+        let reporter = reporter_command(&ci, SIBLING_REPORTER_TARGET).expect("located");
+        assert!(reporter.pipefail);
+        let error = check_the_reporter_runs_every_test(&reporter, SIBLING_REPORTER_TARGET)
+            .expect_err("`|| true` discards the verdict with or without pipefail");
+        assert!(
+            error.contains("sends that target's exit status to `||`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn running_none_of_the_target_is_caught() {
+        assert!(verdict(" --no-run").is_err());
+    }
+
+    #[test]
+    fn narrowing_which_tests_run_is_caught() {
+        assert!(verdict(" -- --skip deny_").is_err());
+        assert!(verdict(" -- --exact no_such_test").is_err());
+        assert!(verdict(" -- --ignored").is_err());
+        assert!(verdict(" -- --list").is_err());
+        assert!(verdict(" -- the_committed_lock").is_err());
+        assert!(verdict(" -- --skip=deny_").is_err());
+    }
+
+    #[test]
+    fn commands_that_still_run_everything_pass() {
+        // Every one of these was measured on a widened tree and still exits
+        // 101. A guard reddening any of them would be reddening a command that
+        // reports exactly what it is supposed to report.
+        for tail in [
+            " --all-features",
+            " --no-fail-fast",
+            " ; true",
+            " > /dev/null",
+            " -- --nocapture",
+            " -- --test-threads=1",
+            " -- --test-threads 1",
+            " -- --include-ignored",
+            " -- --format=terse",
+            " -- --color always",
+        ] {
+            assert_eq!(verdict(tail), Ok(()), "tail `{tail}` should pass");
+        }
+    }
+
+    #[test]
+    fn a_continued_command_is_read_as_one() {
+        let ci = "name: CI\njobs:\n  test:\n    steps:\n      - name: Supply-chain pins\n        \
+                  run: |\n          cargo test --locked --test fidelity_matrix_tests \\\n          \
+                  || true\n";
+        let reporter = reporter_command(ci, SIBLING_REPORTER_TARGET).expect("located");
+        assert!(check_the_reporter_runs_every_test(&reporter, SIBLING_REPORTER_TARGET).is_err());
+    }
+
+    #[test]
+    fn an_unlocatable_command_fails_closed() {
+        let gone = "jobs:\n  test:\n    steps:\n      - name: Unit tests\n        run: cargo \
+                    test --locked --lib\n";
+        assert!(reporter_command(gone, SIBLING_REPORTER_TARGET).is_err());
+
+        let twice = format!(
+            "{}      - name: Again\n        run: cargo test --locked --test \
+             fidelity_matrix_tests\n",
+            ci_running("")
+        );
+        assert!(reporter_command(&twice, SIBLING_REPORTER_TARGET).is_err());
+
+        let commented = "jobs:\n  test:\n    steps:\n      - name: Pins\n        # run: cargo \
+                         test --locked --test fidelity_matrix_tests\n        run: cargo test \
+                         --locked --lib\n";
+        assert!(reporter_command(commented, SIBLING_REPORTER_TARGET).is_err());
     }
 }
