@@ -16,9 +16,10 @@ services:
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Only files directly in /docker-entrypoint-initdb.d run. The entrypoint
+      # does not recurse, so do not add a directory mount here expecting the
+      # .sql files inside it to be executed.
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
-      # Mount additional SQL scripts if they exist
-      - ./sql:/docker-entrypoint-initdb.d/sql:ro
     networks:
       - fireup_network
     healthcheck:

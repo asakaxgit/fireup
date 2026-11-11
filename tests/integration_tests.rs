@@ -283,15 +283,10 @@ async fn test_end_to_end_backup_import_workflow() -> Result<()> {
     let count: i64 = count_rows[0].get(0);
     assert!(count > 0, "Should have imported data");
 
-    // Step 5: Verify audit logging
-    let audit_query = "
-        SELECT COUNT(*) 
-        FROM fireup_data.import_audit 
-        WHERE operation_type = 'import' AND result = 'success'
-    ";
-    let audit_rows = client.query(audit_query, &[]).await?;
-    let audit_count: i64 = audit_rows[0].get(0);
-    assert!(audit_count > 0, "Should have audit records");
+    // There is deliberately no audit-table assertion here. Import auditing
+    // lives in `fireup::monitoring` (`log_audit_entry`), which keeps entries in
+    // memory for the life of the process and writes them to no database, so
+    // there is nothing in Postgres for this test to read back.
 
     test_db.cleanup().await?;
     Ok(())
@@ -869,21 +864,9 @@ async fn test_performance_and_monitoring() -> Result<()> {
         "Should achieve reasonable throughput with mock data"
     );
 
-    // Verify monitoring data
-    let client = test_db.get_client();
-    let monitoring_check = client
-        .query(
-            "
-        SELECT COUNT(*) 
-        FROM fireup_data.import_audit 
-        WHERE operation_type = 'import'
-    ",
-            &[],
-        )
-        .await?;
-
-    let audit_count: i64 = monitoring_check[0].get(0);
-    assert!(audit_count > 0, "Should have monitoring/audit records");
+    // No audit-table assertion here either: see the note in
+    // test_end_to_end_backup_import_workflow. `fireup::monitoring` holds audit
+    // entries in memory and persists none of them.
 
     test_db.cleanup().await?;
     Ok(())
@@ -1148,9 +1131,8 @@ async fn test_mock_data_workflow() -> Result<()> {
             "
         SELECT table_name 
         FROM information_schema.tables 
-        WHERE table_schema = 'fireup_data' 
+        WHERE table_schema = 'fireup_data'
         AND table_type = 'BASE TABLE'
-        AND table_name != 'import_audit'
         ORDER BY table_name
     ",
             &[],

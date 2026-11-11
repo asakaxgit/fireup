@@ -196,8 +196,11 @@ SELECT * FROM fireup_data.cities LIMIT 10;
 ```
 
 `fireup_data.import_summary` used to be suggested here. The container never
-creates it, and the audit table it reads is never written — see
-[DEPLOYMENT.md](DEPLOYMENT.md#sql-is-mounted-but-never-runs).
+created it, nothing ever wrote the `fireup_data.import_audit` table it read,
+and both were deleted in SAK-257 — see
+[DEPLOYMENT.md](DEPLOYMENT.md#what-this-file-no-longer-claims). Import
+auditing does exist in `fireup::monitoring`, but it is held in memory and is
+not queryable from SQL.
 
 ### Using pgAdmin
 
