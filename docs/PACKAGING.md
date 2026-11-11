@@ -3,7 +3,6 @@
 Where Fireup ships, which names are ours, and which ones are taken. Recorded so
 the answers are not rediscovered — and not re-guessed — every release.
 
-Origin: SAK-260 (claim the names), SAK-258 (name clearance and decision).
 Brand and trademark policy is a separate concern; see `TRADEMARKS.md`.
 
 ## Decisions
@@ -38,7 +37,7 @@ taken by accident and the one hardest to live without.
 
 Plan of record: publish a **`0.0.0` reservation crate**, not the real `0.1.0`.
 The reservation holds the name while the OSS-core / private-cloud split
-(SAK-257) is still in flight, so that publishing a name does not also publish
+is still in flight, so that publishing a name does not also publish
 source that is still being sorted into public and private halves. The real crate
 replaces it when the split has settled and the published tarball is known to
 build on its own.
@@ -51,7 +50,8 @@ Prerequisites, none of which are satisfied by the current manifest:
   with `LICENSE` and the README.
 - `repository` and `readme` fields. Both are **absent** from `Cargo.toml` today.
   They are deliberately not added here: the repository URL is exactly what
-  SAK-257 may change, so adding it now would mean changing it twice.
+  the OSS-core / private-cloud split may change, so adding it now would mean
+  changing it twice.
 
 A published version cannot be deleted, only yanked, and yanking leaves the
 metadata in place. Everything above is checked before the first publish, not
@@ -63,7 +63,7 @@ A name that was free last week is not free today, so these are re-checked at the
 moment of claiming rather than read off this table.
 
 Two traps are worth knowing, because the first one already produced a wrong
-answer in SAK-258's notes:
+answer in the earlier name-clearance check:
 
 1. **RDAP does not cover `.io` or `.sh`.** Neither TLD has an entry in IANA's
    bootstrap registry, so `rdap.org` returns `404` for *every* name under them —
@@ -98,7 +98,7 @@ rather than a registration, which is why it is not the default choice.
 ## Open
 
 - **Domain not chosen.** `fireup.io` is unavailable, so the `.io` vs `.sh` choice
-  from SAK-258 no longer exists as stated. Awaiting a decision between the
-  verified-free candidates.
+  from the earlier name-clearance check no longer exists as stated. Awaiting a
+  decision between the verified-free candidates.
 - **`@fireup` npm scope unverified.** Needs a logged-in npm account.
 - **crates.io reservation not published.** Awaiting a publish token.
