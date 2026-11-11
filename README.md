@@ -197,7 +197,7 @@ SELECT * FROM fireup_data.cities LIMIT 10;
 
 `fireup_data.import_summary` used to be suggested here. The container never
 created it, nothing ever wrote the `fireup_data.import_audit` table it read,
-and both were deleted in SAK-257 — see
+and both were deleted in #120 — see
 [DEPLOYMENT.md](DEPLOYMENT.md#what-this-file-no-longer-claims). Import
 auditing does exist in `fireup::monitoring`, but it is held in memory and is
 not queryable from SQL.

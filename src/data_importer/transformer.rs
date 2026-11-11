@@ -526,7 +526,7 @@ impl DocumentTransformer {
             (DATASTORE_TYPE_KEY, PostgreSQLType::Text) => field("key_path"),
             // `NaN`, `Infinity` and `-Infinity` are valid `double precision`
             // input text. A `numeric` column also accepts `NaN`, so a schema
-            // generated before SAK-202 keeps working.
+            // generated before PR #62 keeps working.
             (DATASTORE_TYPE_DOUBLE, PostgreSQLType::DoublePrecision)
             | (DATASTORE_TYPE_DOUBLE, PostgreSQLType::Numeric(_, _)) => field("literal"),
             // Any tagged value is still faithfully representable as JSONB.

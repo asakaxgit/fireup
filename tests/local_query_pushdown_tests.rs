@@ -219,7 +219,7 @@ fn corpus(root: &str) -> Vec<Document> {
         ),
         // A timestamp outside years 0001–9999 is the one value whose encoding
         // is not the fixed width the byte-order comparison relies on. It is
-        // not here because the store refuses to write one (SAK-205) and
+        // not here because the store refuses to write one (#69) and
         // `MemoryStore` shares this corpus; it is inserted as raw SQL by
         // `seed_legacy_wide_timestamp`, which is how such a row really gets
         // into a database.
@@ -592,7 +592,7 @@ fn cases(root: &str) -> Vec<(&'static str, StructuredQuery)> {
                 }];
             }),
         ),
-        // Nested field paths, served since SAK-191. These are the cases a
+        // Nested field paths, served since PR #57. These are the cases a
         // translation that re-joined the segments into `"profile.plan"` would
         // get wrong — it would match nothing and drop every row.
         (
@@ -688,7 +688,7 @@ const LEGACY_ROW_ID: &str = "mallory";
 const LEGACY_ROW_SECONDS: i64 = 300_000_000_000;
 
 /// Add the one row the store can read but no longer write: a `joined` outside
-/// years 0001–9999, spelled the way a pre-SAK-205 build spelled it.
+/// years 0001–9999, spelled the way builds before #69 spelled it.
 ///
 /// Inserted as raw SQL because `value_json::encode` now refuses that value —
 /// which is also its real provenance, a database an older build wrote. It is
@@ -793,7 +793,7 @@ async fn pushdown_answers_every_query_exactly_as_a_full_scan_does() {
     remove_project(&url, &project).await;
 }
 
-/// A row a pre-SAK-205 build wrote stays readable, and stays out of the text
+/// A row a build predating #69 wrote stays readable, and stays out of the text
 /// comparison rather than being compared wrongly.
 ///
 /// Three separate things, all of which that one row used to break:

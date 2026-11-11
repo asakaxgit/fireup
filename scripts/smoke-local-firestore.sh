@@ -78,7 +78,7 @@ done
 
 echo "==> running the SDK smoke test"
 # Bounded, because "the SDK hangs" is a real failure mode and an unbounded run
-# reports it as a stalled CI job rather than as a red test. SAK-220 hit exactly
+# reports it as a stalled CI job rather than as a red test. PR #81 hit exactly
 # that: every check passed and then the process would not exit, because the
 # server kept a half-closed `Listen` stream open and `terminate()` waits on open
 # streams. The whole suite takes seconds; two minutes is slack for a cold

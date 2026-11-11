@@ -162,7 +162,7 @@ pub fn mint_id_token(user: &AuthUser, project_id: &str, now_seconds: i64) -> Str
 
 /// What is true of one sign-in rather than of the account it signed in to.
 ///
-/// SAK-168 read both of these off the stored account, which conflated two
+/// PR #48 read both of these off the stored account, which conflated two
 /// different things and was wrong in both directions: a custom-token sign-in
 /// overwrote the account's claims, and it reported the account's original
 /// provider instead of how the session had actually authenticated. Keeping them

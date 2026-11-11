@@ -25,7 +25,7 @@
 //! `cargo test` in milliseconds.
 //!
 //! `actionlint` is the richer tool for this job — it validates against GitHub's
-//! real schema, checks action references and expression syntax — and SAK-219
+//! real schema, checks action references and expression syntax — and PR #78
 //! now runs it from `actionlint.yml`, the one workflow in this repository that
 //! triggers automatically. This test remains the floor under it: it runs
 //! locally before the push, with no network and no third-party binary, and it
@@ -42,7 +42,7 @@
 //!
 //! Depending on it for a *test* also had a second cost the first version of
 //! this file did not anticipate: it put the one advisory in the tree that
-//! `deny.toml` was configured not to report (SAK-225), because the crate
+//! `deny.toml` was configured not to report (#83), because the crate
 //! arrives transitively. `saphyr` is the maintained YAML 1.2 parser, pure safe
 //! Rust, and it rejects the trailing-`::` document exactly the way libyaml did
 //! — which the negative control at the bottom of this file asserts rather than
@@ -296,4 +296,25 @@ fn the_trigger_key_is_found_under_either_yaml_version_spelling() {
     let quoted = Yaml::load_from_str(QUOTED).expect("parses");
     let quoted = quoted[0].as_mapping().expect("mapping");
     assert!(get(quoted, "on").is_some(), "quoted `\"on\":` not found");
+}
+
+/// The other half of a mutual pair with `public_repo_hygiene_tests`.
+///
+/// That target keeps the internal issue tracker out of a public tree: no ticket
+/// ids, no links to the tracker's host. Like every target in the `test` job of
+/// `ci.yml` it only runs because a step names it, and a guard that never runs
+/// reports nothing while still looking like a guard — so it cannot be the thing
+/// that checks it is still named.
+///
+/// It asserts `workflow_yaml_tests` is named here; this asserts the reverse.
+/// Deleting either step leaves the other one running to say so.
+#[test]
+fn ci_still_names_the_public_repo_hygiene_target() {
+    let ci = read(&workflows_dir().join("ci.yml"));
+    assert!(
+        ci.contains("--test public_repo_hygiene_tests"),
+        "ci.yml no longer names `public_repo_hygiene_tests`, so nothing checks \
+         that the published tree stays free of internal tracker ids and links. \
+         Restore the step in the `test` job."
+    );
 }

@@ -1,27 +1,27 @@
-# Cargo dependency licence audit (SAK-196)
+# Cargo dependency licence audit (#56)
 
-Recorded: 2026-11-08 (SAK-257). First recorded 2026-11-06 (SAK-196).
+Recorded: 2026-11-08 (#116). First recorded 2026-11-06 (#56).
 Command: `cargo license` against `Cargo.lock` / package metadata, re-run on
 branch `sak-257/remove-unused-code` (base `7d0f0f6` + this change).
 
-The inventory below is **regenerated**, not hand-adjusted, and the SAK-257 run
+The inventory below is **regenerated**, not hand-adjusted, and the #116 run
 moved it for two independent reasons — kept separate here because only the first
 is a decision:
 
-1. SAK-257 removed four declared dependencies that no code used
+1. PR #116 removed four declared dependencies that no code used
    (`crc32fast`, `dashmap`, `rayon`, `sqlparser`), taking nine crates out of the
    graph with their transitive closure.
 2. The snapshot had already drifted from the tree before that. Re-running the
    same command on `7d0f0f6` with nothing changed produced 228 crates, not the
    230 recorded here, and differed by 26 crate entries — `saphyr` and
-   `encoding_rs` arrived with SAK-225, the `hyper`/`http-body` family changed
-   shape in the SAK-220 `tonic` bump, and `zerocopy`, `rand` and
+   `encoding_rs` arrived with PR #83, the `hyper`/`http-body` family changed
+   shape in the PR #81 `tonic` bump, and `zerocopy`, `rand` and
    `tokio-io-timeout` left. Nothing enforces freshness: `deny.toml` gates the
    *policy* on every commit, and no check compares this list against the lock
    file, so the two can diverge silently for as long as nobody re-runs the
    command by hand.
 
-Since SAK-218 this audit is no longer the only record: [`deny.toml`](../../deny.toml)
+Since PR #77 this audit is no longer the only record: [`deny.toml`](../../deny.toml)
 encodes the same policy in a form CI enforces on every commit — see
 [How this is enforced](#how-this-is-enforced). The prose here remains the *why*;
 `deny.toml` is the *what*, and it is the file that fails the build.
@@ -35,7 +35,7 @@ Rationale (CTO):
 - Explicit patent grant suits a Firebase-compatible local data plane
 - Aligns with vendored public `googleapis` protos (Apache-2.0)
 - Dependency tree is fully permissive-compatible (see counts below)
-- Apache-2.0 §6 already withholds trademark rights; [`TRADEMARKS.md`](../../TRADEMARKS.md) states the carve-out explicitly (it was `brand/LICENSE` from SAK-196 until SAK-257 moved the assets to a private repo)
+- Apache-2.0 §6 already withholds trademark rights; [`TRADEMARKS.md`](../../TRADEMARKS.md) states the carve-out explicitly (it was `brand/LICENSE` from PR #56 until #114 moved the assets to a private repo)
 
 All 219 locked crates use permissive expressions. Most are MIT and/or
 Apache-2.0, with BSD/Zlib/BSL/Unicode/Unlicense appearing as alternative arms.
@@ -91,8 +91,8 @@ Zlib (1): foldhash
 
 ## How this is enforced
 
-Recorded: 2026-11-06 (SAK-218), cargo-deny 0.20.2 against the `Cargo.lock`
-committed in SAK-216.
+Recorded: 2026-11-06 (#77), cargo-deny 0.20.2 against the `Cargo.lock`
+committed in PR #75.
 
 The audit above was a point-in-time snapshot taken by hand. [`deny.toml`](../../deny.toml)
 turns it into a gate: the `deny` job in [`ci.yml`](../../.github/workflows/ci.yml)
@@ -119,19 +119,19 @@ Two entries worth knowing about:
 - **`LGPL-2.1-or-later` is deliberately absent.** It appears once, as one arm of
   `r-efi`'s `Apache-2.0 OR LGPL-2.1-or-later OR MIT`. Because that expression is
   a disjunction, allowing MIT satisfies it and cargo-deny resolves `r-efi` to
-  MIT, so no copyleft obligation enters the tree — the conclusion SAK-196 reached
+  MIT, so no copyleft obligation enters the tree — the conclusion PR #56 reached
   by hand, now checked by a tool. Keeping LGPL out of the list means a future
   crate that is *only* LGPL fails.
 
-`ISC` is mentioned in the SAK-196 prose above but carried by no crate in the
+`ISC` is mentioned in the PR #56 prose above but carried by no crate in the
 current lock file, so it is not in the list either.
 
-**`BSD-2-Clause`: decided in SAK-257, after SAK-225 deferred it.** SAK-225 found
+**`BSD-2-Clause`: decided in #116, after PR #83 deferred it.** PR #83 found
 `cargo deny` reporting `warning[license-not-encountered]` for `BSD-2-Clause` —
 no crate in the lock file carried it any more, the tonic 0.11 → 0.13 migration
 having dropped whatever did — and left the entry in place, on the grounds that
 removing an identifier from `allow` is a policy change and should not be decided
-in passing. SAK-257 decided it: the line is **deleted**.
+in passing. PR #116 decided it: the line is **deleted**.
 
 What that buys and what it costs, both ways round:
 
@@ -156,9 +156,9 @@ Fireup on those platforms pulls.
 
 `[advisories] unmaintained = "all"`.
 
-SAK-218 wrote `"workspace"` instead, with a reason that sounded right:
+PR #77 wrote `"workspace"` instead, with a reason that sounded right:
 "all" would make the job red for an abandoned crate buried four levels down
-that we have no way to replace. SAK-225 measured that setting against the tree
+that we have no way to replace. PR #83 measured that setting against the tree
 and found it hiding one real advisory on the day it was written:
 
 | | |
@@ -186,7 +186,7 @@ The two settings could not simply be swapped in one commit, and the reason is
 worth recording because it will recur: `deny.toml` lives in a stack of PRs that
 has not reached `main`, while `serde_yaml` was added to `main` after that stack
 branched. No single tree contained both. Raising the scope *and* accepting the
-advisory with an `ignore` entry — the shape SAK-218 used for h2 — was therefore
+advisory with an `ignore` entry — the shape PR #77 used for h2 — was therefore
 not available: in the only tree that has `deny.toml` the advisory does not
 exist, and `-D advisory-not-detected` fails an entry that matches nothing.
 Removing `serde_yaml` on `main` and raising the scope in the stack is green in
@@ -201,13 +201,13 @@ CI *greener*, so no run would ever report the regression.
 `[advisories] ignore` is empty. Every advisory the RustSec database reports
 fails the build.
 
-It was not always empty. SAK-218 accepted one entry with a review date of
+It was not always empty. PR #77 accepted one entry with a review date of
 2027-02-06: `RUSTSEC-2026-0258`, `h2` 0.3.27 accepting and queueing unbounded
 empty DATA frames (low severity), reached as
 `fireup -> tonic 0.11 -> axum 0.6 -> hyper 0.14 -> h2 0.3.27`. The fix needed
 `h2 >= 0.4.16`, so hyper 1.x, so tonic >= 0.12 and prost 0.13 — and `Cargo.toml`
 pinned tonic 0.11 on purpose, to keep one prost version across the data plane and
-the export parser. SAK-220 did that migration (tonic 0.13 / prost 0.13, which
+the export parser. PR #81 did that migration (tonic 0.13 / prost 0.13, which
 pulls hyper 1.12 and h2 0.4.20, still one prost version) and deleted the entry in
 the same change.
 
@@ -236,7 +236,7 @@ was run against the committed configuration and then reverted:
 | Add a `RUSTSEC-2020-0001` entry that matches nothing | `error[advisory-not-detected]` — `advisories FAILED`, exit 1 (a *warning*, exit 0, without `-D advisory-not-detected`) |
 | Remove `"MIT"` from `[licenses] allow` | 47 `error[rejected]` diagnostics — `licenses FAILED` |
 
-SAK-225 added four more, because the `unmaintained` scope is a claim about
+PR #83 added four more, because the `unmaintained` scope is a claim about
 crates that are not in this tree yet and a passing run says nothing about it.
 Each adds a dev dependency to `Cargo.toml` and re-resolves before running:
 
@@ -245,7 +245,7 @@ Each adds a dev dependency to `Cargo.toml` and re-resolves before running:
 | The committed config, unmodified | `advisories ok`, exit 0 |
 | Add `serde_yaml = "0.9"` — the dependency `main` carries today, which this stack will merge into | `error[unmaintained]: unsafe-libyaml is unmaintained` / `RUSTSEC-2024-0449` — `advisories FAILED`, exit 1 |
 | The same tree with `unmaintained = "workspace"` restored | `advisories ok`, exit 0 — **the blind spot itself, reproduced** |
-| Add `saphyr = "0.3"` — the replacement parser, i.e. `main` after SAK-225 | `advisories ok`, exit 0 |
+| Add `saphyr = "0.3"` — the replacement parser, i.e. `main` after PR #83 | `advisories ok`, exit 0 |
 | Add an `ignore` entry for `RUSTSEC-2024-0449` to this tree | `error[advisory-not-detected]`: *no crate matched advisory criteria* — exit 1 |
 
 The third row is the one to keep: the same tree, the same advisory, the same

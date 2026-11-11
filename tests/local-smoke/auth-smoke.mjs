@@ -669,7 +669,7 @@ const main = async () => {
   // The SDK checks above only prove the call failed. The fidelity matrix
   // promises a *shape* — 501 with a message naming the gap — and only a direct
   // REST call can see the status code. Both of these answered the wrong one
-  // until SAK-224: `accounts:batchCreate` fell into the wrong-method handler
+  // until PR #82: `accounts:batchCreate` fell into the wrong-method handler
   // and said "takes POST, not POST", and `projects/{p}:createSessionCookie`
   // parsed its custom-method colon into the project id and 404'd.
   await check('the unimplemented admin paths answer 501 and name the gap', async () => {

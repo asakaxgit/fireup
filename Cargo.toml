@@ -50,7 +50,7 @@ prost-types = "0.13"
 # Not on tonic 0.14 yet: 0.14 moved the prost codec out into separate
 # `tonic-prost` / `tonic-prost-build` crates, which is a larger change than this
 # one needs. 0.13 is what pulls hyper 1.x and h2 >= 0.4.16, which is the point
-# (see SAK-220 / RUSTSEC-2026-0258).
+# (see PR #81 / RUSTSEC-2026-0258).
 tonic = "0.13"
 tokio-stream = { version = "0.1", features = ["net"] }
 
@@ -79,7 +79,7 @@ tonic-build = { version = "0.13", default-features = false, features = ["prost",
 # version). `saphyr` is the maintained YAML 1.2 parser in safe Rust, and
 # `serde_yaml_ng` is not an alternative here because it depends on the same
 # `unsafe-libyaml`. The test needs a document to walk rather than a struct to
-# deserialize, so plain `saphyr` and not `serde-saphyr`. See SAK-225.
+# deserialize, so plain `saphyr` and not `serde-saphyr`. See PR #83.
 saphyr = "0.3"
 tempfile = "3.8"
 tokio-test = "0.4"

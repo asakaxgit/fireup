@@ -390,7 +390,7 @@ async fn datastore_types_map_to_faithful_postgres_types() {
         "point",
         "a geo point must not be dropped from the schema"
     );
-    // SAK-202: `numeric` is decimal arbitrary precision. It has no signed zero
+    // PR #62: `numeric` is decimal arbitrary precision. It has no signed zero
     // and does not round-trip every binary64 value through its decimal text
     // form, which is what a Datastore double actually needs.
     assert_eq!(
@@ -460,7 +460,7 @@ async fn primary_key_is_not_indexed_twice() {
 }
 
 // ---------------------------------------------------------------------------
-// Edge-case fixtures (SAK-195)
+// Edge-case fixtures (#60)
 //
 // `tests/export_fidelity_tests.rs` asserts these properties against the
 // in-memory schema. These two tests hand the same schema to PostgreSQL, which

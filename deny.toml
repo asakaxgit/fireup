@@ -26,7 +26,7 @@
 # `Cargo.lock` and that anyone building Fireup on those platforms would pull.
 # Checking every target is the stricter reading and needs no maintenance.
 #
-# That was prose and nothing else until SAK-235, which measured it and found it
+# That was prose and nothing else until PR #92, which measured it and found it
 # both correct and unenforced. `dependency_pin_tests` now asserts the key is
 # absent or empty, because adding it is a one-line edit that makes this job
 # *greener*. Counted with `allow = []` rather than `cargo deny list`:
@@ -46,7 +46,7 @@
 # way on the licence side (4 / 0 / 4).
 #
 # `[graph] exclude` narrows this too (`exclude = ["windows-sys"]` is 217 -> 206)
-# and is deliberately not guarded, for the reason SAK-234 gave: it names the
+# and is deliberately not guarded, for the reason PR #91 gave: it names the
 # crates it excuses, so it reads as a decision in the diff.
 all-features = true
 
@@ -56,10 +56,10 @@ all-features = true
 # setting in this file that can be loosened without loosening any policy: every
 # `deny` stays `deny`, and the database simply stops mentioning the thing.
 #
-# SAK-228 measured what happens when the database cannot be *fetched* — an
+# PR #86 measured what happens when the database cannot be *fetched* — an
 # unresolvable host, a 404 repository, `--offline` with no cache — and all three
 # fail closed. What was not measured was a database that fetches fine and has
-# been edited. Measured now (SAK-236) against local forks of advisory-db served
+# been edited. Measured now (#92) against local forks of advisory-db served
 # over `git daemon`, with the tree held fixed by `shlex = "=1.2.0"`
 # (RUSTSEC-2024-0006) and only this key moving:
 #
@@ -96,7 +96,7 @@ yanked = "deny"
 # the `deny` job in `.github/workflows/ci.yml`, and no test in this repository
 # reads that file — `dependency_pin_tests` reads `deny.toml`, and
 # `fidelity_matrix_tests` reads `coverage.yml`. Measured on this tree
-# (SAK-229): with the flag deleted from `ci.yml` and a stale entry in `ignore`,
+# (#87): with the flag deleted from `ci.yml` and a stale entry in `ignore`,
 # the step printed `warning[advisory-not-detected]` and exited **0**, while the
 # guard tests stayed green. With this line, the same deletion exits 1. The
 # enforcement now lives in the same file as the policy it enforces, and cannot
@@ -109,7 +109,7 @@ unused-ignored-advisory = "deny"
 # fallback. Without this line, cargo-deny has no age limit at all: given
 # `--offline` or `--frozen` it uses whatever is in `$CARGO_HOME/advisory-dbs`,
 # however old, and prints `advisories ok` with no warning. Measured on this
-# config (SAK-228): a database aged 30 days, checked with `--offline`, exited 0
+# config (#86): a database aged 30 days, checked with `--offline`, exited 0
 # and said nothing. Every other way of not getting a fresh database already
 # fails closed — an unresolvable `db-urls` host, a 404 repository, and
 # `--offline` with no cache at all each exit 1 — so the only way to run this
@@ -133,7 +133,7 @@ maximum-db-staleness = "P7D"
 # This said "workspace" first, with the reasoning that "all" would make the job
 # red for an abandoned crate buried four levels down that we have no way to
 # replace. That reasoning was wrong in a way that was measured rather than
-# argued (SAK-225). "workspace" hid exactly one real advisory the day it was
+# argued (#83). "workspace" hid exactly one real advisory the day it was
 # written: RUSTSEC-2024-0449, `unsafe-libyaml` 0.2.11 — libyaml's C translated
 # by c2rust, repository archived read-only in March 2024, no patched version —
 # reached as `fireup -> (dev) serde_yaml 0.9.34+deprecated -> unsafe-libyaml`.
@@ -143,7 +143,7 @@ maximum-db-staleness = "P7D"
 #
 # The "no way to replace it" premise is what did not hold. We could not replace
 # `unsafe-libyaml`, but we never depended on it on purpose — we depended on
-# `serde_yaml`, and replacing *that* (SAK-225 swapped it for `saphyr`) removed
+# `serde_yaml`, and replacing *that* (PR #83 swapped it for `saphyr`) removed
 # the crate entirely. A transitive unmaintained advisory is a question about our
 # own direct dependency, which is a thing we can act on, which is a thing worth
 # being told about.
@@ -158,10 +158,10 @@ unmaintained = "all"
 # more force. `unsound` is the sibling scope enum of `unmaintained` above — the
 # same "all" / "workspace" / "transitive" / "none" values, not a lint level —
 # and this file did not set it, so it ran at the "workspace" default and a
-# transitive unsound advisory was reported nowhere. SAK-225 found that hole in
+# transitive unsound advisory was reported nowhere. PR #83 found that hole in
 # `unmaintained`; it was still open one key to the left.
 #
-# Measured (SAK-236) with `anstream` 0.6.7 — RUSTSEC-2024-0404, unsound, affects
+# Measured (#92) with `anstream` 0.6.7 — RUSTSEC-2024-0404, unsound, affects
 # `< 0.6.8` — placed in a purely transitive position by pinning `clap = "=4.5.0"`,
 # giving `fireup -> clap 4.5.0 -> clap_builder 4.5.0 -> anstream 0.6.7` with no
 # direct edge (`cargo tree --locked -i anstream`). Tree held fixed, only this key
@@ -197,12 +197,12 @@ unsound = "all"
 # There was one entry here: RUSTSEC-2026-0258 ("h2 unbounded empty DATA frames"),
 # reached through the tonic 0.11 pin as
 # `fireup -> tonic 0.11 -> axum 0.6 -> hyper 0.14 -> h2 0.3.27`. The fix needed
-# h2 >= 0.4.16, so hyper 1.x, so a tonic/prost major bump; SAK-220 did that
+# h2 >= 0.4.16, so hyper 1.x, so a tonic/prost major bump; PR #81 did that
 # migration (tonic 0.13 / prost 0.13, h2 0.4.20) and removed the entry with it.
 #
 # RUSTSEC-2024-0449 (`unsafe-libyaml` unmaintained) is deliberately *not* here
-# either, and that was the choice SAK-225 had to make. Accepting it with an
-# `ignore` entry was the obvious move — it is the shape SAK-218 used for h2 —
+# either, and that was the choice PR #83 had to make. Accepting it with an
+# `ignore` entry was the obvious move — it is the shape PR #77 used for h2 —
 # but it is not available: `deny.toml` lives in this stack and `serde_yaml`
 # lives on `main`, so in the only tree that has this file the advisory does not
 # exist, and `-D advisory-not-detected` fails on an entry that matches nothing.
@@ -222,7 +222,7 @@ ignore = []
 
 [licenses]
 # This list is the machine-enforced form of the decision already recorded in
-# `docs/licenses/CARGO_LICENSE_AUDIT.md` (SAK-196): Fireup ships under
+# `docs/licenses/CARGO_LICENSE_AUDIT.md` (#56): Fireup ships under
 # Apache-2.0 and accepts only permissive dependencies. Every identifier below
 # actually appears in the current `Cargo.lock`; nothing is here speculatively,
 # so adding one is a deliberate policy step with a diff to point at.
@@ -246,12 +246,12 @@ allow = [
 # Also absent: ISC. `CARGO_LICENSE_AUDIT.md` mentions it in prose, but no crate
 # in the current lock file carries it.
 #
-# Also absent since SAK-257: BSD-2-Clause. It was last reachable through
+# Also absent since #116: BSD-2-Clause. It was last reachable through
 # `zerocopy` / `zerocopy-derive` ("Apache-2.0 OR BSD-2-Clause OR MIT"), which
 # are no longer in `Cargo.lock`, so the entry allowed a licence no crate
 # carried — exactly what the note above says this list does not do. Measured
 # rather than read: `cargo deny --locked check licenses -D license-not-encountered`
-# named this line and only this line, on `main` as well as on the SAK-257 tree,
+# named this line and only this line, on `main` as well as on the #116 tree,
 # and passes with it deleted. Note that the entry was never load-bearing even
 # when `zerocopy` was present: that expression is a disjunction, so "MIT"
 # already satisfied it.
@@ -264,7 +264,7 @@ confidence-threshold = 0.93
 # about what its test suite pulls in.
 #
 # That is a real hole rather than a theoretical one, and it was measured rather
-# than argued (SAK-234). With `smartstring 1.0.1` added to `[dev-dependencies]` —
+# than argued (#91). With `smartstring 1.0.1` added to `[dev-dependencies]` —
 # MPL-2.0, a copyleft licence this allow list deliberately excludes, and reached
 # only as `(dev) fireup`, confirmed with `cargo tree -i` — the three arms were:
 #
@@ -293,13 +293,13 @@ include-dev = true
 # `dependency_pin_tests` asserts two things here and not one. `exclude-dev = true`
 # drops dev dependencies from the graph before the licence check ever sees them,
 # so the hole reopens with `include-dev = true` still sitting here unchanged.
-# Measured on the same tree (SAK-234):
+# Measured on the same tree (#91):
 #
 #   `include-dev = true`                    exit 4
 #   + `[graph] exclude-dev = true`          exit 0   ← hole
 #   + `[graph] exclude-dev = false`         exit 4
 #
-# Same shape as `yanked` / `disable-yank-checking` (SAK-231): the value of the
+# Same shape as `yanked` / `disable-yank-checking` (#89): the value of the
 # policy key says nothing on its own about whether the policy runs.
 #
 # `[graph] exclude = ["smartstring"]` silences it too (measured: exit 0), and the
@@ -315,10 +315,10 @@ include-dev = true
 # so the line above has to be written down, while `include-build` defaults to
 # `true`, so the gate is already correct with nothing here. Writing
 # `include-build = true` out by hand would restate the default and add one more
-# line a future edit can flip. Same call SAK-235 made for `[graph] targets`.
+# line a future edit can flip. Same call PR #92 made for `[graph] targets`.
 #
 # What it would cost to flip it, counted with `allow = []` rather than with
-# `cargo deny list` (SAK-238):
+# `cargo deny list` (#94):
 #
 #   no key (what ships)        217 crates
 #   `include-build = true`     217 crates
@@ -365,7 +365,7 @@ include-dev = true
 # socket2, syn, windows-sys) because different transitive dependencies pin
 # different lines. Denying that today would make this job red on the first
 # commit for something no Fireup change caused, which is the failure mode
-# SAK-206 called out when it left `fmt`/`clippy` out of CI. Promote to "deny"
+# PR #72 called out when it left `fmt`/`clippy` out of CI. Promote to "deny"
 # once the duplicates are actually down to zero.
 multiple-versions = "warn"
 wildcards = "deny"
@@ -385,12 +385,12 @@ deny = []
 #
 # Everything else in this file reasons about *source*: its licence, its
 # advisories, its version, the registry it came from. None of that says anything
-# about an ELF binary sitting in a `.crate` tarball, and until SAK-237 this table
+# about an ELF binary sitting in a `.crate` tarball, and until PR #93 this table
 # did not exist, so cargo-deny never looked at build scripts or bundled
 # executables at all.
 #
 # Two keys and not one, because `executables` alone is inert. Measured on this
-# tree (SAK-237), varying only this table:
+# tree (#93), varying only this table:
 #
 #   no `[bans.build]` (what shipped)      exit 0   —            <- the hole
 #   `executables = "deny"` alone          exit 0   0 findings   <- still inert
@@ -401,8 +401,8 @@ deny = []
 # workspace — and Fireup bundles no binaries of its own, so the scan finds
 # nothing and reports success. Writing `executables = "deny"` on its own looks
 # like enforcement and enforces nothing. Same two-keys-one-fact shape as
-# `yanked` / `disable-yank-checking` (SAK-231) and `include-dev` /
-# `exclude-dev` (SAK-234), which is why `dependency_pin_tests` asserts both.
+# `yanked` / `disable-yank-checking` (#89) and `include-dev` /
+# `exclude-dev` (#91), which is why `dependency_pin_tests` asserts both.
 executables = "deny"
 include-dependencies = true
 # The exemption is pinned to the path *and* the bytes, not to a glob.
@@ -446,7 +446,7 @@ include-dependencies = true
 #
 # A bypass entry for a crate that has left the tree is only
 # `warning[unmatched-bypass]` and exit 0 (measured). It is left as a warning for
-# the reason `[licenses] unused-allowed-license` is left alone (SAK-234): a stale
+# the reason `[licenses] unused-allowed-license` is left alone (#91): a stale
 # entry here exempts nothing, and promoting it would turn an ordinary dependency
 # removal red.
 bypass = [
@@ -487,7 +487,7 @@ bypass = [
 #
 # `include-archives = true` — exit 2, 9 more: the `windows_*` `.a`/`.lib` files
 #   and `wit-bindgen`'s `libwit_bindgen_cabi.a`. Nothing links them here; they are
-#   in the graph only because SAK-235 deliberately left `[graph] targets` unset,
+#   in the graph only because PR #92 deliberately left `[graph] targets` unset,
 #   so this one follows from that decision rather than being its own.
 #
 # `include-workspace = true` — exit 0, no change. Fireup ships no binaries.
@@ -496,9 +496,9 @@ bypass = [
 # on the executable scan — they only touch duplicate-version analysis),
 # `[graph] exclude-dev` (no effect; a build-dependency is not a dev dependency),
 # and `[graph] targets = ["x86_64-unknown-linux-gnu"]` (no effect — still all
-# eight, so this guard is independent of SAK-235's). `[graph] exclude` does
+# eight, so this guard is independent of PR #92's). `[graph] exclude` does
 # narrow it, 8 -> 7, and is deliberately not forbidden here for the same reason
-# SAK-234 and SAK-235 left it alone: it names the crate it excuses.
+# PR #91 and PR #92 left it alone: it names the crate it excuses.
 
 [sources]
 # An entry in `allow-registry` that nothing in the tree comes from is an error,
@@ -506,7 +506,7 @@ bypass = [
 # allow list, rather than leaving that entirely to a test.
 #
 # Widening `allow-registry` is the one edit in this file that the tool is
-# otherwise silent about. Measured on this tree (SAK-234), with a second entry
+# otherwise silent about. Measured on this tree (#91), with a second entry
 # `https://example.invalid/index` added:
 #
 #   today's config (no key)                 exit 0   `warning[unmatched-source]`
@@ -517,22 +517,22 @@ bypass = [
 # red in the second comes from the extra entry and not from the key.
 #
 # Placement is the point. `dependency_pin_tests` already fails on a second
-# registry here (SAK-230), and that is the stronger check — it fails even once a
+# registry here (#88), and that is the stronger check — it fails even once a
 # crate really does come from the new registry, where `unmatched-source` by
 # definition stops firing at that moment. But a test can be stopped from running:
-# deleting one step from `ci.yml` silenced the whole file for a while (SAK-221),
+# deleting one step from `ci.yml` silenced the whole file for a while,
 # and nothing in the repository noticed. This key is read by the `deny` job
 # itself, so the job cannot be green while ignoring it. Same reasoning as moving
-# `-D advisory-not-detected` into `unused-ignored-advisory` (SAK-229). The two
+# `-D advisory-not-detected` into `unused-ignored-advisory` (#87). The two
 # overlap on purpose; neither is redundant.
 #
 # The licence-side twin, `[licenses] unused-allowed-license`, is deliberately
 # *not* set, and the asymmetry is intentional. An unused `allow` entry there is
 # "nothing needed this permission this week", and identifiers legitimately come
 # and go as dependencies are swapped. It needs no mutation to demonstrate:
-# `BSD-2-Clause` is unused on this tree right now, because SAK-220 removed the
+# `BSD-2-Clause` is unused on this tree right now, because PR #81 removed the
 # `zerocopy` that carried it, and setting that key makes the shipping tree exit 4
-# with `error[license-not-encountered]` (measured, SAK-234). It would have turned
+# with `error[license-not-encountered]` (measured, PR #91). It would have turned
 # an ordinary, correct dependency migration red. The `warning[license-not-encountered]`
 # this check still prints is that exact case, left as a warning on purpose.
 #

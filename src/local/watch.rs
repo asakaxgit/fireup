@@ -927,7 +927,7 @@ pub fn listen(
                     // waiting for.
                     //
                     // Keeping the targets live instead — which is legal bidi
-                    // gRPC, and what this did until SAK-220 — wedges a real
+                    // gRPC, and what this did until PR #81 — wedges a real
                     // client: `terminate()` closes the HTTP/2 session
                     // gracefully, which waits for open streams, so a Node
                     // process that ever called `onSnapshot()` would never exit.
