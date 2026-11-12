@@ -7,7 +7,9 @@ name: CI
 # not come up": the `test` job runs with nothing but a Rust toolchain — no
 # PostgreSQL, no Node, no Docker, no network. The suites that need those live in
 # `local_firestore.yml` (the official-SDK conformance layer) and
-# `integration_tests.yml`, which stay manual for now.
+# `integration_tests.yml`, which stay manual for now — except the official-SDK
+# smoke suites, which the `fidelity` job at the bottom runs on every pull request
+# as a regression gate.
 #
 # The `deny` job is the one exception to "no network": it fetches the RustSec
 # advisory database, which is the whole point of it. It is a separate job rather
@@ -208,3 +210,87 @@ jobs:
           cargo-deny --locked check \
             -D advisory-not-detected \
             advisories licenses bans sources
+
+  # The fidelity regression gate: every official-SDK smoke suite (Firestore,
+  # Auth, Datastore) against both stores, compared with
+  # tests/smoke-gate/baseline.json. It fails when a check that passes on `main`
+  # fails or goes missing, and names the check; a new check, or one that newly
+  # passes, never fails it. Updating the baseline is a reviewed diff — see
+  # "Fidelity regression gate" in docs/local/README.md.
+  #
+  # The exception to this file's "no external services" rule, kept to its own
+  # job so the `test` job stays that way. It needs the Google client libraries
+  # from npm and a PostgreSQL service container, because a durable store that
+  # disagrees with the in-memory one is exactly the regression to catch.
+  #
+  # This job is a required status check on `main`, by its `name:` below — so
+  # renaming it unbinds the requirement. And neither the job nor the gate step
+  # may carry an `if:` or `continue-on-error:` that switches it off: a skipped
+  # job satisfies a required check. `fidelity_matrix_tests`, in the `test` job,
+  # fails if either appears.
+  fidelity:
+    name: fidelity smoke gate (official SDKs)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: fireup_fidelity
+          POSTGRES_USER: fireup
+          POSTGRES_PASSWORD: fireup_ci_password
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          cargo --version && rustc --version
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            tests/local-smoke/package-lock.json
+            tests/local-smoke-datastore/package-lock.json
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-fidelity-${{ hashFiles('Cargo.lock') }}
+
+      # `--locked` here, once, because the smoke scripts build without it. With
+      # the binary already built from the pinned lock file, their own
+      # `cargo build` has nothing left to resolve.
+      - name: Build
+        run: cargo build --locked --bin fireup
+
+      - name: Install the official client libraries
+        run: |
+          npm ci --no-audit --no-fund --prefix tests/local-smoke
+          npm ci --no-audit --no-fund --prefix tests/local-smoke-datastore
+
+      # The comparison rule and the baseline's coverage of the suite runs,
+      # before the minutes-long part.
+      - name: Gate rule
+        run: node --test tests/smoke-gate/compare.test.mjs
+
+      - name: Fidelity regression gate
+        env:
+          FIREUP_SMOKE_POSTGRES_URL: postgresql://fireup:fireup_ci_password@localhost:5432/fireup_fidelity
+        run: scripts/fidelity-smoke-gate.sh
