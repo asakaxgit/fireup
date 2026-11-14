@@ -122,6 +122,12 @@ mod tests {
             refused("mysql://fireup@127.0.0.1/fireup_test").is_some(),
             "a URL the store parser rejects is refused"
         );
+        for ambiguous in [
+            "postgresql://fireup:secret@127.0.0.1:5433/fireup_test?dbname=fireup_test&database=host_app",
+            "postgresql://fireup:secret@127.0.0.1:5433/fireup_test?user=fireup&username=host_app",
+        ] {
+            assert!(refused(ambiguous).is_some(), "two spellings of one setting: {ambiguous}");
+        }
         assert_eq!(
             refused("postgresql://fireup:fireup_dev_password@localhost:5433/fireup_test"),
             None,

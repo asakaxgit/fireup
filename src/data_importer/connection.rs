@@ -157,6 +157,17 @@ fn parse_query(query: &str) -> Result<HashMap<String, String>, FireupError> {
         params.insert(key, value);
     }
 
+    // Both spellings of one setting would leave the winner to HashMap order,
+    // so two parses of the same URL could connect to different places.
+    for (a, b) in [("dbname", "database"), ("user", "username")] {
+        if params.contains_key(a) && params.contains_key(b) {
+            return Err(config_error(
+                format!("Connection parameters '{a}' and '{b}' are both set"),
+                vec![format!("'{a}' and '{b}' mean the same thing; pass only one")],
+            ));
+        }
+    }
+
     Ok(params)
 }
 
