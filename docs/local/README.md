@@ -723,8 +723,10 @@ contract: `scripts/smoke-local-auth.sh` drives this surface with
 client, `signInWithEmailAndPassword`, `signInWithCustomToken`,
 `signInAnonymously`, token refresh, `sendPasswordResetEmail`,
 `verifyPasswordResetCode`, `confirmPasswordReset`, `sendEmailVerification`,
-`applyActionCode`, `sendSignInLinkToEmail`, `isSignInWithEmailLink`, and
-`signInWithEmailLink`. See [Tests](#tests).
+`applyActionCode`, `sendSignInLinkToEmail`, `isSignInWithEmailLink`,
+`signInWithEmailLink`, `verifyBeforeUpdateEmail`, and `deleteUser`. It also
+calls each `/emulator/` control endpoint above directly and follows a minted
+link to `/emulator/action`, the way a developer would. See [Tests](#tests).
 
 That smoke test is worth its upkeep: it caught a bug Fireup's own tests could
 not. The client SDK's email-link parser requires an `apiKey` parameter in the
@@ -846,9 +848,11 @@ These answer `501` with a message naming the gap, not a vague `404`:
 - **Production key material.** Nothing generates or ships a signing key.
 - **Sending email.** See above — the codes are real, the delivery is not.
 
-`scripts/smoke-local-auth.sh` asserts that the batch-write and session-cookie
-gaps *fail cleanly* — a mapped SDK error rather than a 500, a hang, or a
-half-applied write — so a gap stays a gap rather than becoming a surprise. If
+`scripts/smoke-local-auth.sh` asserts that the phone, `v2`, federated,
+batch-write, and session-cookie gaps *fail cleanly* — `501` with a message
+naming the gap, a mapped SDK error where an SDK call reaches them, and no
+account or code created on the way out — so a gap stays a gap rather than
+becoming a surprise. If
 one of them is implemented later, that check fails and says so. The
 out-of-band gap used to be in that list; it is now a set of real assertions
 above it, which is what that check is for.

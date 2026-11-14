@@ -1,14 +1,4 @@
 {
   "$comment": "Fidelity-matrix rows (tests/conformance/matrix.json) that no smoke check proves yet, each with the reason none does. tests/smoke-gate/matrix-coverage.mjs fails the gate for any row that is neither proven by a passing tagged smoke check nor listed here; for an entry whose status no longer matches the matrix; and for an entry whose row has since gained a passing check. So a row leaves this list only when a check that proves it lands. See \"Fidelity matrix coverage\" in docs/local/README.md.",
-  "rows": [
-    { "id": "auth.delete", "status": "served", "reason": "No auth smoke check exercises this row yet." },
-    { "id": "auth.emulator-action-route", "status": "served", "reason": "No auth smoke check exercises this row yet." },
-    { "id": "auth.emulator-clear-accounts", "status": "served", "reason": "No auth smoke check exercises this row yet." },
-    { "id": "auth.emulator-clear-oob-codes", "status": "served", "reason": "No auth smoke check exercises this row yet." },
-    { "id": "auth.emulator-config", "status": "served", "reason": "No auth smoke check exercises this row yet." },
-    { "id": "auth.federated-providers", "status": "unimplemented", "reason": "No auth smoke check exercises this row yet." },
-    { "id": "auth.flow-verify-and-change-email", "status": "served", "reason": "No auth smoke check exercises this row yet." },
-    { "id": "auth.mfa-and-tenants", "status": "unimplemented", "reason": "No auth smoke check exercises this row yet." },
-    { "id": "auth.phone", "status": "unimplemented", "reason": "No auth smoke check exercises this row yet." }
-  ]
+  "rows": []
 }

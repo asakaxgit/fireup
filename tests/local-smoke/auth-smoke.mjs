@@ -28,6 +28,8 @@ import {
   applyActionCode,
   confirmPasswordReset,
   connectAuthEmulator,
+  deleteUser,
+  fetchSignInMethodsForEmail,
   getAuth as getClientAuth,
   isSignInWithEmailLink,
   sendEmailVerification,
@@ -37,6 +39,7 @@ import {
   signInWithCustomToken,
   signInWithEmailAndPassword,
   signInWithEmailLink,
+  verifyBeforeUpdateEmail,
   verifyPasswordResetCode,
 } from 'firebase/auth'
 
@@ -458,6 +461,23 @@ const main = async () => {
     await expectAuthCode('auth/user-not-found', () => adminAuth.deleteUser('never-existed'))
   }, { served: ['auth.admin-delete'] })
 
+  await check('client deleteUser() removes the signed-in account', async () => {
+    const user = await adminAuth.createUser({ email: 'self-delete@example.com', password: 'correct-horse' })
+    try {
+      const credential = await signInWithEmailAndPassword(clientAuth, 'self-delete@example.com', 'correct-horse')
+      // The client SDK sends this with the session's idToken; there is no uid
+      // in the request, so the server has to find the account from the token.
+      await deleteUser(credential.user)
+
+      await expectAuthCode('auth/user-not-found', () => adminAuth.getUser(user.uid))
+      await expectAuthCode('auth/user-not-found', () =>
+        signInWithEmailAndPassword(clientAuth, 'self-delete@example.com', 'correct-horse'),
+      )
+    } finally {
+      await adminAuth.deleteUser(user.uid).catch(() => {})
+    }
+  }, { served: ['auth.delete'] })
+
   // ----- out-of-band email flows -------------------------------------------
   //
   // Nothing is mailed, so the link is read back from the documented local
@@ -622,6 +642,124 @@ const main = async () => {
     )
   }, { served: ['auth.sendOobCode', 'auth.resetPassword'] })
 
+  await check('client verifyBeforeUpdateEmail() + applyActionCode() moves the account to the new address', async () => {
+    const user = await adminAuth.createUser({ email: 'old-address@example.com', password: 'correct-horse' })
+    try {
+      const credential = await signInWithEmailAndPassword(clientAuth, 'old-address@example.com', 'correct-horse')
+      await credential.user.getIdToken()
+
+      await verifyBeforeUpdateEmail(credential.user, 'new-address@example.com')
+      // Nothing changes until the link is followed: the new address is unproven.
+      assert.equal((await adminAuth.getUser(user.uid)).email, 'old-address@example.com')
+
+      const codes = await pendingOobCodes()
+      const pending = codes.filter((entry) => entry.requestType === 'VERIFY_AND_CHANGE_EMAIL').pop()
+      assert.ok(pending, `no pending VERIFY_AND_CHANGE_EMAIL: ${JSON.stringify(codes)}`)
+
+      await applyActionCode(clientAuth, pending.oobCode)
+
+      const changed = await adminAuth.getUser(user.uid)
+      assert.equal(changed.email, 'new-address@example.com')
+      assert.equal(changed.emailVerified, true, 'following the link proves the new mailbox')
+      await signInWithEmailAndPassword(clientAuth, 'new-address@example.com', 'correct-horse')
+      await expectAuthCode('auth/user-not-found', () =>
+        signInWithEmailAndPassword(clientAuth, 'old-address@example.com', 'correct-horse'),
+      )
+
+      // An email change is a credential change: the session from before it
+      // must not mint new ID tokens.
+      await assert.rejects(
+        () => credential.user.getIdToken(true),
+        (error) => {
+          assert.ok(
+            typeof error.code === 'string' && error.code.startsWith('auth/'),
+            `expected a mapped auth/* error, got ${error.code}: ${error.message}`,
+          )
+          return true
+        },
+      )
+
+      await expectAuthCode('auth/invalid-action-code', () => applyActionCode(clientAuth, pending.oobCode))
+    } finally {
+      await adminAuth.deleteUser(user.uid)
+    }
+  }, { served: ['auth.sendOobCode', 'auth.update', 'auth.flow-verify-and-change-email'] })
+
+  // The links above are read out of the listing and finished through the SDK.
+  // A developer clicks them instead, which lands on `GET /emulator/action`.
+  await check('following an emailed link applies a verification and leaves a reset pending', async () => {
+    const user = await adminAuth.createUser({
+      email: 'clicker@example.com',
+      password: 'correct-horse',
+      emailVerified: false,
+    })
+    try {
+      const credential = await signInWithEmailAndPassword(clientAuth, 'clicker@example.com', 'correct-horse')
+      await sendEmailVerification(credential.user)
+      const verify = await pendingOobCodeFor('clicker@example.com', 'VERIFY_EMAIL')
+
+      const clicked = await fetch(verify.oobLink)
+      const landing = await clicked.json()
+      assert.equal(clicked.status, 200, `the verification link answered ${clicked.status}: ${JSON.stringify(landing)}`)
+      assert.equal(landing.applied, true)
+      assert.equal(landing.mode, 'verifyEmail')
+      assert.equal((await adminAuth.getUser(user.uid)).emailVerified, true, 'clicking a verification link applies it')
+
+      // Clicking spent the code, the same as applyActionCode would have.
+      const again = await fetch(verify.oobLink)
+      const refused = await again.json()
+      assert.equal(again.status, 400)
+      assert.match(refused.error.message, /^INVALID_OOB_CODE/)
+
+      // A reset link cannot be finished by a click — it needs the new password —
+      // so the route reports it and the code stays redeemable.
+      await sendPasswordResetEmail(clientAuth, 'clicker@example.com')
+      const reset = await pendingOobCodeFor('clicker@example.com', 'PASSWORD_RESET')
+      const resetClick = await fetch(reset.oobLink)
+      const resetLanding = await resetClick.json()
+      assert.equal(resetClick.status, 200, `the reset link answered ${resetClick.status}: ${JSON.stringify(resetLanding)}`)
+      assert.equal(resetLanding.applied, false)
+      assert.equal(resetLanding.finishWith.path, '/v1/accounts:resetPassword')
+
+      await confirmPasswordReset(clientAuth, reset.oobCode, 'clicked-then-reset')
+      await signInWithEmailAndPassword(clientAuth, 'clicker@example.com', 'clicked-then-reset')
+    } finally {
+      await adminAuth.deleteUser(user.uid)
+    }
+  }, { served: ['auth.emulator-action-route', 'auth.emulator-oob-codes'] })
+
+  await check('DELETE oobCodes drops pending links and leaves accounts alone', async () => {
+    const user = await adminAuth.createUser({ email: 'pending@example.com', password: 'correct-horse' })
+    try {
+      await sendPasswordResetEmail(clientAuth, 'pending@example.com')
+      const { oobCode } = await pendingOobCodeFor('pending@example.com', 'PASSWORD_RESET')
+
+      const response = await fetch(`http://${host}/emulator/v1/projects/${PROJECT_ID}/oobCodes`, { method: 'DELETE' })
+      assert.equal(response.status, 200, `clearing oobCodes failed: ${response.status}`)
+
+      assert.deepEqual(await pendingOobCodes(), [])
+      // A cleared link must be dead, not just unlisted.
+      await expectAuthCode('auth/invalid-action-code', () =>
+        confirmPasswordReset(clientAuth, oobCode, 'should-not-take'),
+      )
+      assert.equal((await adminAuth.getUser(user.uid)).email, 'pending@example.com')
+      await signInWithEmailAndPassword(clientAuth, 'pending@example.com', 'correct-horse')
+    } finally {
+      await adminAuth.deleteUser(user.uid)
+    }
+  }, { served: ['auth.emulator-clear-oob-codes'] })
+
+  await check('GET config reports the local project config', async () => {
+    const response = await fetch(`http://${host}/emulator/v1/projects/${PROJECT_ID}/config`)
+    const config = await response.json()
+    assert.equal(response.status, 200, `config answered ${response.status}: ${JSON.stringify(config)}`)
+    // Duplicate emails are refused (the createUser check above relies on it),
+    // and the config has to say so rather than describe a different project.
+    assert.deepEqual(config.signIn, { allowDuplicateEmails: false })
+    assert.equal(config.usageMode, 'DEFAULT')
+    assert.equal(config.name, `projects/${PROJECT_ID}/config`)
+  }, { served: ['auth.emulator-config'] })
+
   // ----- what is deliberately not served -----------------------------------
   //
   // These record gaps rather than guarantees. They assert that an unsupported
@@ -700,6 +838,94 @@ const main = async () => {
       assert.match(message, /not served by fireup local/, `${path} must say who refused it`)
     }
   }, { unimplemented: ['auth.batch-account-writes', 'auth.session-cookies'] })
+
+  /// POST a request this surface refuses, and assert it answers 501 with a
+  /// message naming the gap — the same shape the check above asserts.
+  const expectNotServed = async (path, names, body = {}) => {
+    const response = await fetch(`http://${host}/identitytoolkit.googleapis.com${path}?key=${FAKE_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const reply = await response.json()
+    const message = reply.error?.message ?? JSON.stringify(reply)
+
+    assert.equal(response.status, 501, `${path} must answer 501, got ${response.status}: ${message}`)
+    assert.match(message, names, `${path} must name the gap it is refusing for`)
+    assert.match(message, /not served by fireup local/, `${path} must say who refused it`)
+  }
+
+  await check('phone auth answers 501 and names the gap, and mints no code', async () => {
+    await expectNotServed('/v1/accounts:sendVerificationCode', /phone authentication/, {
+      phoneNumber: '+15555550100',
+      recaptchaToken: 'not-checked',
+    })
+    await expectNotServed('/v1/accounts:signInWithPhoneNumber', /phone authentication/, {
+      sessionInfo: 'never-issued',
+      code: '123456',
+    })
+    // Phone verification also arrives as a requestType on an endpoint that is
+    // otherwise served, so it must not fall through to a code being minted.
+    const before = (await pendingOobCodes()).length
+    await expectNotServed('/v1/accounts:sendOobCode', /phone authentication/, {
+      requestType: 'PHONE_VERIFICATION',
+      email: 'alice@example.com',
+    })
+    assert.equal((await pendingOobCodes()).length, before, 'a refused PHONE_VERIFICATION must not mint a code')
+  }, { unimplemented: ['auth.phone'] })
+
+  await check('admin tenantManager().createTenant() is refused cleanly (the v2 surface is not served)', async () => {
+    // The Admin SDK's tenant calls are the v2 surface's most likely caller.
+    await assert.rejects(
+      () => adminAuth.tenantManager().createTenant({ displayName: 'smoke-tenant' }),
+      /not served by fireup local/,
+      'createTenant must fail with an explanation, not a 404 or a fake tenant',
+    )
+
+    const v2 = /the Identity Platform v2 surface \(MFA, tenants\)/
+    await expectNotServed(`/v2/projects/${PROJECT_ID}/tenants`, v2, { displayName: 'smoke-tenant' })
+    await expectNotServed('/v2/accounts/mfaEnrollment:start', v2, { idToken: 'not-checked' })
+    await expectNotServed('/v2/accounts/mfaSignIn:start', v2, { mfaPendingCredential: 'not-checked' })
+  }, { unimplemented: ['auth.mfa-and-tenants'] })
+
+  await check('client fetchSignInMethodsForEmail() is refused cleanly (createAuthUri is not served)', async () => {
+    // The SDK reaches createAuthUri through this call; the server's 501 has to
+    // come back as a mapped error, not a list of sign-in methods.
+    await expectAuthCode('auth/operation-not-allowed', () =>
+      fetchSignInMethodsForEmail(clientAuth, 'alice@example.com'),
+    )
+
+    const before = (await adminAuth.listUsers(1000)).users.length
+    await expectNotServed('/v1/accounts:createAuthUri', /federated identity providers/, {
+      identifier: 'alice@example.com',
+      continueUri: 'http://localhost',
+    })
+    await expectNotServed('/v1/accounts:signInWithIdp', /federated identity providers/, {
+      postBody: 'id_token=not-checked&providerId=google.com',
+      requestUri: 'http://localhost',
+      returnSecureToken: true,
+    })
+    // A refused IdP sign-in must not have created the account it would have.
+    assert.equal((await adminAuth.listUsers(1000)).users.length, before)
+  }, { unimplemented: ['auth.federated-providers'] })
+
+  // Last, because it wipes every account the checks above left in place.
+  await check('DELETE accounts clears every account and every pending link', async () => {
+    const user = await adminAuth.createUser({ email: 'wiped@example.com', password: 'correct-horse' })
+    await sendPasswordResetEmail(clientAuth, 'wiped@example.com')
+    const { oobCode } = await pendingOobCodeFor('wiped@example.com', 'PASSWORD_RESET')
+    assert.ok((await adminAuth.listUsers(1000)).users.length > 1, 'the wipe needs more than one account to clear')
+
+    const response = await fetch(`http://${host}/emulator/v1/projects/${PROJECT_ID}/accounts`, { method: 'DELETE' })
+    assert.equal(response.status, 200, `clearing accounts failed: ${response.status}`)
+
+    assert.deepEqual((await adminAuth.listUsers(1000)).users, [])
+    await expectAuthCode('auth/user-not-found', () => adminAuth.getUser(user.uid))
+    assert.deepEqual(await pendingOobCodes(), [], 'pending links must go with their accounts')
+    await expectAuthCode('auth/invalid-action-code', () =>
+      confirmPasswordReset(clientAuth, oobCode, 'should-not-take'),
+    )
+  }, { served: ['auth.emulator-clear-accounts'] })
 
   await deleteClientApp(clientApp)
   await deleteAdminApp(adminApp)
