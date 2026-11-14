@@ -183,7 +183,9 @@ test('every tag in the smoke suites names a matrix row under the status the matr
 })
 
 test('every gap entry names a matrix row under its current status, with a reason', () => {
-  assert.ok(realGaps.rows.length > 0)
+  // An empty list is the goal, not a sign of a broken read: every row proven.
+  // A renamed or missing `rows` key still fails here rather than checking nothing.
+  assert.ok(Array.isArray(realGaps.rows), 'matrix-gaps.json has no "rows" array')
   for (const { id, status, reason } of realGaps.rows) {
     const row = realRows.get(id)
     assert.ok(row, `matrix-gaps.json lists row ${id}, which the matrix does not have`)
