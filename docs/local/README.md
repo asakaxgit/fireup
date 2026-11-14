@@ -1213,7 +1213,7 @@ the row, when:
 
 Rows no smoke check proves yet are listed in
 [`tests/smoke-gate/matrix-gaps.json`](../../tests/smoke-gate/matrix-gaps.json),
-each with its status and the issue that will add the check. An entry stops
+each with its status and the reason no check proves it yet. An entry stops
 being accepted when its row gains a passing check, or when the row's status
 changes, so the list cannot hide a flip or outlive its gap. Tag only what a
 check's assertions would catch: `runTransaction() rolls back when the body

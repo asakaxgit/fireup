@@ -20,7 +20,7 @@
  *     matrix-gaps.json.
  *
  * matrix-gaps.json is the honest list of rows no smoke check proves yet, each
- * with the issue tracking it. An entry records the row's status, so flipping a
+ * with the reason none does. An entry records the row's status, so flipping a
  * gap row is caught too, and an entry whose row has since gained a passing check
  * fails until it is deleted — otherwise the list only ever grows.
  */
@@ -85,8 +85,8 @@ export const matrixCoverage = (matrix, results, gaps) => {
       problems.push({ row: gap.id, message: `matrix-gaps.json lists row ${gap.id} twice` })
     } else if (!row) {
       problems.push({ row: gap.id, message: `matrix-gaps.json lists row ${gap.id}, which the matrix does not have` })
-    } else if (!gap.issue) {
-      problems.push({ row: gap.id, message: `matrix-gaps.json lists row ${gap.id} with no issue tracking it` })
+    } else if (!gap.reason) {
+      problems.push({ row: gap.id, message: `matrix-gaps.json lists row ${gap.id} with no reason given` })
     } else if (gap.status !== row.status) {
       problems.push({
         row: gap.id,
@@ -123,7 +123,7 @@ export const matrixCoverage = (matrix, results, gaps) => {
       row: row.id,
       message:
         `row ${row.id} ("${row.label}") is "${row.status}" but no smoke check proves it: it needs ${demand}. ` +
-        'Tag the check that asserts it, or list the row in tests/smoke-gate/matrix-gaps.json with an issue.',
+        'Tag the check that asserts it, or list the row in tests/smoke-gate/matrix-gaps.json with the reason no check proves it.',
     })
   }
 

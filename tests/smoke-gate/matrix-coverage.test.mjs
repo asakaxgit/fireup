@@ -93,33 +93,33 @@ test('a tag under a status the matrix does not use fails', () => {
 })
 
 test('a listed gap stands in for a missing check', () => {
-  const gaps = { rows: [{ id: 'query.aggregations', status: 'unimplemented', issue: 'SAK-1' }] }
+  const gaps = { rows: [{ id: 'query.aggregations', status: 'unimplemented', reason: 'r' }] }
   const { problems, gaps: listed } = matrixCoverage(matrix, run([commitCheck]), gaps)
   assert.deepEqual(problems, [])
   assert.deepEqual(listed, ['query.aggregations'])
 })
 
 test('a gap entry fails once its row is proven, so the list cannot go stale', () => {
-  const gaps = { rows: [{ id: 'query.aggregations', status: 'unimplemented', issue: 'SAK-1' }] }
+  const gaps = { rows: [{ id: 'query.aggregations', status: 'unimplemented', reason: 'r' }] }
   const { problems } = matrixCoverage(matrix, run([commitCheck, refusalCheck]), gaps)
   assert.deepEqual(rowsIn(problems), ['query.aggregations'])
   assert.match(problems[0].message, /now has a passing check \(firestore\/memory: count\); delete its entry/)
 })
 
 test('flipping a gap row fails too, because the entry records the status', () => {
-  const gaps = { rows: [{ id: 'query.aggregations', status: 'unimplemented', issue: 'SAK-1' }] }
+  const gaps = { rows: [{ id: 'query.aggregations', status: 'unimplemented', reason: 'r' }] }
   const flipped = { features: [matrix.features[0], { ...matrix.features[1], status: 'served' }] }
   const { problems } = matrixCoverage(flipped, run([commitCheck]), gaps)
   assert.deepEqual(rowsIn(problems), ['query.aggregations'])
   assert.match(problems[0].message, /matrix-gaps\.json records it as "unimplemented"/)
 })
 
-test('a gap entry must name a real row, once, with an issue', () => {
+test('a gap entry must name a real row, once, with a reason', () => {
   const gaps = {
     rows: [
-      { id: 'query.aggregations', status: 'unimplemented', issue: 'SAK-1' },
-      { id: 'query.aggregations', status: 'unimplemented', issue: 'SAK-1' },
-      { id: 'nope', status: 'served', issue: 'SAK-1' },
+      { id: 'query.aggregations', status: 'unimplemented', reason: 'r' },
+      { id: 'query.aggregations', status: 'unimplemented', reason: 'r' },
+      { id: 'nope', status: 'served', reason: 'r' },
       { id: 'firestore.Commit', status: 'served' },
     ],
   }
@@ -127,7 +127,7 @@ test('a gap entry must name a real row, once, with an issue', () => {
   assert.deepEqual(messages, [
     'matrix-gaps.json lists row query.aggregations twice',
     'matrix-gaps.json lists row nope, which the matrix does not have',
-    'matrix-gaps.json lists row firestore.Commit with no issue tracking it',
+    'matrix-gaps.json lists row firestore.Commit with no reason given',
   ])
 })
 
@@ -182,13 +182,13 @@ test('every tag in the smoke suites names a matrix row under the status the matr
   assert.ok(tags >= 110, `found only ${tags} tags in the smoke suites; has the tag syntax changed?`)
 })
 
-test('every gap entry names a matrix row under its current status, with an issue', () => {
+test('every gap entry names a matrix row under its current status, with a reason', () => {
   assert.ok(realGaps.rows.length > 0)
-  for (const { id, status, issue } of realGaps.rows) {
+  for (const { id, status, reason } of realGaps.rows) {
     const row = realRows.get(id)
     assert.ok(row, `matrix-gaps.json lists row ${id}, which the matrix does not have`)
     assert.equal(row.status, status, `matrix-gaps.json records ${id} as "${status}", the matrix says "${row.status}"`)
-    assert.match(issue ?? '', /^SAK-\d+$/, `matrix-gaps.json lists ${id} with no issue`)
+    assert.ok(reason?.trim(), `matrix-gaps.json lists ${id} with no reason given`)
   }
 })
 
