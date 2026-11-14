@@ -681,6 +681,42 @@ fn unreadable_key(place: &str, text: &str) -> String {
     )
 }
 
+/// The line that opens the step holding line `at`, and the column the step's
+/// keys sit at. YAML puts a step's keys wherever its first key lands, so that
+/// column is read off the `-` line -- `-   name:` puts them at dash + 4 -- not
+/// assumed to be dash + 2; the fixed +2 let `-   name:` over `    if: false`
+/// through unread. A bare `-` (or `- # comment`) opening the step is refused:
+/// its keys could start anywhere, and a walk-up that only knew `- ` skipped it
+/// and landed on the step before.
+fn step_opener(lines: &[&str], at: usize, needle: &str) -> Result<(usize, usize), String> {
+    let start = (0..=at)
+        .rev()
+        .find(|&above| {
+            let inner = without_comment(lines[above]).trim_start();
+            inner
+                .strip_prefix('-')
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']))
+        })
+        .ok_or_else(|| {
+            format!(
+                "ci.yml's `{needle}` is not inside a step -- no `-` line opens a block \
+                 above it. This reader only understands the step list form, so it \
+                 refuses rather than guessing which keys govern that command."
+            )
+        })?;
+    let bare = without_comment(lines[start]);
+    let after_dash = &bare.trim_start()[1..];
+    let first_key = after_dash.trim_start_matches(' ');
+    if first_key.is_empty() || first_key.starts_with('\t') {
+        return Err(format!(
+            "the ci.yml step running `{needle}` opens with a bare `-`, so its keys could \
+             start at any column and this reader cannot tell which lines govern the \
+             step. Put the step's first key on the `-` line: `- name: ...`."
+        ));
+    }
+    Ok((start, bare.len() - first_key.len()))
+}
+
 /// One live `if:` or `continue-on-error:` on a step.
 #[derive(Debug, PartialEq, Eq)]
 struct StepCondition {
@@ -742,31 +778,18 @@ fn step_conditions(
         }
     };
 
-    // Walk up to the `- ` that opens the step holding that command.
-    let mut start = None;
-    for above in (0..=at).rev() {
-        let bare = without_comment(lines[above]);
-        if bare.trim_start().starts_with("- ") {
-            start = Some(above);
-            break;
-        }
-    }
-    let Some(start) = start else {
-        return Err(format!(
-            "ci.yml's `{needle}` is not inside a step -- no `- ` line opens a block \
-             above it. This reader only understands the step list form, so it refuses \
-             rather than guessing which keys govern that command."
-        ));
-    };
-
+    let (start, key_indent) = step_opener(&lines, at, needle)?;
     let step_indent = indent_of(lines[start]);
-    let key_indent = step_indent + 2;
     let mut conditions = Vec::new();
 
     // A step's first key sits on the `- ` line itself, so read that one too:
     // `- if: false` followed by `name:` is the same step with the same effect.
-    let inline = without_comment(lines[start]).trim_start();
-    let mut keyed: Vec<(usize, &str)> = vec![(start, inline.trim_start_matches("- ").trim_start())];
+    let mut keyed: Vec<(usize, &str)> = vec![(
+        start,
+        without_comment(lines[start])
+            .get(key_indent..)
+            .unwrap_or_default(),
+    )];
 
     for (at, line) in lines.iter().enumerate().skip(start + 1) {
         let bare = without_comment(line);
@@ -774,10 +797,19 @@ fn step_conditions(
         if inner.is_empty() {
             continue;
         }
-        if bare.len() - inner.len() <= step_indent {
+        let indent = bare.len() - inner.len();
+        if indent <= step_indent {
             break;
         }
-        if indent_of(line) == key_indent {
+        if indent < key_indent {
+            return Err(format!(
+                "the ci.yml step running `{needle}` has a line left of its keys: `{inner}`. \
+                 The step's keys start at column {key_indent}, where its first key does, \
+                 and a line between the `-` and that column is no key this reader can \
+                 place. Line every key of the step up under the first."
+            ));
+        }
+        if indent == key_indent {
             keyed.push((at, inner));
         }
     }
@@ -868,6 +900,35 @@ mod supply_chain_reporter_controls {
             "the reader cannot find the {GUARDED_TARGET} step in the real ci.yml, so \
              every promise above is about a step it never located"
         );
+    }
+
+    #[test]
+    fn the_pin_step_reader_handles_the_same_shapes() {
+        let pin = "      - name: Supply-chain pins\n        run:";
+        let base = ci_with("");
+        let wide = base.replace(
+            pin,
+            "      -   name: Supply-chain pins\n          if: false\n          run:",
+        );
+        let conditions = reporting_step(&wide, GUARDED_TARGET).expect("located");
+        assert_eq!(
+            conditions,
+            vec![StepCondition {
+                key: "if".to_string(),
+                value: "false".to_string()
+            }]
+        );
+        for opener in ["-", "- # pins"] {
+            let bare = base.replace(
+                pin,
+                &format!("      {opener}\n        name: Supply-chain pins\n        if: false\n        run:"),
+            );
+            assert!(
+                reporting_step(&bare, GUARDED_TARGET)
+                    .is_err_and(|why| why.contains("opens with a bare `-`")),
+                "{opener:?} passed"
+            );
+        }
     }
 
     #[test]
@@ -1124,19 +1185,7 @@ fn command_running(ci: &str, needle: &str, missing: &str) -> Result<ReporterComm
         }
     };
 
-    let mut start = None;
-    for above in (0..=at).rev() {
-        if without_comment(lines[above]).trim_start().starts_with("- ") {
-            start = Some(above);
-            break;
-        }
-    }
-    let Some(start) = start else {
-        return Err(format!(
-            "ci.yml's `{needle}` is not inside a step -- no `- ` line opens a block \
-             above it, and this reader only understands the step list form."
-        ));
-    };
+    let (start, _) = step_opener(&lines, at, needle)?;
 
     // The `run:` that holds it: either the needle's own line, or a block
     // scalar opened above it inside the same step.
@@ -1876,6 +1925,54 @@ mod fidelity_gate_controls {
                 "{job:?}{step:?} passed"
             );
         }
+    }
+
+    /// The gate step respelled as `opener` over keys indented by `keys` spaces.
+    fn gate_step_as(opener: &str, keys: &str) -> String {
+        ci_with("", "").replace(
+            "      - name: Fidelity regression gate\n        run:",
+            &format!(
+                "      {opener}\n{keys}name: Fidelity regression gate\n{keys}if: false\n{keys}run:"
+            ),
+        )
+    }
+
+    #[test]
+    fn a_step_whose_keys_sit_past_dash_plus_two_is_read() {
+        // `-   name:` puts the step's keys at dash + 4; YAML reads `if: false` there.
+        let ci = ci_with("", "").replace(
+            "      - name: Fidelity regression gate\n        run:",
+            "      -   name: Fidelity regression gate\n          if: false\n          run:",
+        );
+        let verdict = fidelity_gate_is_unconditional(&ci);
+        assert!(
+            verdict.is_err_and(|why| why.contains("step carries `if: false`")),
+            "a wide-dash step passed"
+        );
+    }
+
+    #[test]
+    fn a_bare_dash_step_opener_is_caught() {
+        for opener in ["-", "- # gate", "-\t"] {
+            let verdict = fidelity_gate_is_unconditional(&gate_step_as(opener, "        "));
+            assert!(
+                verdict.is_err_and(|why| why.contains("opens with a bare `-`")),
+                "{opener:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_left_of_the_steps_keys_is_caught() {
+        let ci = ci_with("", "").replace(
+            "      - name: Fidelity regression gate\n        run:",
+            "      -   name: Fidelity regression gate\n        if: false\n          run:",
+        );
+        let verdict = fidelity_gate_is_unconditional(&ci);
+        assert!(
+            verdict.is_err_and(|why| why.contains("has a line left of its keys")),
+            "a key left of the first passed"
+        );
     }
 
     #[test]
