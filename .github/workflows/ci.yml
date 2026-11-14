@@ -215,8 +215,10 @@ jobs:
   # Auth, Datastore) against both stores, compared with
   # tests/smoke-gate/baseline.json. It fails when a check that passes on `main`
   # fails or goes missing, and names the check; a new check, or one that newly
-  # passes, never fails it. Updating the baseline is a reviewed diff — see
-  # "Fidelity regression gate" in docs/local/README.md.
+  # passes, never fails it. It also fails when a row of the fidelity matrix is
+  # neither proven by a passing smoke check tagged with its status nor listed in
+  # tests/smoke-gate/matrix-gaps.json, and names the row. Updating the baseline
+  # is a reviewed diff — see "Fidelity regression gate" in docs/local/README.md.
   #
   # The exception to this file's "no external services" rule, kept to its own
   # job so the `test` job stays that way. It needs the Google client libraries
@@ -285,11 +287,12 @@ jobs:
           npm ci --no-audit --no-fund --prefix tests/local-smoke
           npm ci --no-audit --no-fund --prefix tests/local-smoke-datastore
 
-      # The comparison rule and the baseline's coverage of the suite runs,
-      # before the minutes-long part; and the triage role's clustering rule,
-      # which reads the same results files.
+      # The comparison rule and the baseline's coverage of the suite runs; the
+      # matrix-coverage rule with the smoke suites' row tags and
+      # matrix-gaps.json; and the triage role's clustering rule, which reads the
+      # same results files. All before the minutes-long part.
       - name: Gate rule
-        run: node --test tests/smoke-gate/compare.test.mjs tests/smoke-gate/cluster.test.mjs
+        run: node --test tests/smoke-gate/compare.test.mjs tests/smoke-gate/matrix-coverage.test.mjs tests/smoke-gate/cluster.test.mjs
 
       - name: Fidelity regression gate
         env:

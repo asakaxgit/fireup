@@ -39,13 +39,15 @@ const checks = []
  * the fidelity gate can tell "one behaviour broke" from "everything after it
  * broke". Checks that build on an earlier one (get after save) fail with it.
  */
-const check = async (name, fn) => {
+// `covers` names the fidelity-matrix rows the check asserts, keyed by the
+// status it asserts them with; see tests/smoke-gate/matrix-coverage.mjs.
+const check = async (name, fn, covers) => {
   try {
     await fn()
-    checks.push({ name, ok: true })
+    checks.push({ name, ok: true, covers })
     console.log(`  ok   ${name}`)
   } catch (error) {
-    checks.push({ name, ok: false, error })
+    checks.push({ name, ok: false, covers, error })
     console.log(`  FAIL ${name}`)
     console.log(`       ${error?.message ?? error}`)
   }
@@ -65,14 +67,14 @@ await check('save an entity', async () => {
       done: false,
     },
   })
-})
+}, { served: ['datastore.Commit'] })
 
 await check('get it back by key', async () => {
   const [fetched] = await datastore.get(key)
   if (!fetched || fetched.title !== 'smoke') {
     throw new Error(`expected saved entity, got ${JSON.stringify(fetched)}`)
   }
-})
+}, { served: ['datastore.Lookup'] })
 
 await check('an equality query returns it', async () => {
   const query = datastore.createQuery(kind).filter('priority', '=', 1).limit(10)
@@ -80,7 +82,7 @@ await check('an equality query returns it', async () => {
   if (!rows.some((row) => row[datastore.KEY].name === name)) {
     throw new Error(`query did not return the saved entity: ${JSON.stringify(rows)}`)
   }
-})
+}, { served: ['datastore.RunQuery'] })
 
 await check('allocateIds returns complete keys', async () => {
   const incomplete = datastore.key([kind])
@@ -88,7 +90,7 @@ await check('allocateIds returns complete keys', async () => {
   if (allocated.length !== 2 || allocated.some((k) => !k.id)) {
     throw new Error(`allocateIds failed: ${JSON.stringify(allocated)}`)
   }
-})
+}, { served: ['datastore.AllocateIds'] })
 
 await check('a transaction commit is visible to a later read', async () => {
   const txKey = datastore.key([kind, `tx-${Date.now()}`])
@@ -100,7 +102,7 @@ await check('a transaction commit is visible to a later read', async () => {
   if (!txFetched || txFetched.title !== 'tx') {
     throw new Error(`transaction write missing: ${JSON.stringify(txFetched)}`)
   }
-})
+}, { served: ['datastore.BeginTransaction-Rollback', 'datastore.Commit'] })
 
 await check('a read-only transaction reads committed data', async () => {
   const tx = datastore.transaction({ readOnly: true })
@@ -176,7 +178,7 @@ await check('property transforms report and store their results', async () => {
   if (!(counter.touched instanceof Date)) {
     throw new Error(`stored touched is ${JSON.stringify(counter.touched)}, wanted a timestamp`)
   }
-})
+}, { served: ['datastore.transform.increment', 'datastore.transform.server-value', 'datastore.transform.array-union'] })
 
 await check('a property_mask write accumulates and deletes', async () => {
   const maskedName = `masked-${Date.now()}`
@@ -245,7 +247,7 @@ await check('a property_mask write accumulates and deletes', async () => {
   if (afterMaskedDelete.title !== 'fourth' || afterMaskedDelete.hits !== 2) {
     throw new Error(`masked delete disturbed other properties: ${JSON.stringify(afterMaskedDelete)}`)
   }
-})
+}, { served: ['datastore.property-mask.writes-a-carried-path', 'datastore.property-mask.deletes-an-omitted-path', 'datastore.property-mask.leaves-unnamed-properties', 'datastore.property-mask.transform-accumulates'] })
 
 await check('a nested property_mask path stays refused with UNIMPLEMENTED', async () => {
   const refusedMask = await rawClient
@@ -270,7 +272,7 @@ await check('a nested property_mask path stays refused with UNIMPLEMENTED', asyn
       `expected UNIMPLEMENTED (12) for a nested mask path, got ${refusedMask && refusedMask.code}`,
     )
   }
-})
+}, { unimplemented: ['datastore.property-mask.nested-path', 'datastore.nested-property-mask'] })
 
 await check('the maximum transform stays refused with UNIMPLEMENTED', async () => {
   const refused = await rawClient
@@ -288,7 +290,7 @@ await check('the maximum transform stays refused with UNIMPLEMENTED', async () =
   if (!refused || refused.code !== 12) {
     throw new Error(`expected UNIMPLEMENTED (12) for maximum, got ${refused && refused.code}`)
   }
-})
+}, { unimplemented: ['datastore.transform.maximum-minimum'] })
 
 await check('delete removes the entity', async () => {
   await datastore.delete(key)
@@ -296,7 +298,7 @@ await check('delete removes the entity', async () => {
   if (afterDelete) {
     throw new Error('entity still present after delete')
   }
-})
+}, { served: ['datastore.Commit'] })
 
 const failed = checks.filter((c) => !c.ok)
 console.log(`\n${checks.length - failed.length}/${checks.length} checks passed`)

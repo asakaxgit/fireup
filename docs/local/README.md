@@ -151,7 +151,11 @@ of a hang, a protocol error, or — worst — a plausible-looking wrong result.
 Every row below is checked, not just written down:
 [`tests/conformance/`](../../tests/conformance/README.md) drives one probe per
 row with the official SDKs, and `cargo test --test fidelity_matrix_tests` fails
-if this table and that suite stop agreeing. See [Tests](#tests).
+if this table and that suite stop agreeing. Each row's stable id is its entry in
+[`tests/conformance/matrix.json`](../../tests/conformance/matrix.json). On every
+pull request the official-SDK smoke suites must also prove each row, or list it
+as a tracked gap; see [Fidelity matrix coverage](#fidelity-matrix-coverage).
+See [Tests](#tests).
 
 For the same rows set beside Google's Firebase Emulator Suite and the production
 service, see [`COMPARISON.md`](COMPARISON.md) — most of whose emulator cells are
@@ -1179,3 +1183,43 @@ the gate. A failed check's results entry also carries the gRPC `error`, which
 the gate ignores. The [triage role](TRIAGE.md) groups those failures by root
 cause and files one fixer issue per group. A fix moves its checks into
 `smoke.mjs` and the baseline, where the gate then protects them.
+
+### Fidelity matrix coverage
+
+The same job ties the smoke results to the [fidelity matrix](#fidelity-matrix).
+Each smoke check names the matrix rows it asserts, by their id in
+[`tests/conformance/matrix.json`](../../tests/conformance/matrix.json), under the
+status it asserts them with:
+
+```js
+await check('create() on an existing document fails with ALREADY_EXISTS', async () => {
+  // ...
+}, { served: ['firestore.Commit'] })
+
+await check('an unsupported query reports a clear UNIMPLEMENTED instead of hanging', async () => {
+  // ...
+}, { unimplemented: ['query.aggregations', 'firestore.RunAggregationQuery'] })
+```
+
+The tags travel in the results file next to `ok`, and the gate fails, naming
+the row, when:
+
+- a row has no passing check tagged with its status — for a **served** row, a
+  check that it works; for an `UNIMPLEMENTED` row, a check that the refusal is
+  still an explicit error;
+- a check asserts a row with a status the matrix no longer gives it — flipping
+  a row means flipping the check that proves it;
+- a check names a row id the matrix does not have.
+
+Rows no smoke check proves yet are listed in
+[`tests/smoke-gate/matrix-gaps.json`](../../tests/smoke-gate/matrix-gaps.json),
+each with its status and the issue that will add the check. An entry stops
+being accepted when its row gains a passing check, or when the row's status
+changes, so the list cannot hide a flip or outlive its gap. Tag only what a
+check's assertions would catch: `runTransaction() rolls back when the body
+throws` is not tagged `firestore.Rollback`, because it still passes with
+`Rollback` answering `UNIMPLEMENTED`.
+
+The rule has its own tests, which also check every tag in the smoke sources
+against `matrix.json` without starting a server:
+`node --test tests/smoke-gate/matrix-coverage.test.mjs`.

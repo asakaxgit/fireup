@@ -8,6 +8,10 @@
  * `results.mjs`; `scripts/fidelity-smoke-gate.sh` runs every suite and then this.
  * The rule itself is in `compare.mjs`.
  *
+ * The check also ties the results to the fidelity matrix: every row of
+ * tests/conformance/matrix.json needs a passing check tagged with its status, or
+ * an entry in matrix-gaps.json. That rule is in `matrix-coverage.mjs`.
+ *
  * `--update` replaces only the suites present in `<results-dir>` and leaves the
  * others as they are, so refreshing the in-memory runs on a machine without
  * PostgreSQL does not quietly drop the Postgres half of the baseline. Removing a
@@ -19,8 +23,13 @@ import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { baselineFrom, compareToBaseline } from './compare.mjs'
+import { matrixCoverage } from './matrix-coverage.mjs'
 
 const BASELINE = new URL('./baseline.json', import.meta.url)
+const MATRIX = new URL('../conformance/matrix.json', import.meta.url)
+const GAPS = new URL('./matrix-gaps.json', import.meta.url)
+
+const readJson = (url) => JSON.parse(readFileSync(url, 'utf8'))
 
 const readResults = (dir) =>
   readdirSync(dir)
@@ -54,6 +63,8 @@ const check = (dir) => {
     console.log('  (passing but not in the baseline — add them with --update so they are protected too)')
   }
 
+  checkMatrix(results)
+
   if (regressions.length === 0) {
     console.log('fidelity gate: no regressions')
     return
@@ -69,6 +80,22 @@ const check = (dir) => {
     }
   }
   console.log('\nIf a check was removed or renamed on purpose, update the baseline: see docs/local/README.md.')
+  process.exitCode = 1
+}
+
+const checkMatrix = (results) => {
+  const { problems, proven, gaps } = matrixCoverage(readJson(MATRIX), results, readJson(GAPS))
+  console.log(`fidelity matrix: ${proven.length} rows proven by a passing smoke check, ${gaps.length} listed in matrix-gaps.json`)
+  if (problems.length === 0) return
+
+  console.log(`\nfidelity matrix: ${problems.length} row(s) the smoke results do not back:`)
+  for (const { row, message } of problems) {
+    console.log(`  MATRIX ${message}`)
+    if (process.env.GITHUB_ACTIONS) {
+      console.log(`::error title=Fidelity matrix row ${row}::${message}`)
+    }
+  }
+  console.log('')
   process.exitCode = 1
 }
 
