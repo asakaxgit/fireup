@@ -642,6 +642,45 @@ fn key_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     rest.trim_start().strip_prefix(':')
 }
 
+/// Whether `text` opens with a mapping key `key_value` can read: a plain name of
+/// letters, digits, `_` and `-`, optionally inside one pair of quotes, then `:`
+/// and whitespace or the end of the line. YAML has more spellings of a key than
+/// any list of them -- `"i\x66":`, `? if` over `: false`, `!!str if:`, an alias
+/// `*k :` -- and each parses to `if`. Listing spellings let each new one through;
+/// refusing every key outside the one readable shape closes the class.
+fn plain_key(text: &str) -> bool {
+    let (name, rest) = ['\'', '"']
+        .iter()
+        .find_map(|&quote| {
+            let inner = text.strip_prefix(quote)?;
+            let end = inner.find(quote)?;
+            Some((&inner[..end], &inner[end + 1..]))
+        })
+        .unwrap_or_else(|| {
+            let end = text
+                .find(|c: char| c == ':' || c == ' ')
+                .unwrap_or(text.len());
+            (&text[..end], &text[end..])
+        });
+    let named = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let after = rest.trim_start().strip_prefix(':');
+    named && after.is_some_and(|after| after.is_empty() || after.starts_with([' ', '\t']))
+}
+
+/// The refusal for a key line `plain_key` cannot read, on the `place` in `ci.yml`.
+fn unreadable_key(place: &str, text: &str) -> String {
+    format!(
+        "{place} has a key this reader cannot read: `{text}`. YAML spells one key many \
+         ways -- escapes in a quoted key, `? key` explicit keys, `!!str` tags, `*alias` \
+         keys -- and a condition hidden in any of them would switch the step or job off \
+         unseen. Write every key as a plain name (letters, digits, `_`, `-`), optionally \
+         in quotes without a `\\`, followed by `: `."
+    )
+}
+
 /// One live `if:` or `continue-on-error:` on a step.
 #[derive(Debug, PartialEq, Eq)]
 struct StepCondition {
@@ -727,7 +766,7 @@ fn step_conditions(
     // A step's first key sits on the `- ` line itself, so read that one too:
     // `- if: false` followed by `name:` is the same step with the same effect.
     let inline = without_comment(lines[start]).trim_start();
-    let mut keyed: Vec<(usize, &str)> = vec![(start, inline.trim_start_matches("- "))];
+    let mut keyed: Vec<(usize, &str)> = vec![(start, inline.trim_start_matches("- ").trim_start())];
 
     for (at, line) in lines.iter().enumerate().skip(start + 1) {
         let bare = without_comment(line);
@@ -744,6 +783,12 @@ fn step_conditions(
     }
 
     for (at, text) in keyed {
+        if !plain_key(text) {
+            return Err(unreadable_key(
+                &format!("the ci.yml step running `{needle}`"),
+                text,
+            ));
+        }
         for key in STEP_CONDITION_KEYS {
             if let Some(value) = key_value(text, key) {
                 let value = folded_value(&lines, at, value, key_indent);
@@ -1525,6 +1570,9 @@ fn job_conditions(ci: &str, step_start: usize) -> Result<Vec<StepCondition>, Str
         if indent_of(line) != key_indent {
             continue;
         }
+        if !plain_key(bare.trim_start()) {
+            return Err(unreadable_key("the fidelity gate's job", bare.trim_start()));
+        }
         for key in JOB_CONDITION_KEYS {
             if let Some(value) = key_value(bare.trim_start(), key) {
                 let value = folded_value(&lines, at, value, key_indent);
@@ -1806,6 +1854,51 @@ mod fidelity_gate_controls {
                 verdict.is_err_and(|why| why.contains(" carries `")),
                 "{job:?}{step:?} passed"
             );
+        }
+    }
+
+    #[test]
+    fn a_key_spelled_outside_the_plain_shape_is_caught() {
+        // Each parses to `if`/`needs`/`continue-on-error` under YAML.
+        for (job, step) in [
+            ("    \"i\\x66\": false\n", ""),
+            ("    \"\\u0069f\": false\n", ""),
+            ("    ? if\n    : false\n", ""),
+            ("    !!str needs: test\n", ""),
+            ("    *k : false\n", ""),
+            ("    &k if: false\n", ""),
+            ("", "        \"continue-on-\\x65rror\": true\n"),
+            ("", "        ? if\n        : false\n"),
+        ] {
+            let verdict = fidelity_gate_is_unconditional(&ci_with(job, step));
+            assert!(
+                verdict.is_err_and(|why| why.contains("has a key this reader cannot read")),
+                "{job:?}{step:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_and_quoted_keys_are_readable() {
+        for text in [
+            "if: x",
+            "if:",
+            "'if' : x",
+            "\"runs-on\": x",
+            "timeout_minutes: 5",
+        ] {
+            assert!(plain_key(text), "{text:?}");
+        }
+        for text in [
+            "? if",
+            "!!str if: x",
+            "*k : x",
+            "\"i\\x66\": x",
+            "if:false",
+            ": x",
+            "- if: x",
+        ] {
+            assert!(!plain_key(text), "{text:?}");
         }
     }
 
