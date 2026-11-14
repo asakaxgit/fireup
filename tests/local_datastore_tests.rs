@@ -1321,9 +1321,9 @@ async fn query_names(
 }
 
 /// `!=`, `IN`, `NOT_IN` and `OR` used to be accepted and answered with no
-/// entities at all. Each is served now, with scalar semantics: a property of
-/// another type is "not equal", and an array-valued or missing property
-/// matches none of them.
+/// entities at all. Each is served now: a property of another type is "not
+/// equal", a missing property matches none of them, and an array-valued
+/// property matches when any one of its values does.
 #[tokio::test]
 async fn not_equal_in_not_in_and_or_filters_are_served() {
     let (server, mut client) = start().await;
@@ -1380,8 +1380,9 @@ async fn not_equal_in_not_in_and_or_filters_are_served() {
 
     for (filter, want) in [
         (
+            // `[2, 5]` holds a value, 5, that is not 2.
             property_filter("priority", PropertyOp::NotEqual, integer_value(2)),
-            vec!["a", "c", "text"],
+            vec!["a", "c", "list", "text"],
         ),
         (
             property_filter("priority", PropertyOp::In, integers(&[1, 3])),
@@ -1389,7 +1390,7 @@ async fn not_equal_in_not_in_and_or_filters_are_served() {
         ),
         (
             property_filter("priority", PropertyOp::NotIn, integers(&[1, 3])),
-            vec!["b", "text"],
+            vec!["b", "list", "text"],
         ),
         (
             composite(
@@ -1417,7 +1418,99 @@ async fn not_equal_in_not_in_and_or_filters_are_served() {
                     property_filter("priority", PropertyOp::NotEqual, integer_value(3)),
                 ],
             ),
-            vec!["a", "b"],
+            vec!["a", "b", "list"],
+        ),
+    ] {
+        let got = query_names(&mut client, kind, filter.clone())
+            .await
+            .unwrap_or_else(|status| panic!("{filter:?} was refused: {status}"));
+        assert_eq!(got, want, "{filter:?}");
+    }
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// An array-valued property is matched one value at a time, for every
+/// operator, and several range filters on it must all hold for one value. Both
+/// rules, and their examples, are from the public Datastore queries page.
+#[tokio::test]
+async fn an_array_property_is_matched_element_by_element() {
+    let (server, mut client) = start().await;
+
+    let kind = "Tagged";
+    let strings = |values: &[&str]| Value {
+        value_type: Some(ValueType::ArrayValue(ArrayValue {
+            values: values.iter().copied().map(string_value).collect(),
+        })),
+        ..Default::default()
+    };
+    let seed = [
+        ("both", strings(&["fun", "programming"])),
+        ("one", strings(&["learn"])),
+        ("scalar", string_value("lisp")),
+        ("empty", strings(&[])),
+    ];
+    let mutations = seed
+        .into_iter()
+        .map(|(name, tags)| Mutation {
+            operation: Some(Operation::Upsert(entity(
+                named_key(kind, name),
+                [("tag".to_string(), tags)].into_iter().collect(),
+            ))),
+            ..Default::default()
+        })
+        .collect();
+    client
+        .commit(CommitRequest {
+            project_id: PROJECT.to_string(),
+            mode: CommitMode::NonTransactional as i32,
+            mutations,
+            ..Default::default()
+        })
+        .await
+        .expect("seed");
+
+    let tag = |op, value| property_filter("tag", op, value);
+    for (filter, want) in [
+        (
+            tag(PropertyOp::Equal, string_value("programming")),
+            vec!["both"],
+        ),
+        (
+            // Neither value satisfies both, but each satisfies one.
+            composite(
+                CompositeOp::And,
+                vec![
+                    tag(PropertyOp::Equal, string_value("fun")),
+                    tag(PropertyOp::Equal, string_value("programming")),
+                ],
+            ),
+            vec!["both"],
+        ),
+        (
+            // Each value satisfies one range filter, and neither satisfies
+            // both, so `both` does not match.
+            composite(
+                CompositeOp::And,
+                vec![
+                    tag(PropertyOp::GreaterThan, string_value("learn")),
+                    tag(PropertyOp::LessThan, string_value("math")),
+                ],
+            ),
+            vec!["scalar"],
+        ),
+        (tag(PropertyOp::LessThan, string_value("g")), vec!["both"]),
+        (
+            tag(PropertyOp::In, strings(&["learn", "fun"])),
+            vec!["both", "one"],
+        ),
+        (
+            tag(PropertyOp::NotEqual, string_value("fun")),
+            vec!["both", "one", "scalar"],
+        ),
+        (
+            tag(PropertyOp::NotIn, strings(&["fun", "learn"])),
+            vec!["both", "scalar"],
         ),
     ] {
         let got = query_names(&mut client, kind, filter.clone())

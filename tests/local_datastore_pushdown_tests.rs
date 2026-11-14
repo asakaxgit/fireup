@@ -40,6 +40,7 @@
 //! | `<` translated as `>` | the answer comparison, on `"priority < 3"`: the pushed path drops `a-low` |
 //! | equality translated as `None` | the `Narrows` count on `"priority = 3"`, and `a_selective_datastore_query_reads_fewer_rows_than_the_kind_holds` (11 rows read instead of 1) |
 //! | an `OR` keeps only its translatable branches | the answer comparison, on `"priority = 3 OR owner != ada"`: the pushed path drops every entity only the `!=` branch matched |
+//! | the "or the property is an array" branch dropped (addressed to an absent field) | the answer comparison: the pushed path drops `f-list`, whose element `3` the evaluator matches |
 //! | `IN` translated as `NOT_IN` | the `Narrows` count on `"owner IN [ada]"`: the PostgreSQL pushdown declines `NOT_IN`, so all 11 rows were read |
 //!
 //! Worth repeating whenever a translation is added. Note that the first of

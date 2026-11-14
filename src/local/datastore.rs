@@ -847,7 +847,9 @@ pub(crate) fn entity_matches(
 
             let matches = |child: &Filter| entity_matches(entity, child, project_id, database_id);
             match CompositeOp::try_from(composite.op) {
-                Ok(CompositeOp::And) => composite.filters.iter().all(matches),
+                Ok(CompositeOp::And) => {
+                    conjunction_matches(entity, &composite.filters, project_id, database_id)
+                }
                 Ok(CompositeOp::Or) => composite.filters.iter().any(matches),
                 // `validate_filter` refused an unspecified operator before the
                 // read.
@@ -861,28 +863,134 @@ pub(crate) fn entity_matches(
     }
 }
 
+/// An `AND`, with the one rule that spans its children.
+///
+/// The public queries page says that when a query has several inequality
+/// filters on one array-valued property, "an entity will match the query only
+/// if at least one of its individual values for the property satisfies all of
+/// the filters": `tag > 'learn' AND tag < 'math'` does not match
+/// `['fun', 'programming']`, though each value satisfies one of the two. So the
+/// range filters (`<`, `<=`, `>`, `>=`) on one property are evaluated together,
+/// against one element at a time. Every other term, equality included, is
+/// matched on its own: `tag = 'fun' AND tag = 'programming'` matches that same
+/// entity, as the page also says. Nested `AND`s are one conjunction.
+fn conjunction_matches(
+    entity: &Entity,
+    filters: &[Filter],
+    project_id: &str,
+    database_id: &str,
+) -> bool {
+    let mut terms = Vec::new();
+    flatten_conjunction(filters, &mut terms);
+
+    let mut ranges: Vec<(&str, Vec<&PropertyFilter>)> = Vec::new();
+    for term in terms {
+        let Some(range) = range_filter(term) else {
+            if !entity_matches(entity, term, project_id, database_id) {
+                return false;
+            }
+            continue;
+        };
+        let name = range.property.as_ref().map_or("", |r| r.name.as_str());
+        match ranges.iter_mut().find(|(seen, _)| *seen == name) {
+            Some((_, group)) => group.push(range),
+            None => ranges.push((name, vec![range])),
+        }
+    }
+
+    ranges.iter().all(|(_, group)| {
+        let Some(operands) = group
+            .iter()
+            .map(|filter| operands(entity, filter, project_id, database_id))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        // Every filter in the group names the same property, so `actual` is
+        // the same value in each pair.
+        let Some((actual, _)) = operands.first() else {
+            return false;
+        };
+        fs_elements(actual).iter().any(|element| {
+            group.iter().zip(&operands).all(|(filter, (_, expected))| {
+                element_matches(element, PropertyOp::try_from(filter.op).ok(), expected)
+            })
+        })
+    })
+}
+
+fn flatten_conjunction<'a>(filters: &'a [Filter], terms: &mut Vec<&'a Filter>) {
+    use crate::protos::google::datastore::v1::composite_filter::Operator as CompositeOp;
+
+    for filter in filters {
+        match filter.filter_type.as_ref() {
+            Some(FilterType::CompositeFilter(composite))
+                if composite.op == CompositeOp::And as i32 =>
+            {
+                flatten_conjunction(&composite.filters, terms)
+            }
+            _ => terms.push(filter),
+        }
+    }
+}
+
+fn range_filter(filter: &Filter) -> Option<&PropertyFilter> {
+    match filter.filter_type.as_ref() {
+        Some(FilterType::PropertyFilter(property))
+            if matches!(
+                PropertyOp::try_from(property.op),
+                Ok(PropertyOp::LessThan
+                    | PropertyOp::LessThanOrEqual
+                    | PropertyOp::GreaterThan
+                    | PropertyOp::GreaterThanOrEqual)
+            ) =>
+        {
+            Some(property)
+        }
+        _ => None,
+    }
+}
+
+/// One property filter on its own.
+///
+/// An array-valued property is matched element by element: the public queries
+/// page says the entity "satisfies the filter if any of the values compares to
+/// the value specified in the filter in the manner described by the comparison
+/// operator", for every operator. So `tags = 'y'` matches `['x', 'y']`, and so
+/// do `tags != 'x'` and `tags NOT_IN ['x']`, because `'y'` is a value that is
+/// not `'x'`. An empty array has no value to compare, and matches nothing.
 pub(crate) fn property_matches(
     entity: &Entity,
     filter: &PropertyFilter,
     project_id: &str,
     database_id: &str,
 ) -> bool {
-    let Some(reference) = filter.property.as_ref() else {
+    let Some((actual, expected)) = operands(entity, filter, project_id, database_id) else {
         return false;
     };
+    let op = PropertyOp::try_from(filter.op).ok();
+    fs_elements(&actual)
+        .iter()
+        .any(|element| element_matches(element, op, &expected))
+}
+
+/// The stored property and the filter's value, both as the Firestore values
+/// the store holds, or `None` when the filter cannot match this entity at all.
+fn operands(
+    entity: &Entity,
+    filter: &PropertyFilter,
+    project_id: &str,
+    database_id: &str,
+) -> Option<(FsValue, FsValue)> {
+    let reference = filter.property.as_ref()?;
     if reference.name.contains('.') {
-        return false;
+        return None;
     }
-    let Some(expected) = filter.value.as_ref() else {
-        return false;
-    };
+    let expected = filter.value.as_ref()?;
     if reference.name == "__key__" {
-        return false; // HAS_ANCESTOR already stripped; other key filters later.
+        return None; // HAS_ANCESTOR already stripped; other key filters later.
     }
-    let actual = match entity.properties.get(&reference.name) {
-        Some(value) => value,
-        None => return false,
-    };
+    let actual = entity.properties.get(&reference.name)?;
 
     // Both sides cross into the Firestore values the store actually holds, for
     // the same reason `compile_property_transforms` converts its operands: a
@@ -890,35 +998,33 @@ pub(crate) fn property_matches(
     // unconverted key would never match. A conversion that fails — a key
     // outside this database — is no match rather than an error, because a
     // filter is a question about the entity, not a write.
-    let (Ok(actual), Ok(expected)) = (
+    match (
         ds_value_to_fs(actual, project_id, database_id),
         ds_value_to_fs(expected, project_id, database_id),
-    ) else {
-        return false;
-    };
-
-    let op = PropertyOp::try_from(filter.op);
-
-    // `IN`, `NOT_IN` and `!=` are defined from `=`, one candidate at a time,
-    // with scalar semantics: an array-valued property matches none of them, as
-    // it matches no `=` today. Matching an array per element is a separate
-    // change, and doing it for these three alone would make `!=` disagree with
-    // the `=` it negates. `validate_filter` has already refused an `IN` or
-    // `NOT_IN` whose value is not a non-empty array.
-    if matches!(
-        op,
-        Ok(PropertyOp::In | PropertyOp::NotIn | PropertyOp::NotEqual)
     ) {
-        if is_fs_array(&actual) {
-            return false;
+        (Ok(actual), Ok(expected)) => Some((actual, expected)),
+        _ => None,
+    }
+}
+
+/// One value of a property — the whole property, or one element of an array —
+/// against one filter.
+///
+/// `IN`, `NOT_IN` and `!=` are defined from `=`, one candidate at a time.
+/// `validate_filter` has already refused an `IN` or `NOT_IN` whose value is not
+/// a non-empty array.
+fn element_matches(element: &FsValue, op: Option<PropertyOp>, expected: &FsValue) -> bool {
+    let equals =
+        |candidate: &FsValue| query::comparable(element, candidate) == Some(Ordering::Equal);
+    match op {
+        Some(PropertyOp::NotEqual) => return !equals(expected),
+        Some(PropertyOp::In) => {
+            return fs_list(expected).is_some_and(|list| list.iter().any(equals))
         }
-        let equals =
-            |candidate: &FsValue| query::comparable(&actual, candidate) == Some(Ordering::Equal);
-        return match op {
-            Ok(PropertyOp::NotEqual) => !equals(&expected),
-            Ok(PropertyOp::In) => fs_list(&expected).is_some_and(|list| list.iter().any(equals)),
-            _ => fs_list(&expected).is_some_and(|list| !list.iter().any(equals)),
-        };
+        Some(PropertyOp::NotIn) => {
+            return fs_list(expected).is_some_and(|list| !list.iter().any(equals))
+        }
+        _ => {}
     }
 
     // `None` is "a filter cannot compare these two at all" — different types,
@@ -927,17 +1033,17 @@ pub(crate) fn property_matches(
     // `Ordering::Equal` for every type pair it did not name, so `priority = 3`
     // matched an entity whose `priority` was a string, a blob, or a list, and
     // so did `<=` and `>=`. Real Datastore returns none of those.
-    let Some(ord) = query::comparable(&actual, &expected) else {
+    let Some(ord) = query::comparable(element, expected) else {
         return false;
     };
     match op {
-        Ok(PropertyOp::Equal) => ord == Ordering::Equal,
-        Ok(PropertyOp::LessThan) => ord == Ordering::Less,
-        Ok(PropertyOp::LessThanOrEqual) => {
+        Some(PropertyOp::Equal) => ord == Ordering::Equal,
+        Some(PropertyOp::LessThan) => ord == Ordering::Less,
+        Some(PropertyOp::LessThanOrEqual) => {
             matches!(ord, Ordering::Less | Ordering::Equal)
         }
-        Ok(PropertyOp::GreaterThan) => ord == Ordering::Greater,
-        Ok(PropertyOp::GreaterThanOrEqual) => {
+        Some(PropertyOp::GreaterThan) => ord == Ordering::Greater,
+        Some(PropertyOp::GreaterThanOrEqual) => {
             matches!(ord, Ordering::Greater | Ordering::Equal)
         }
         // `validate_filter` refused every other operator before the read.
@@ -952,8 +1058,10 @@ fn fs_list(value: &FsValue) -> Option<&[FsValue]> {
     }
 }
 
-fn is_fs_array(value: &FsValue) -> bool {
-    fs_list(value).is_some()
+/// The values a filter compares: each element of an array, or the property
+/// itself.
+fn fs_elements(value: &FsValue) -> &[FsValue] {
+    fs_list(value).unwrap_or(std::slice::from_ref(value))
 }
 
 /// What `validate_filter` has seen so far, across the whole filter tree.

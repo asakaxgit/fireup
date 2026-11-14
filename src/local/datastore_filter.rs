@@ -69,11 +69,11 @@
 //!
 //! | Filter | Translated |
 //! | --- | --- |
-//! | `=`, `<`, `<=`, `>`, `>=` on a plain property name | yes |
+//! | `=`, `<`, `<=`, `>`, `>=` on a plain property name | yes, `OR` "the property is an array", whose elements only the evaluator can test |
 //! | `HAS_ANCESTOR` | already removed upstream by `strip_ancestor_filter`; it is *where* to read, not a predicate |
 //! | `AND` of the above | yes |
 //! | `AND` with one untranslatable child | the translatable children are pushed; the whole filter still decides in process |
-//! | `IN` with an array of candidates | yes, as the `Predicate`'s own `IN`: any candidate `=` the property |
+//! | `IN` with an array of candidates | yes, as the `Predicate`'s own `IN` (any candidate `=` the property), with the same array branch |
 //! | `OR` whose every branch translates | yes |
 //! | `OR` with one untranslatable branch | no — that branch could match any entity, so dropping it would drop them |
 //! | `NOT_IN`, `!=` | no — a negation keeps nearly every entity, and the PostgreSQL pushdown declines the Firestore `!=`/`NOT_IN` anyway, so a translation could only add a way to be wrong |
@@ -95,6 +95,8 @@ use crate::protos::google::datastore::v1::filter::FilterType;
 use crate::protos::google::datastore::v1::property_filter::Operator as PropertyOp;
 use crate::protos::google::datastore::v1::value::ValueType as DsValueType;
 use crate::protos::google::datastore::v1::{Filter, PropertyFilter};
+use crate::protos::google::firestore::v1::value::ValueType as FsValueType;
+use crate::protos::google::firestore::v1::{ArrayValue as FsArrayValue, Value as FsValue};
 
 /// Translate the property half of a Datastore query's filter into a pre-filter.
 ///
@@ -204,12 +206,27 @@ fn property_predicate(
     // not translated, rather than turned into an error the unfiltered path
     // would not have raised.
     let value = ds_value_to_fs(filter.value.as_ref()?, project_id, database_id).ok()?;
+    let path = Path::Field(FieldPath::literal(name).ok()?);
 
-    Some(Predicate::Compare {
-        path: Path::Field(FieldPath::literal(name).ok()?),
-        op,
-        value,
-    })
+    // The Datastore evaluator matches an array-valued property element by
+    // element, and a `Predicate` compares the whole array: `tags = 'y'` would
+    // drop `['x', 'y']`. So the pushed predicate also keeps every entity whose
+    // property is an array — `>= []`, since the empty array is the least one —
+    // and leaves the elements to the evaluator.
+    Some(Predicate::Any(vec![
+        Predicate::Compare {
+            path: path.clone(),
+            op,
+            value,
+        },
+        Predicate::Compare {
+            path,
+            op: Comparison::GreaterThanOrEqual,
+            value: FsValue {
+                value_type: Some(FsValueType::ArrayValue(FsArrayValue::default())),
+            },
+        },
+    ]))
 }
 
 #[cfg(test)]
@@ -375,6 +392,13 @@ mod tests {
                     })),
                 )],
             ),
+            // Matched element by element: `= 9` and `< 3` match it, and so
+            // does `!= 1`, but `> 2 AND < 5` does not.
+            entity(
+                "pair",
+                vec![("priority", array(vec![integer(1), integer(9)]))],
+            ),
+            entity("empty", vec![("priority", array(Vec::new()))]),
             entity(
                 "blob",
                 vec![("priority", ds_value(DsValueType::BlobValue(vec![3])))],
@@ -427,6 +451,12 @@ mod tests {
         filters.push(conjunction(vec![
             property("priority", PropertyOp::GreaterThanOrEqual, integer(3)),
             property("owner", PropertyOp::Equal, text("ada")),
+        ]));
+        // Two range filters on one property, which one element has to satisfy
+        // together.
+        filters.push(conjunction(vec![
+            property("priority", PropertyOp::GreaterThan, integer(2)),
+            property("priority", PropertyOp::LessThan, integer(5)),
         ]));
         // An OR every branch of which translates, one with a branch that does
         // not, and an OR nested in an AND.

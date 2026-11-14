@@ -375,10 +375,10 @@ translation, and it reuses the SQL above unchanged:
 
 | Datastore filter | Pushed |
 |---|---|
-| `=`, `<`, `<=`, `>`, `>=` on a plain property name | yes |
+| `=`, `<`, `<=`, `>`, `>=` on a plain property name | yes, widened to also keep every entity whose property is an array, whose elements only the evaluator can test |
 | `AND` of those | yes |
 | `AND` with one untranslatable term | the translatable terms are, and the whole filter still decides in process |
-| `IN` with an array of candidates | yes |
+| `IN` with an array of candidates | yes, with the same array widening |
 | `OR` whose every branch translates | yes |
 | `OR` with one untranslatable branch | no — that branch could match any entity, so dropping it would drop them |
 | `HAS_ANCESTOR` | it chooses *which* collection to read rather than narrowing one, so it is not a predicate |
@@ -539,8 +539,15 @@ cursors, nested property masks, and `HAS_ANCESTOR` inside an `OR` are refused.
 Property filters compare one value against one value. `!=`, `IN` and `NOT_IN`
 are defined from `=`: a property of a different type is "not equal", and an
 entity without the property matches none of them. An **array-valued** property
-matches no property filter yet, `=` included; per-element matching is a
-separate change. A filter the proto's "Requires" lists rule out — two
+is matched one value at a time, for every operator, as the public queries page
+states: `tags = 'y'` matches `['x', 'y']`, and so do `tags != 'x'` and
+`tags NOT_IN ['x']`, because `'y'` is a value that is not `'x'`. An empty array
+matches nothing. Several range filters (`<`, `<=`, `>`, `>=`) on one property
+under `AND` must all hold for **one** value, so `tag > 'learn' AND tag < 'math'`
+does not match `['fun', 'programming']`; equality filters do not share that
+rule, so `tag = 'fun' AND tag = 'programming'` does. Ordering by an
+array-valued property is not the page's "smallest/greatest value" rule yet: it
+sorts the array as one value. A filter the proto's "Requires" lists rule out — two
 `NOT_EQUAL`/`NOT_IN`, `NOT_IN` beside `IN` or `OR`, an `IN`/`NOT_IN` without a
 non-empty array, a `NOT_IN` of more than 10 values, an unset operator — is
 `INVALID_ARGUMENT` rather than an empty answer. The "comes first in

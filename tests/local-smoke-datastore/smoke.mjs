@@ -312,9 +312,9 @@ const expectNames = (rows, want, what) => {
 
 await check('seed the filter fixture', async () => {
   await datastore.save([
-    { key: filterKey('a'), data: { priority: 1, done: false, owner: 'ada' } },
-    { key: filterKey('b'), data: { priority: 2, done: true, owner: 'bob' } },
-    { key: filterKey('c'), data: { priority: 3, done: false, owner: 'ada' } },
+    { key: filterKey('a'), data: { priority: 1, tags: ['x', 'y'], done: false, owner: 'ada' } },
+    { key: filterKey('b'), data: { priority: 2, tags: ['y'], done: true, owner: 'bob' } },
+    { key: filterKey('c'), data: { priority: 3, tags: ['z'], done: false, owner: 'ada' } },
   ])
 }, { served: ['datastore.Commit'] })
 
@@ -342,6 +342,12 @@ await check('an OR composite filter matches either branch', async () => {
     .filter(or([new PropertyFilter('priority', '=', 1), new PropertyFilter('owner', '=', 'bob')]))
   const [rows] = await datastore.runQuery(query)
   expectNames(rows, ['a', 'b'], 'OR filter')
+}, { served: ['datastore.RunQuery'] })
+
+await check('equality on an array property matches any element', async () => {
+  const query = datastore.createQuery(filterKind).filter(new PropertyFilter('tags', '=', 'y'))
+  const [rows] = await datastore.runQuery(query)
+  expectNames(rows, ['a', 'b'], 'array equality')
 }, { served: ['datastore.RunQuery'] })
 
 await check('delete removes the entity', async () => {

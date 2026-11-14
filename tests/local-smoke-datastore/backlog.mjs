@@ -133,12 +133,6 @@ await check('an AND of two equality filters matches both', async () => {
   expectNames(rows, ['a', 'c'], 'AND filter')
 })
 
-await check('equality on an array property matches any element', async () => {
-  const query = datastore.createQuery(kind).filter(new PropertyFilter('tags', '=', 'y'))
-  const [rows] = await datastore.runQuery(query)
-  expectNames(rows, ['a', 'b'], 'array equality')
-})
-
 await check('a __key__ equality filter returns that entity', async () => {
   const query = datastore.createQuery(kind).filter(new PropertyFilter('__key__', '=', key('b')))
   const [rows] = await datastore.runQuery(query)
