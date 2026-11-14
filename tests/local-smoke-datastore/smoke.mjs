@@ -102,6 +102,24 @@ await check('a transaction commit is visible to a later read', async () => {
   }
 })
 
+await check('a read-only transaction reads committed data', async () => {
+  const tx = datastore.transaction({ readOnly: true })
+  await tx.run()
+  const [fetched] = await tx.get(key)
+  await tx.commit()
+  if (fetched?.priority !== 1) throw new Error(`read-only transaction read ${JSON.stringify(fetched)}`)
+})
+
+await check('a read-only transaction that writes stays refused with INVALID_ARGUMENT', async () => {
+  const tx = datastore.transaction({ readOnly: true })
+  await tx.run()
+  tx.save({ key: datastore.key([kind, `ro-${Date.now()}`]), data: { title: 'ro' } })
+  const error = await tx.commit().then(() => null, (caught) => caught)
+  if (error?.code !== 3 || !error.message.includes('read-only transactions cannot modify entities')) {
+    throw new Error(`a read-only write committed or failed wrongly: ${error?.code} ${error?.message}`)
+  }
+})
+
 await check('property transforms report and store their results', async () => {
   const counterName = `counter-${Date.now()}`
   const counterKey = datastore.key([kind, counterName])

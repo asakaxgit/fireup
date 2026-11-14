@@ -520,7 +520,7 @@ What to know before trusting a listener here:
 | `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
 | `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`), `AND`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
 | `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` and `property_mask` (below). |
-| `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. |
+| `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. A read-only transaction may be committed when it carries no mutations, as Google's public [read-only transaction sample](https://cloud.google.com/datastore/docs/concepts/transactions) does; with mutations it is `INVALID_ARGUMENT`. (Firestore `Commit` still refuses a read-only transaction.) |
 | `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
 | `ReserveIds` | served | Acknowledged; local allocations already avoid colliding with completed keys. |
 | `RunAggregationQuery` | `UNIMPLEMENTED` | |

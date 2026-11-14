@@ -254,14 +254,6 @@ await check('merge() keeps the properties it was not given', async () => {
   }
 })
 
-await check('a read-only transaction reads committed data', async () => {
-  const tx = datastore.transaction({ readOnly: true })
-  await tx.run()
-  const [fetched] = await tx.get(key('a'))
-  await tx.commit()
-  if (fetched?.priority !== 1) throw new Error(`read-only transaction read ${JSON.stringify(fetched)}`)
-})
-
 await check('a get at a past readTime returns the entity as it was then', async () => {
   const before = Date.now()
   await new Promise((resolve) => setTimeout(resolve, 50))

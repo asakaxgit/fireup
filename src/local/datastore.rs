@@ -46,7 +46,7 @@ use crate::local::query::{self, Prefilter};
 use crate::local::store::{
     Mutation as StoreMutation, PendingWrite, Precondition, SharedStore, WriteOutcome,
 };
-use crate::local::transactions::Transactions;
+use crate::local::transactions::{Finish, Transactions};
 use crate::protos::google::datastore::v1::commit_request::{
     Mode as CommitMode, TransactionSelector,
 };
@@ -637,15 +637,18 @@ impl Datastore for DatastoreApi {
         self.check_scope(&request.project_id, &request.database_id)?;
 
         let mode = CommitMode::try_from(request.mode).unwrap_or(CommitMode::Unspecified);
+        let finish = Finish::DatastoreCommit {
+            has_mutations: !request.mutations.is_empty(),
+        };
         let read_set_checks = match (mode, request.transaction_selector.as_ref()) {
             (_, Some(TransactionSelector::Transaction(token))) => {
-                self.transactions.finish(token, true)?
+                self.transactions.finish(token, finish)?
             }
             (_, Some(TransactionSelector::SingleUseTransaction(options))) => {
                 // Begin+commit in one RPC: spend a fresh token with an empty
                 // read set so it cannot leak into the registry.
                 let token = self.begin_from_options(&Some(options.clone()))?;
-                self.transactions.finish(&token, true)?
+                self.transactions.finish(&token, finish)?
             }
             (CommitMode::NonTransactional, None)
             | (CommitMode::Unspecified, None)
@@ -715,7 +718,8 @@ impl Datastore for DatastoreApi {
         let request = request.into_inner();
         debug!("Datastore.Rollback");
         self.check_scope(&request.project_id, &request.database_id)?;
-        self.transactions.finish(&request.transaction, false)?;
+        self.transactions
+            .finish(&request.transaction, Finish::Rollback)?;
         Ok(Response::new(RollbackResponse {}))
     }
 

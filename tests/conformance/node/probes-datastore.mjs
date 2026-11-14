@@ -271,6 +271,30 @@ export const datastoreProbes = [
   },
 
   {
+    id: 'datastore.transaction.read-only-commit',
+    served: async ({ datastore, freshKind }) => {
+      const kind = freshKind('rotx')
+      const key = datastore.key([kind, 'one'])
+      await datastore.save({ key, data: { n: 1 } })
+
+      // Google's public read-only sample reads, then commits.
+      const reader = datastore.transaction({ readOnly: true })
+      await reader.run()
+      const [entity] = await reader.get(key)
+      await reader.commit()
+      assert.equal(entity.n, 1)
+
+      // A read-only transaction still cannot write.
+      const writer = datastore.transaction({ readOnly: true })
+      await writer.run()
+      writer.save({ key, data: { n: 2 } })
+      const error = await expectCode(GRPC.INVALID_ARGUMENT, () => writer.commit())
+      assert.match(error.message, /read-only transactions cannot modify entities/)
+      assert.equal((await datastore.get(key))[0].n, 1, 'the refused write must not land')
+    },
+  },
+
+  {
     id: 'datastore.AllocateIds',
     served: async ({ datastore, freshKind }) => {
       const kind = freshKind('allocate')

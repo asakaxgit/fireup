@@ -45,7 +45,7 @@ use tracing::debug;
 use crate::local::names::{parse_document_name, parse_parent_name};
 use crate::local::query::{self, Query};
 use crate::local::store::{self, now_timestamp, Mutation, PendingWrite, SharedStore, WriteEffect};
-use crate::local::transactions::Transactions;
+use crate::local::transactions::{Finish, Transactions};
 use crate::local::transforms;
 use crate::local::watch::{self, WatchHub};
 use crate::protos::google::firestore::v1::run_query_request::QueryType;
@@ -657,7 +657,8 @@ impl Firestore for FirestoreApi {
         let mut batch = if request.transaction.is_empty() {
             Vec::new()
         } else {
-            self.transactions.finish(&request.transaction, true)?
+            self.transactions
+                .finish(&request.transaction, Finish::Commit)?
         };
         let applied = writes.len();
         batch.extend(writes);
@@ -792,7 +793,8 @@ impl Firestore for FirestoreApi {
         // wrote anything. Dropping the token is the whole operation — and it
         // still has to reject an unknown one, or a client bug looks like a
         // success.
-        self.transactions.finish(&request.transaction, false)?;
+        self.transactions
+            .finish(&request.transaction, Finish::Rollback)?;
         Ok(Response::new(()))
     }
 

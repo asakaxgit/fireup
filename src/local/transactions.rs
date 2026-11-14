@@ -46,6 +46,20 @@ use crate::local::store::{Mutation, PendingWrite, Precondition};
 /// production, and stops a crashed client's tokens from accumulating forever.
 pub const TRANSACTION_TTL: Duration = Duration::from_secs(60);
 
+/// How a transaction ends, which decides whether a read-only one may.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Finish {
+    Rollback,
+    /// Firestore `Commit`: a read-only transaction is refused.
+    Commit,
+    /// Datastore `Commit`: Google's public read-only transaction sample
+    /// (cloud.google.com/datastore/docs/concepts/transactions) commits a
+    /// read-only transaction, so one that writes nothing is accepted.
+    DatastoreCommit {
+        has_mutations: bool,
+    },
+}
+
 /// One live transaction.
 struct Active {
     read_only: bool,
@@ -174,7 +188,7 @@ impl Transactions {
     /// Returned as store writes so they go through the *same* store
     /// transaction as the client's writes; checking them separately first would
     /// leave a gap for a concurrent writer to slip into.
-    pub fn finish(&self, token: &[u8], for_commit: bool) -> Result<Vec<PendingWrite>, Status> {
+    pub fn finish(&self, token: &[u8], how: Finish) -> Result<Vec<PendingWrite>, Status> {
         let mut active = self.lock();
         let transaction = active
             .remove(token)
@@ -186,10 +200,27 @@ impl Transactions {
                 TRANSACTION_TTL.as_secs()
             )));
         }
-        if for_commit && transaction.read_only {
-            return Err(Status::invalid_argument(
-                "a read-only transaction cannot be committed; roll it back instead",
-            ));
+        if transaction.read_only {
+            match how {
+                Finish::Rollback => {}
+                Finish::Commit => {
+                    return Err(Status::invalid_argument(
+                        "a read-only transaction cannot be committed; roll it back instead",
+                    ));
+                }
+                Finish::DatastoreCommit {
+                    has_mutations: true,
+                } => {
+                    return Err(Status::invalid_argument(
+                        "read-only transactions cannot modify entities",
+                    ));
+                }
+                // It wrote nothing, so there is nothing its reads could make
+                // stale: release it without read-set checks.
+                Finish::DatastoreCommit {
+                    has_mutations: false,
+                } => return Ok(Vec::new()),
+            }
         }
 
         Ok(transaction
@@ -264,10 +295,12 @@ mod tests {
         let transactions = Transactions::new();
         let token = transactions.begin(&None).expect("begin");
 
-        transactions.finish(&token, true).expect("first finish");
+        transactions
+            .finish(&token, Finish::Commit)
+            .expect("first finish");
         assert_eq!(transactions.live(), 0);
         assert!(
-            transactions.finish(&token, true).is_err(),
+            transactions.finish(&token, Finish::Commit).is_err(),
             "a token must not work twice"
         );
     }
@@ -285,7 +318,7 @@ mod tests {
             )
             .expect("record");
 
-        let checks = transactions.finish(&token, true).expect("finish");
+        let checks = transactions.finish(&token, Finish::Commit).expect("finish");
         let mut found: Vec<(String, Option<Precondition>)> = checks
             .into_iter()
             .map(|write| (write.mutation.name().to_string(), write.precondition))
@@ -313,9 +346,58 @@ mod tests {
         let token = transactions.begin(&options).expect("begin");
 
         let status = transactions
-            .finish(&token, true)
+            .finish(&token, Finish::Commit)
             .expect_err("a read-only transaction has nothing to commit");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    fn read_only_token(transactions: &Transactions) -> Vec<u8> {
+        let options = Some(TransactionOptions {
+            mode: Some(Mode::ReadOnly(ReadOnly {
+                consistency_selector: None,
+            })),
+        });
+        transactions.begin(&options).expect("begin")
+    }
+
+    #[test]
+    fn a_datastore_read_only_transaction_commits_when_it_writes_nothing() {
+        let transactions = Transactions::new();
+        let token = read_only_token(&transactions);
+        transactions
+            .record_reads(&token, &[document("a", Some(ts(10)))], &[])
+            .expect("record");
+
+        let checks = transactions
+            .finish(
+                &token,
+                Finish::DatastoreCommit {
+                    has_mutations: false,
+                },
+            )
+            .expect("an empty read-only commit is accepted");
+        assert!(checks.is_empty(), "nothing written, nothing to verify");
+        assert_eq!(transactions.live(), 0, "the commit releases it");
+    }
+
+    #[test]
+    fn a_datastore_read_only_transaction_cannot_write() {
+        let transactions = Transactions::new();
+        let token = read_only_token(&transactions);
+
+        let status = transactions
+            .finish(
+                &token,
+                Finish::DatastoreCommit {
+                    has_mutations: true,
+                },
+            )
+            .expect_err("a read-only transaction cannot modify entities");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            "read-only transactions cannot modify entities"
+        );
     }
 
     #[test]
@@ -329,7 +411,10 @@ mod tests {
         });
         let token = transactions.begin(&options).expect("begin");
 
-        assert!(transactions.finish(&token, true).expect("finish").is_empty());
+        assert!(transactions
+            .finish(&token, Finish::Commit)
+            .expect("finish")
+            .is_empty());
     }
 
     #[test]
