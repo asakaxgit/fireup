@@ -14,8 +14,6 @@ use uuid::Uuid;
 
 /// Normalization engine that applies 1NF, 2NF, and 3NF rules
 pub struct NormalizationEngine {
-    /// Whether to apply aggressive normalization
-    aggressive_normalization: bool,
     /// Minimum threshold for creating separate tables
     separation_threshold: f64,
 }
@@ -24,16 +22,7 @@ impl NormalizationEngine {
     /// Create a new normalization engine
     pub fn new() -> Self {
         Self {
-            aggressive_normalization: false,
             separation_threshold: 0.3, // 30% occurrence rate
-        }
-    }
-
-    /// Create a new normalization engine with aggressive settings
-    pub fn new_aggressive() -> Self {
-        Self {
-            aggressive_normalization: true,
-            separation_threshold: 0.1, // 10% occurrence rate
         }
     }
 
