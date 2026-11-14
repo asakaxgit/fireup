@@ -1145,15 +1145,17 @@ instead of tripping over the last one's documents.
 
 Its triggers are commented out for now, matching `integration_tests.yml` — CI in
 this repository is manual-only until the repo-wide re-enable, so run it with
-`workflow_dispatch`.
+`workflow_dispatch`. The Node layer of the conformance suite does run on every
+pull request, as part of the fidelity regression gate below.
 
 ### Fidelity regression gate
 
 The smoke suites above have a second job: they are the merge gate. Every pull
 request runs `scripts/fidelity-smoke-gate.sh` in the `fidelity smoke gate
 (official SDKs)` job of `.github/workflows/ci.yml`, a required check on `main`.
-It runs the Firestore, Auth and Datastore smoke suites against the in-memory
-**and** PostgreSQL stores, and compares what passed with
+It runs the Firestore, Auth and Datastore smoke suites, and the Node
+conformance runner (`tests/conformance/node/runner.mjs`, as `conformance/<store>`),
+against the in-memory **and** PostgreSQL stores, and compares what passed with
 [`tests/smoke-gate/baseline.json`](../../tests/smoke-gate/baseline.json): the
 names of the checks that pass on `main`, per suite run (`firestore/memory`,
 `auth/postgres`, …).
@@ -1220,6 +1222,11 @@ await check('an unsupported query reports a clear UNIMPLEMENTED instead of hangi
   // ...
 }, { unimplemented: ['query.aggregations', 'firestore.RunAggregationQuery'] })
 ```
+
+The conformance runner tags each probe with its own row and the status the
+matrix gives it, so the probe is what proves each row the runner drives. A
+probe that stops proving its row is a failed check in `conformance/memory` or
+`conformance/postgres`.
 
 The tags travel in the results file next to `ok`, and the gate fails, naming
 the row, when:
