@@ -991,6 +991,9 @@ struct ReporterCommand {
     /// run 42362531653 — and that is `-e` **without** `-o pipefail`, so a pipe
     /// discards the command's exit status unless the body asks for it back.
     pipefail: bool,
+    /// `true` if it is the only command in its `run:` body, so the step's exit
+    /// status is this command's and nothing else's.
+    alone: bool,
 }
 
 /// The command on the `ci.yml` step that runs `target`.
@@ -1000,23 +1003,26 @@ struct ReporterCommand {
 /// say which command runs the target, for the reason it gives too — the
 /// reporter gone is worse than anything written on it.
 fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
-    let lines: Vec<&str> = ci.lines().collect();
     let needle = format!("--test {target}");
+    let missing =
+        format!("ci.yml runs no `{needle}`, so nothing in CI reports the {target} assertions.");
+    command_running(ci, &needle, &missing)
+}
+
+/// The command on the one `ci.yml` step whose `run:` holds `needle`. `missing`
+/// is the error when no step does; the other refusals are `reporter_command`'s.
+fn command_running(ci: &str, needle: &str, missing: &str) -> Result<ReporterCommand, String> {
+    let lines: Vec<&str> = ci.lines().collect();
 
     let found: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| without_comment(line).contains(&needle))
+        .filter(|(_, line)| without_comment(line).contains(needle))
         .map(|(at, _)| at)
         .collect();
     let at = match found[..] {
         [at] => at,
-        [] => {
-            return Err(format!(
-                "ci.yml runs no `{needle}`, so nothing in CI reports the {target} \
-                 assertions."
-            ))
-        }
+        [] => return Err(missing.to_string()),
         _ => {
             return Err(format!(
                 "ci.yml has {} steps running `{needle}`; which of them is the reporter \
@@ -1102,7 +1108,7 @@ fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
     let running: Vec<usize> = logical
         .iter()
         .enumerate()
-        .filter(|(_, line)| line.contains(&needle))
+        .filter(|(_, line)| line.contains(needle))
         .map(|(at, _)| at)
         .collect();
     // No control covers the `_` arm below, and that is deliberate rather than
@@ -1128,6 +1134,7 @@ fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
             text.starts_with("set ") && text.contains("pipefail")
         }),
         command: logical[command_at].clone(),
+        alone: logical.len() == 1,
     })
 }
 
@@ -1402,17 +1409,30 @@ mod reporter_command_controls {
 //
 // `scripts/fidelity-smoke-gate.sh` fails a pull request that breaks an SDK
 // smoke check passing on `main`, and its job in `ci.yml` is a required status
-// check. Being required does not cover the two cheapest ways to switch it off.
+// check. Being required does not cover the cheap ways to switch it off.
 // `continue-on-error: true` on the gate step lets the step fail and the job
 // conclude success, and an `if:` that skips the job reports Success to a
-// required check. Both are one line in `ci.yml`, and a gate cannot report its
-// own removal, so the guard lives here, in the `test` job.
+// required check. So do two edits found in review: `|| true` after the gate
+// command discards its exit status, and a `needs:` on the job skips the gate
+// whenever the needed job is skipped or fails. All are one line in `ci.yml`,
+// and a gate cannot report its own removal, so the guard lives here, in the
+// `test` job.
 
 /// What makes a step the fidelity gate: the command, not the step's `name:`.
 const FIDELITY_GATE_COMMAND: &str = "scripts/fidelity-smoke-gate.sh";
 
-/// The live `if:` / `continue-on-error:` on the job containing the step that
-/// opens at line `step_start`.
+/// The job keys that decide whether the gate job runs and whether its verdict
+/// counts. `needs:` is here because a job whose needed job is skipped or fails
+/// is itself skipped, and a skipped job satisfies a required check.
+const JOB_CONDITION_KEYS: &[&str] = &["if", "continue-on-error", "needs"];
+
+/// Characters that make a shell word more than a plain argument: a list or
+/// pipe operator, a redirect, a subshell or a substitution. Any of them after
+/// the gate script means the step's exit status may no longer be the script's.
+const SHELL_OPERATOR_CHARS: &[char] = &['|', '&', ';', '<', '>', '(', ')', '`'];
+
+/// The live `if:` / `continue-on-error:` / `needs:` on the job containing the
+/// step that opens at line `step_start`.
 ///
 /// Walks up from the step to its `steps:` key, takes that key's indentation as
 /// the job's key indentation, and reads the job's own keys from the line that
@@ -1453,7 +1473,7 @@ fn job_conditions(ci: &str, step_start: usize) -> Result<Vec<StepCondition>, Str
         if indent_of(line) != key_indent {
             continue;
         }
-        for key in STEP_CONDITION_KEYS {
+        for key in JOB_CONDITION_KEYS {
             if let Some(value) = bare.trim_start().strip_prefix(&format!("{key}:")) {
                 conditions.push(StepCondition {
                     key: (*key).to_string(),
@@ -1475,8 +1495,40 @@ fn fidelity_gate_is_unconditional(ci: &str) -> Result<(), String> {
     let (start, on_step) = step_conditions(ci, FIDELITY_GATE_COMMAND, &missing)?;
     let on_job = job_conditions(ci, start)?;
 
+    let gate = command_running(ci, FIDELITY_GATE_COMMAND, &missing)?;
+    let command = gate.command.trim();
+    let arguments = command.strip_prefix(FIDELITY_GATE_COMMAND);
+    let plain = arguments.is_some_and(|rest| {
+        (rest.is_empty() || rest.starts_with(' ')) && !rest.contains(SHELL_OPERATOR_CHARS)
+    });
+    if !gate.alone || !plain {
+        return Err(format!(
+            "the fidelity gate's `run:` does not end its exit status at the gate script: \
+             `{command}`. A step concludes with its shell's last exit status, so `|| true`, \
+             `|| :`, `|| exit 0`, `; true` or another command after the script turns a \
+             failing gate into a passing step, and a command before it can stop the script \
+             running at all. The gate step's `run:` must be that one command, starting with \
+             `{FIDELITY_GATE_COMMAND}`, with plain arguments only -- none of \
+             {SHELL_OPERATOR_CHARS:?}. Set environment through the step's `env:`."
+        ));
+    }
+
     for (place, conditions) in [("step", on_step), ("job", on_job)] {
         for StepCondition { key, value } in conditions {
+            if key == "needs" {
+                return Err(format!(
+                    "the fidelity gate's job carries `needs:{}`. When a needed job is \
+                     skipped or fails, this job is skipped too, and a skipped job satisfies \
+                     a required check -- so a regression merges green whenever the needed \
+                     job does not run. The gate needs nothing from another job; drop the \
+                     `needs:`.",
+                    if value.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {value}")
+                    }
+                ));
+            }
             let holds = if key == "continue-on-error" {
                 value == "false"
             } else {
@@ -1561,6 +1613,79 @@ mod fidelity_gate_controls {
             "        continue-on-error: false\n",
         );
         assert_eq!(fidelity_gate_is_unconditional(&strict), Ok(()));
+    }
+
+    #[test]
+    fn discarding_the_gate_commands_exit_status_is_caught() {
+        let gate = format!("run: {FIDELITY_GATE_COMMAND}");
+        for tail in [
+            " || true",
+            " ||true",
+            " || :",
+            " || exit 0",
+            " ; true",
+            "; true",
+            " | tee log",
+            " & wait",
+        ] {
+            let ci = ci_with("", "").replace(&gate, &format!("{gate}{tail}"));
+            let verdict = fidelity_gate_is_unconditional(&ci);
+            assert!(
+                verdict.is_err_and(
+                    |why| why.contains("does not end its exit status at the gate script")
+                ),
+                "{tail:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_around_the_gate_in_a_block_is_caught() {
+        let gate = format!("run: {FIDELITY_GATE_COMMAND}");
+        for body in [
+            format!("run: |\n          {FIDELITY_GATE_COMMAND}\n          true"),
+            format!("run: |\n          set +e\n          {FIDELITY_GATE_COMMAND}"),
+            format!("run: |\n          {FIDELITY_GATE_COMMAND} \\\n            || true"),
+            format!("run: true || {FIDELITY_GATE_COMMAND}"),
+            format!("run: ! {FIDELITY_GATE_COMMAND}"),
+            format!("run: {FIDELITY_GATE_COMMAND}-old"),
+        ] {
+            let ci = ci_with("", "").replace(&gate, &body);
+            let verdict = fidelity_gate_is_unconditional(&ci);
+            assert!(
+                verdict.is_err_and(
+                    |why| why.contains("does not end its exit status at the gate script")
+                ),
+                "{body:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_arguments_to_the_gate_pass() {
+        let gate = format!("run: {FIDELITY_GATE_COMMAND}");
+        for body in [
+            format!("{gate} results"),
+            format!("run: |\n          {FIDELITY_GATE_COMMAND}"),
+        ] {
+            let ci = ci_with("", "").replace(&gate, &body);
+            assert_eq!(fidelity_gate_is_unconditional(&ci), Ok(()), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn a_needs_on_the_gate_job_is_caught() {
+        for needs in [
+            "    needs: test\n",
+            "    needs: [test, deny]\n",
+            "    needs:\n      - other\n",
+        ] {
+            let verdict = fidelity_gate_is_unconditional(&ci_with(needs, ""));
+            assert!(
+                verdict.is_err_and(|why| why.contains("job carries `needs:")),
+                "{needs:?} passed"
+            );
+        }
     }
 
     #[test]
