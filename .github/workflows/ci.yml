@@ -286,9 +286,10 @@ jobs:
           npm ci --no-audit --no-fund --prefix tests/local-smoke-datastore
 
       # The comparison rule and the baseline's coverage of the suite runs,
-      # before the minutes-long part.
+      # before the minutes-long part; and the triage role's clustering rule,
+      # which reads the same results files.
       - name: Gate rule
-        run: node --test tests/smoke-gate/compare.test.mjs
+        run: node --test tests/smoke-gate/compare.test.mjs tests/smoke-gate/cluster.test.mjs
 
       - name: Fidelity regression gate
         env:
