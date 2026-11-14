@@ -48,6 +48,18 @@ test('a failing check proves nothing', () => {
   assert.deepEqual(rowsIn(problems), ['firestore.Commit'])
 })
 
+test('a row must pass in every suite run that checks it', () => {
+  // Proven in memory and failing on PostgreSQL is a broken row, not a proven one.
+  const results = [
+    { suite: 'firestore/memory', checks: [commitCheck, refusalCheck] },
+    { suite: 'firestore/postgres', checks: [{ ...commitCheck, ok: false }, refusalCheck] },
+  ]
+  const { problems, proven } = matrixCoverage(matrix, results, noGaps)
+  assert.deepEqual(rowsIn(problems), ['firestore.Commit'])
+  assert.match(problems[0].message, /row firestore\.Commit \("Commit"\) is "served" but none of its checks passed in firestore\/postgres/)
+  assert.deepEqual(proven, ['query.aggregations'])
+})
+
 test('a row flipped without its check fails, in both directions', () => {
   // The row now says served, the check still asserts the refusal: the check
   // is passing, so this is exactly the drift nothing else would report.

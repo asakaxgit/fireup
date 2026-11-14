@@ -34,7 +34,11 @@ const tagsOf = (covers) =>
 export const matrixCoverage = (matrix, results, gaps) => {
   const rows = new Map(matrix.features.map((feature) => [feature.id, feature]))
   const problems = []
-  const provenBy = new Map()
+  // Per row, the suite runs that report a check of it, and the passing checks
+  // per run. A row is proven only when every run that checks it has a pass, so
+  // a row that works in memory and fails on PostgreSQL is not proven.
+  const checkedIn = new Map()
+  const passedIn = new Map()
 
   for (const { suite, checks } of results) {
     for (const { name, ok, covers } of checks) {
@@ -57,12 +61,22 @@ export const matrixCoverage = (matrix, results, gaps) => {
               `row ${id} is "${row.status}" in the matrix, but check "${name}" (${suite}) asserts it is "${status}". ` +
               'A row and the check that proves it flip together.',
           })
-        } else if (ok === true) {
-          provenBy.set(id, [...(provenBy.get(id) ?? []), `${suite}: ${name}`])
+        } else {
+          checkedIn.set(id, new Set([...(checkedIn.get(id) ?? []), suite]))
+          if (ok === true) {
+            passedIn.set(id, new Map([...(passedIn.get(id) ?? []), [suite, name]]))
+          }
         }
       }
     }
   }
+
+  const unprovenIn = (id) => [...(checkedIn.get(id) ?? [])].filter((suite) => !passedIn.get(id)?.has(suite))
+  const provenBy = new Map(
+    [...checkedIn.keys()]
+      .filter((id) => unprovenIn(id).length === 0)
+      .map((id) => [id, [...passedIn.get(id)].map(([suite, name]) => `${suite}: ${name}`)]),
+  )
 
   const gapRows = new Map()
   for (const gap of gaps.rows) {
@@ -91,6 +105,15 @@ export const matrixCoverage = (matrix, results, gaps) => {
 
   for (const row of matrix.features) {
     if (provenBy.has(row.id) || gapRows.has(row.id)) continue
+    if (checkedIn.has(row.id)) {
+      problems.push({
+        row: row.id,
+        message:
+          `row ${row.id} ("${row.label}") is "${row.status}" but none of its checks passed in ` +
+          `${unprovenIn(row.id).join(', ')}.`,
+      })
+      continue
+    }
     const demand = {
       served: 'a passing check that it works',
       unimplemented: 'a passing check that it is refused with an explicit error',
