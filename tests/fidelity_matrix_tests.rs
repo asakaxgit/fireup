@@ -11,6 +11,7 @@
 //! which is the point: it fails in `cargo test` in a second, long before
 //! anybody waits on the SDK layer.
 
+use saphyr::{LoadableYamlNode, Yaml};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -681,6 +682,25 @@ fn unreadable_key(place: &str, text: &str) -> String {
     )
 }
 
+/// `Err` unless `ci` loads under `saphyr`, which holds to the YAML spec. This
+/// line reader assumes the indentation the spec requires; libyaml-based readers
+/// (PyYAML, and js-yaml too) accept more. A quoted string whose continuation
+/// line sits left of its key -- `NOTE: "x` over `      - a: b` over `"` -- loads
+/// in both, and its `- a: b` passed for the step and hid the real `if: false`.
+/// Refusing what the spec refuses closes that whole class, not one spelling.
+/// The guards call it last, so a shape the line reader already refuses keeps
+/// its own, more specific message.
+fn spec_strict(ci: &str) -> Result<(), String> {
+    Yaml::load_from_str(ci).map(drop).map_err(|error| {
+        format!(
+            "ci.yml does not load under a YAML-spec reader ({error}). Lenient readers \
+             such as PyYAML accept lines this guard cannot place -- a quoted string \
+             continued left of its key can hide a step's `if: false` -- so it refuses \
+             rather than guessing. Indent every continuation line past its key."
+        )
+    })
+}
+
 /// The line that opens the step holding line `at`, and the column the step's
 /// keys sit at. YAML puts a step's keys wherever its first key lands, so that
 /// column is read off the `-` line -- `-   name:` puts them at dash + 4 -- not
@@ -690,7 +710,9 @@ fn unreadable_key(place: &str, text: &str) -> String {
 /// and landed on the step before. A `-` line counts only if it sits left of
 /// every non-blank line between it and `at`: a `- a: b` inside an earlier
 /// key's block scalar is deeper than that key, so it can never pass for the
-/// step and hide the real step's `if: false` above it.
+/// step and hide the real step's `if: false` above it. A quoted string's
+/// continuation lines are not bound by that ceiling in PyYAML or js-yaml, but
+/// the YAML spec does bind them, and `spec_strict` refuses the file first.
 fn step_opener(lines: &[&str], at: usize, needle: &str) -> Result<(usize, usize), String> {
     let mut ceiling = usize::MAX;
     let start = (0..=at)
@@ -757,7 +779,9 @@ fn reporting_step(ci: &str, target: &str) -> Result<Vec<StepCondition>, String> 
          executes. Restore the step, or point GUARDED_TARGET at wherever the \
          target moved."
     );
-    step_conditions(ci, &needle, &missing).map(|(_, conditions)| conditions)
+    let (_, conditions) = step_conditions(ci, &needle, &missing)?;
+    spec_strict(ci)?;
+    Ok(conditions)
 }
 
 /// The live `if:` / `continue-on-error:` on the one step whose command contains
@@ -959,6 +983,22 @@ mod supply_chain_reporter_controls {
                 key: "if".to_string(),
                 value: "false".to_string()
             }]
+        );
+    }
+
+    #[test]
+    fn a_dash_line_inside_a_quoted_string_is_not_the_pin_step() {
+        // A quoted scalar's continuation lines may sit at any column, so the
+        // ceiling does not stop `- a: b`; YAML reads the step's own `if: false`.
+        let hidden = ci_with("").replace(
+            "      - name: Supply-chain pins\n        run:",
+            "      - name: Supply-chain pins\n        if: false\n        env:\n          \
+             NOTE: \"x\n      - a: b\n          \"\n        run:",
+        );
+        assert!(
+            reporting_step(&hidden, GUARDED_TARGET)
+                .is_err_and(|why| why.contains("does not load under a YAML-spec reader")),
+            "a step hidden behind a quoted string's `-` passed"
         );
     }
 
@@ -1731,7 +1771,7 @@ fn fidelity_gate_is_unconditional(ci: &str) -> Result<(), String> {
             }
         }
     }
-    Ok(())
+    spec_strict(ci)
 }
 
 #[test]
@@ -2019,6 +2059,19 @@ mod fidelity_gate_controls {
         assert!(
             verdict.is_err_and(|why| why.contains("step carries `if: false`")),
             "a step hidden behind a block scalar's `-` passed"
+        );
+    }
+
+    #[test]
+    fn a_dash_line_inside_a_quoted_string_is_not_the_gate_step() {
+        let ci = ci_with(
+            "",
+            "        if: false\n        env:\n          NOTE: \"x\n      - a: b\n          \"\n",
+        );
+        let verdict = fidelity_gate_is_unconditional(&ci);
+        assert!(
+            verdict.is_err_and(|why| why.contains("does not load under a YAML-spec reader")),
+            "a step hidden behind a quoted string's `-` passed"
         );
     }
 
