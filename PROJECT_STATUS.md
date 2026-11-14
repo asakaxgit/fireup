@@ -90,7 +90,7 @@ implementation.
   - Removes partial dependencies
   - Eliminates transitive dependencies
 - Type conflict detection and resolution with warnings
-- NOT NULL constraint recommendations based on data completeness
+- `NOT NULL` only on fields present in every document (#42)
 - Comprehensive transformation reporting
 
 **Test Coverage:** Unit tests passing
@@ -102,8 +102,8 @@ implementation.
 **Capabilities:**
 - Generate CREATE TABLE statements from normalized schemas
 - Primary key and foreign key definitions
-- Index recommendations for common query patterns
-- Constraint generation (NOT NULL, UNIQUE, CHECK)
+- A btree index on each foreign key column (normalized schemas only)
+- `NOT NULL` from field presence; no `UNIQUE` or `CHECK` constraints are inferred
 - Output DDL files for administrator review
 - Detailed transformation reports
 
@@ -987,7 +987,7 @@ answered by *not* building what they asked for.
 - [x] Field type and nested structure identification
 - [x] Automatic normalization (1NF, 2NF, 3NF)
 - [x] Type conflict detection with warnings
-- [x] NOT NULL constraint recommendations
+- [x] `NOT NULL` from field presence (#42)
 - [x] DDL file generation for review
 - [x] Detailed transformation reporting
 

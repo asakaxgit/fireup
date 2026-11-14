@@ -137,10 +137,6 @@ enum Commands {
         #[arg(long)]
         normalize: bool,
         
-        /// Generate indexes for foreign keys and common query patterns
-        #[arg(long)]
-        generate_indexes: bool,
-        
         /// Include detailed analysis report with statistics
         #[arg(long)]
         detailed: bool,
@@ -325,14 +321,13 @@ async fn main() -> Result<()> {
             backup_file, 
             output, 
             normalize,
-            generate_indexes,
             detailed,
             format,
             show_conflicts,
         } => {
             info!("Analyzing schema from {:?}", backup_file);
-            info!("Configuration: normalize={}, generate_indexes={}, detailed={}, format={:?}, show_conflicts={}", 
-                  normalize, generate_indexes, detailed, format, show_conflicts);
+            info!("Configuration: normalize={}, detailed={}, format={:?}, show_conflicts={}", 
+                  normalize, detailed, format, show_conflicts);
             
             let output_path = output.unwrap_or_else(|| PathBuf::from("schema.sql"));
             info!("Output will be written to: {:?}", output_path);
@@ -341,7 +336,6 @@ async fn main() -> Result<()> {
                 &backup_file,
                 &output_path,
                 normalize,
-                generate_indexes,
                 detailed,
                 format,
                 show_conflicts,
@@ -699,7 +693,6 @@ async fn execute_analyze_pipeline(
     backup_file: &PathBuf,
     output_path: &PathBuf,
     normalize: bool,
-    generate_indexes: bool,
     detailed: bool,
     format: OutputFormat,
     show_conflicts: bool,
@@ -732,11 +725,6 @@ async fn execute_analyze_pipeline(
     // Step 4: Generate DDL
     info!("Step 4: Generating DDL statements");
     let ddl_generator = DDLGenerator::new();
-    
-    if generate_indexes {
-        // Configure DDL generator to include indexes
-        info!("Including index generation");
-    }
     
     let generated_ddl = ddl_generator.generate_ddl(&schema)?;
     
