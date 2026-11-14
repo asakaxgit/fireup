@@ -380,7 +380,7 @@
       "status": "served",
       "driver": "node-sdk",
       "python": true,
-      "note": "Property filters =, <, <=, >, >=, !=, IN, NOT_IN under AND and OR, a filter the proto's Requires lists rule out is INVALID_ARGUMENT. An array-valued property matches when any one of its values does, for every operator, and range filters on one property under AND must hold for the same value. Ordering by an array-valued property does not yet use the smallest/greatest value."
+      "note": "Property filters =, <, <=, >, >=, !=, IN, NOT_IN under AND and OR, the same operators on __key__, and order by __key__ in the public key order; a filter the proto's Requires lists rule out is INVALID_ARGUMENT. An array-valued property matches when any one of its values does, for every operator, and range filters on one property under AND must hold for the same value. Ordering by an array-valued property does not yet use the smallest/greatest value."
     },
     {
       "id": "datastore.Commit",
@@ -898,9 +898,10 @@
       "id": "datastore.cursors",
       "docTable": null,
       "label": "Datastore query cursors",
-      "status": "unimplemented",
-      "driver": "node-grpc",
-      "python": false
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false,
+      "note": "start_cursor and end_cursor are positions in the query's order with __key__ breaking ties; every batch returns an end_cursor (never empty), skipped_cursor and per-result cursors, and more_results says whether the limit or the end cursor cut the answer short. The cursor bytes are Fireup's own format; a cursor Fireup did not write is INVALID_ARGUMENT."
     },
     {
       "id": "datastore.nested-property-mask",

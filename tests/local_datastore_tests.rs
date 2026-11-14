@@ -15,14 +15,16 @@ use fireup::protos::google::datastore::v1::key::path_element::IdType;
 use fireup::protos::google::datastore::v1::key::PathElement;
 use fireup::protos::google::datastore::v1::mutation::Operation;
 use fireup::protos::google::datastore::v1::property_filter::Operator as PropertyOp;
+use fireup::protos::google::datastore::v1::property_order::Direction;
 use fireup::protos::google::datastore::v1::property_transform::{ServerValue, TransformType};
+use fireup::protos::google::datastore::v1::query_result_batch::MoreResultsType;
 use fireup::protos::google::datastore::v1::run_query_request::QueryType;
 use fireup::protos::google::datastore::v1::value::ValueType;
 use fireup::protos::google::datastore::v1::{
     filter::FilterType, AllocateIdsRequest, ArrayValue, BeginTransactionRequest, CommitRequest,
-    CompositeFilter, Entity, Filter, Key, KindExpression, LookupRequest, Mutation, PropertyFilter,
-    PropertyMask, PropertyReference, PropertyTransform, Query, RollbackRequest,
-    RunAggregationQueryRequest, RunQueryRequest, Value,
+    CompositeFilter, Entity, Filter, Key, KindExpression, LookupRequest, Mutation, PartitionId,
+    PropertyFilter, PropertyMask, PropertyOrder, PropertyReference, PropertyTransform, Query,
+    QueryResultBatch, RollbackRequest, RunAggregationQueryRequest, RunQueryRequest, Value,
 };
 use tonic::transport::Channel;
 use tonic::Code;
@@ -1574,6 +1576,473 @@ async fn filters_the_proto_rules_out_are_invalid_arguments() {
             .await
             .expect_err(what);
         assert_eq!(status.code(), Code::InvalidArgument, "{what}: {status}");
+    }
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+fn key_value(key: Key) -> Value {
+    Value {
+        value_type: Some(ValueType::KeyValue(key)),
+        ..Default::default()
+    }
+}
+
+fn path_key(path: &[(&str, IdType)]) -> Key {
+    Key {
+        partition_id: None,
+        path: path
+            .iter()
+            .map(|(kind, id)| PathElement {
+                kind: kind.to_string(),
+                id_type: Some(id.clone()),
+            })
+            .collect(),
+    }
+}
+
+/// Seeds kind `Keyed` with two numeric ids, two names, and a child of id 9,
+/// so the public key order differs from the document name's string order in
+/// two places: `10` after `9`, and the child between them.
+async fn seed_keyed(client: &mut DatastoreClient<Channel>) {
+    let kind = "Keyed";
+    let keys = [
+        path_key(&[(kind, IdType::Id(10))]),
+        path_key(&[(kind, IdType::Name("b".into()))]),
+        path_key(&[(kind, IdType::Id(9)), (kind, IdType::Name("child".into()))]),
+        path_key(&[(kind, IdType::Name("a".into()))]),
+        path_key(&[(kind, IdType::Id(9))]),
+    ];
+    let mutations = keys
+        .into_iter()
+        .map(|key| Mutation {
+            operation: Some(Operation::Upsert(entity(key, HashMap::new()))),
+            ..Default::default()
+        })
+        .collect();
+    client
+        .commit(CommitRequest {
+            project_id: PROJECT.to_string(),
+            mode: CommitMode::NonTransactional as i32,
+            mutations,
+            ..Default::default()
+        })
+        .await
+        .expect("seed");
+}
+
+/// A `__key__` order sorts in the public key order: element by element, a
+/// numeric id before a name, ids as numbers, a key before its descendants.
+#[tokio::test]
+async fn a_query_orders_by_key_in_the_public_key_order() {
+    let (server, mut client) = start().await;
+    seed_keyed(&mut client).await;
+
+    let ascending = ["9", "child", "10", "a", "b"];
+    for (direction, want) in [
+        (Direction::Ascending, ascending.to_vec()),
+        (
+            Direction::Descending,
+            ascending.iter().rev().copied().collect(),
+        ),
+    ] {
+        let batch = client
+            .run_query(RunQueryRequest {
+                project_id: PROJECT.to_string(),
+                query_type: Some(QueryType::Query(Query {
+                    kind: vec![KindExpression {
+                        name: "Keyed".to_string(),
+                    }],
+                    order: vec![PropertyOrder {
+                        property: Some(PropertyReference {
+                            name: "__key__".to_string(),
+                        }),
+                        direction: direction as i32,
+                    }],
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+            .await
+            .expect("query")
+            .into_inner()
+            .batch
+            .expect("batch");
+        let got: Vec<String> = batch
+            .entity_results
+            .into_iter()
+            .filter_map(|result| result.entity?.key?.path.pop()?.id_type)
+            .map(|id| match id {
+                IdType::Name(name) => name,
+                IdType::Id(id) => id.to_string(),
+            })
+            .collect();
+        assert_eq!(got, want, "{direction:?}");
+    }
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// Every operator a property filter takes is served on `__key__`, under the
+/// same key order.
+#[tokio::test]
+async fn key_filters_are_served_in_the_public_key_order() {
+    let (server, mut client) = start().await;
+    seed_keyed(&mut client).await;
+
+    let id = |id| key_value(path_key(&[("Keyed", IdType::Id(id))]));
+    let name = |name: &str| key_value(path_key(&[("Keyed", IdType::Name(name.into()))]));
+    let by_key = |op, value| property_filter("__key__", op, value);
+    let keys = |values: Vec<Value>| Value {
+        value_type: Some(ValueType::ArrayValue(ArrayValue { values })),
+        ..Default::default()
+    };
+
+    for (filter, want) in [
+        (by_key(PropertyOp::Equal, id(10)), vec!["10"]),
+        (by_key(PropertyOp::Equal, name("a")), vec!["a"]),
+        // As strings, "10" < "9"; as ids, 10 > 9. The child of 9 is above 9.
+        (
+            by_key(PropertyOp::GreaterThan, id(9)),
+            vec!["10", "a", "b", "child"],
+        ),
+        // Every id precedes every name.
+        (
+            by_key(PropertyOp::LessThan, name("a")),
+            vec!["10", "9", "child"],
+        ),
+        (by_key(PropertyOp::LessThanOrEqual, id(9)), vec!["9"]),
+        (
+            by_key(PropertyOp::NotEqual, name("a")),
+            vec!["10", "9", "b", "child"],
+        ),
+        (
+            by_key(PropertyOp::In, keys(vec![id(9), name("b")])),
+            vec!["9", "b"],
+        ),
+        (
+            by_key(PropertyOp::NotIn, keys(vec![id(9), name("b")])),
+            vec!["10", "a", "child"],
+        ),
+        // Two ranges on `__key__` under AND, which the per-element grouping of
+        // property ranges must leave alone.
+        (
+            composite(
+                CompositeOp::And,
+                vec![
+                    by_key(PropertyOp::GreaterThanOrEqual, id(10)),
+                    by_key(PropertyOp::LessThan, name("b")),
+                ],
+            ),
+            vec!["10", "a"],
+        ),
+        (
+            composite(
+                CompositeOp::Or,
+                vec![
+                    by_key(PropertyOp::Equal, id(9)),
+                    by_key(PropertyOp::Equal, name("b")),
+                ],
+            ),
+            vec!["9", "b"],
+        ),
+    ] {
+        let got = query_names(&mut client, "Keyed", filter.clone())
+            .await
+            .unwrap_or_else(|status| panic!("{filter:?} was refused: {status}"));
+        assert_eq!(got, want, "{filter:?}");
+    }
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// A `__key__` filter whose value is not a complete key in this database is
+/// refused, rather than matching nothing.
+#[tokio::test]
+async fn a_key_filter_needs_a_complete_key_in_this_database() {
+    let (server, mut client) = start().await;
+
+    let mut elsewhere = named_key("Keyed", "a");
+    elsewhere.partition_id = Some(PartitionId {
+        project_id: "another-project".to_string(),
+        ..Default::default()
+    });
+    for (what, filter) in [
+        (
+            "a string",
+            property_filter("__key__", PropertyOp::Equal, string_value("a")),
+        ),
+        (
+            "an IN of strings",
+            property_filter(
+                "__key__",
+                PropertyOp::In,
+                Value {
+                    value_type: Some(ValueType::ArrayValue(ArrayValue {
+                        values: vec![string_value("a")],
+                    })),
+                    ..Default::default()
+                },
+            ),
+        ),
+        (
+            "an incomplete key",
+            property_filter(
+                "__key__",
+                PropertyOp::GreaterThan,
+                key_value(incomplete_key("Keyed")),
+            ),
+        ),
+        (
+            "a key in another project",
+            property_filter("__key__", PropertyOp::Equal, key_value(elsewhere)),
+        ),
+    ] {
+        let status = query_names(&mut client, "Keyed", filter)
+            .await
+            .expect_err(what);
+        assert_eq!(status.code(), Code::InvalidArgument, "{what}: {status}");
+    }
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// One `RunQuery` over kind `Paged`, ordered by `priority` when `by_priority`.
+async fn run_paged(
+    client: &mut DatastoreClient<Channel>,
+    by_priority: bool,
+    shape: impl FnOnce(&mut Query),
+) -> Result<QueryResultBatch, tonic::Status> {
+    let mut query = Query {
+        kind: vec![KindExpression {
+            name: "Paged".to_string(),
+        }],
+        ..Default::default()
+    };
+    if by_priority {
+        query.order.push(PropertyOrder {
+            property: Some(PropertyReference {
+                name: "priority".to_string(),
+            }),
+            direction: Direction::Ascending as i32,
+        });
+    }
+    shape(&mut query);
+    Ok(client
+        .run_query(RunQueryRequest {
+            project_id: PROJECT.to_string(),
+            query_type: Some(QueryType::Query(query)),
+            ..Default::default()
+        })
+        .await?
+        .into_inner()
+        .batch
+        .expect("batch"))
+}
+
+/// The names a batch returned, in the order it returned them.
+fn batch_names(batch: &QueryResultBatch) -> Vec<String> {
+    batch
+        .entity_results
+        .iter()
+        .filter_map(|result| {
+            result
+                .entity
+                .as_ref()?
+                .key
+                .as_ref()?
+                .path
+                .last()?
+                .id_type
+                .clone()
+        })
+        .map(|id| match id {
+            IdType::Name(name) => name,
+            IdType::Id(id) => id.to_string(),
+        })
+        .collect()
+}
+
+/// Seeds kind `Paged` with `a`..`e`, three of them tied on `priority`, so a
+/// page boundary falls inside the tie.
+async fn seed_paged(client: &mut DatastoreClient<Channel>) {
+    let mutations = [("e", 3), ("d", 2), ("c", 2), ("b", 2), ("a", 1)]
+        .into_iter()
+        .map(|(name, priority)| Mutation {
+            operation: Some(Operation::Upsert(entity(
+                named_key("Paged", name),
+                HashMap::from([("priority".to_string(), integer_value(priority))]),
+            ))),
+            ..Default::default()
+        })
+        .collect();
+    client
+        .commit(CommitRequest {
+            project_id: PROJECT.to_string(),
+            mode: CommitMode::NonTransactional as i32,
+            mutations,
+            ..Default::default()
+        })
+        .await
+        .expect("seed");
+}
+
+/// A limited query used to answer an empty `end_cursor` and
+/// `NO_MORE_RESULTS`, so a client asking for page 2 got page 1 again. Each
+/// page now ends with a cursor that resumes just after it, ties broken by
+/// key, and says whether the limit cut the answer short.
+#[tokio::test]
+async fn end_cursors_page_through_a_limited_query() {
+    let (server, mut client) = start().await;
+    seed_paged(&mut client).await;
+
+    for by_priority in [true, false] {
+        let mut pages = Vec::new();
+        let mut cursor = Vec::new();
+        loop {
+            let start = cursor.clone();
+            let batch = run_paged(&mut client, by_priority, |query| {
+                query.limit = Some(2);
+                query.start_cursor = start;
+            })
+            .await
+            .expect("page");
+            assert!(!batch.end_cursor.is_empty(), "an end cursor is never empty");
+            pages.push((batch_names(&batch), batch.more_results));
+            if batch.more_results == MoreResultsType::NoMoreResults as i32 {
+                break;
+            }
+            cursor = batch.end_cursor;
+        }
+        let after_limit = MoreResultsType::MoreResultsAfterLimit as i32;
+        let none = MoreResultsType::NoMoreResults as i32;
+        assert_eq!(
+            pages,
+            vec![
+                (vec!["a".to_string(), "b".to_string()], after_limit),
+                (vec!["c".to_string(), "d".to_string()], after_limit),
+                (vec!["e".to_string()], none),
+            ],
+            "by_priority={by_priority}"
+        );
+    }
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// A cursor is a position, so it still resumes after its entity is deleted
+/// or moved, and an `end_cursor` stops the answer just after its entity.
+#[tokio::test]
+async fn a_cursor_is_a_position_not_an_entity() {
+    let (server, mut client) = start().await;
+    seed_paged(&mut client).await;
+
+    let first = run_paged(&mut client, true, |query| query.limit = Some(2))
+        .await
+        .expect("first page");
+    assert_eq!(batch_names(&first), ["a", "b"]);
+    client
+        .commit(commit_one(Mutation {
+            operation: Some(Operation::Delete(named_key("Paged", "b"))),
+            ..Default::default()
+        }))
+        .await
+        .expect("delete b");
+    let rest = run_paged(&mut client, true, |query| {
+        query.start_cursor = first.end_cursor.clone();
+    })
+    .await
+    .expect("rest");
+    assert_eq!(batch_names(&rest), ["c", "d", "e"]);
+    assert_eq!(rest.more_results, MoreResultsType::NoMoreResults as i32);
+
+    // Each result carries the cursor just after it.
+    let after_c = rest.entity_results[0].cursor.clone();
+    let upto_c = run_paged(&mut client, true, |query| {
+        query.end_cursor = after_c.clone()
+    })
+    .await
+    .expect("up to c");
+    assert_eq!(batch_names(&upto_c), ["a", "c"]);
+    assert_eq!(
+        upto_c.more_results,
+        MoreResultsType::MoreResultsAfterCursor as i32
+    );
+
+    let between = run_paged(&mut client, true, |query| {
+        query.start_cursor = first.end_cursor.clone();
+        query.end_cursor = after_c.clone();
+    })
+    .await
+    .expect("between");
+    assert_eq!(batch_names(&between), ["c"]);
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// An offset that skips everything still answers a cursor to resume from,
+/// and counts only what it actually skipped.
+#[tokio::test]
+async fn an_offset_reports_what_it_skipped_and_where_it_stopped() {
+    let (server, mut client) = start().await;
+    seed_paged(&mut client).await;
+
+    let skipped = run_paged(&mut client, true, |query| query.offset = 3)
+        .await
+        .expect("offset 3");
+    assert_eq!(batch_names(&skipped), ["d", "e"]);
+    assert_eq!(skipped.skipped_results, 3);
+    let after_skip = run_paged(&mut client, true, |query| {
+        query.start_cursor = skipped.skipped_cursor.clone();
+    })
+    .await
+    .expect("after the skipped cursor");
+    assert_eq!(batch_names(&after_skip), ["d", "e"]);
+
+    let past_the_end = run_paged(&mut client, true, |query| query.offset = 10)
+        .await
+        .expect("offset 10");
+    assert!(past_the_end.entity_results.is_empty());
+    assert_eq!(past_the_end.skipped_results, 5);
+    let resumed = run_paged(&mut client, true, |query| {
+        query.start_cursor = past_the_end.end_cursor.clone();
+    })
+    .await
+    .expect("resume past the end");
+    assert!(resumed.entity_results.is_empty());
+
+    let empty = run_paged(&mut client, true, |query| query.limit = Some(0))
+        .await
+        .expect("limit 0");
+    assert!(!empty.end_cursor.is_empty());
+    let from_start = run_paged(&mut client, true, |query| {
+        query.start_cursor = empty.end_cursor.clone();
+    })
+    .await
+    .expect("from the start cursor");
+    assert_eq!(batch_names(&from_start), ["a", "b", "c", "d", "e"]);
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// A cursor Fireup did not write is refused, never read as "no cursor".
+#[tokio::test]
+async fn a_foreign_cursor_is_an_invalid_argument() {
+    let (server, mut client) = start().await;
+    seed_paged(&mut client).await;
+
+    for (which, bytes) in [
+        ("start", b"a-cursor".to_vec()),
+        ("end", b"a-cursor".to_vec()),
+    ] {
+        let error = run_paged(&mut client, true, |query| match which {
+            "start" => query.start_cursor = bytes,
+            _ => query.end_cursor = bytes,
+        })
+        .await
+        .expect_err("a foreign cursor");
+        assert_eq!(error.code(), Code::InvalidArgument, "{which}: {error:?}");
+        assert!(error.message().contains(which), "{which}: {error:?}");
     }
 
     server.shutdown().await.expect("clean shutdown");

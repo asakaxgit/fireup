@@ -383,7 +383,8 @@ translation, and it reuses the SQL above unchanged:
 | `OR` with one untranslatable branch | no — that branch could match any entity, so dropping it would drop them |
 | `HAS_ANCESTOR` | it chooses *which* collection to read rather than narrowing one, so it is not a predicate |
 | `NOT_IN`, `!=` | no — a negation keeps nearly every entity, and the PostgreSQL pushdown declines the Firestore spellings of both anyway; they are evaluated in process |
-| A property *path* (`a.b`), an escaped property name, `__key__` | no |
+| A property *path* (`a.b`), an escaped property name | no |
+| `__key__` | no — a key orders by path element, numeric ids as numbers and before names, which the document name's string order does not follow (`10` sorts before `9`); evaluated in process |
 
 Two things about the shape of that work are worth knowing:
 
@@ -525,7 +526,7 @@ What to know before trusting a listener here:
 | RPC | Status | Notes |
 |---|---|---|
 | `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
-| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`), `AND`, `OR`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
+| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`), `__key__` filters with the same operators, `AND`, `OR`, order (by `__key__` too), limit, offset, start and end cursors, `HAS_ANCESTOR`. GQL refused. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
 | `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` and `property_mask` (below). |
 | `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. A read-only transaction may be committed when it carries no mutations, as Google's public [read-only transaction sample](https://cloud.google.com/datastore/docs/concepts/transactions) does; with mutations it is `INVALID_ARGUMENT`. (Firestore `Commit` still refuses a read-only transaction.) |
 | `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
@@ -534,7 +535,7 @@ What to know before trusting a listener here:
 
 Kinds share the Postgres/`MemoryStore` rows with Firestore: `Task/sample` is
 `…/documents/Task/sample`. Non-default namespaces, GQL, projection queries,
-cursors, nested property masks, and `HAS_ANCESTOR` inside an `OR` are refused.
+nested property masks, and `HAS_ANCESTOR` inside an `OR` are refused.
 
 Property filters compare one value against one value. `!=`, `IN` and `NOT_IN`
 are defined from `=`: a property of a different type is "not equal", and an
@@ -552,6 +553,32 @@ sorts the array as one value. A filter the proto's "Requires" lists rule out —
 non-empty array, a `NOT_IN` of more than 10 values, an unset operator — is
 `INVALID_ARGUMENT` rather than an empty answer. The "comes first in
 `order_by`" requirements are not enforced.
+
+A `__key__` filter compares the entity's key, and a `__key__` order sorts by
+it, in the order the public queries page gives keys: path element by path
+element, each by kind and then identifier, kinds and names by byte value,
+numeric ids numerically, and a numeric id before a name. A key orders before
+its own descendants. Every operator a property filter takes works on
+`__key__`. Its value must be a complete key in this project and database —
+anything else is `INVALID_ARGUMENT`, and a key in a non-default namespace is
+`UNIMPLEMENTED`, as everywhere else. One caveat comes from how keys are
+stored: a key *name* made only of digits is stored as a document id that reads
+back as a numeric id, so it orders among the ids.
+
+A **cursor** is a position in the query's order, with the key breaking every
+tie, so a query with no `order` pages in key order. `start_cursor` starts the
+answer just after the entity the cursor was taken at, `end_cursor` stops it
+just after one, and `offset`/`limit` then apply within that range. Every batch
+returns an `end_cursor` — after the last entity returned, else after the last
+one skipped, else where the batch started — and never an empty one, because an
+empty cursor is how a client asks for the first page. Each result carries its
+own cursor, and `skipped_cursor` marks the end of the offset. `more_results` is
+`MORE_RESULTS_AFTER_LIMIT` when the limit left entities out,
+`MORE_RESULTS_AFTER_CURSOR` when the end cursor did, and `NO_MORE_RESULTS`
+otherwise. The cursor carries its entity's key and sort values rather than a
+pointer to the entity, so it still resumes after that entity is changed or
+deleted. Its bytes are Fireup's own format, not production's; a cursor Fireup
+did not write is `INVALID_ARGUMENT`.
 
 #### Datastore property transforms
 
@@ -711,8 +738,10 @@ contract: `scripts/smoke-local-auth.sh` drives this surface with
 client, `signInWithEmailAndPassword`, `signInWithCustomToken`,
 `signInAnonymously`, token refresh, `sendPasswordResetEmail`,
 `verifyPasswordResetCode`, `confirmPasswordReset`, `sendEmailVerification`,
-`applyActionCode`, `sendSignInLinkToEmail`, `isSignInWithEmailLink`, and
-`signInWithEmailLink`. See [Tests](#tests).
+`applyActionCode`, `sendSignInLinkToEmail`, `isSignInWithEmailLink`,
+`signInWithEmailLink`, `verifyBeforeUpdateEmail`, and `deleteUser`. It also
+calls each `/emulator/` control endpoint above directly and follows a minted
+link to `/emulator/action`, the way a developer would. See [Tests](#tests).
 
 That smoke test is worth its upkeep: it caught a bug Fireup's own tests could
 not. The client SDK's email-link parser requires an `apiKey` parameter in the
@@ -834,9 +863,11 @@ These answer `501` with a message naming the gap, not a vague `404`:
 - **Production key material.** Nothing generates or ships a signing key.
 - **Sending email.** See above — the codes are real, the delivery is not.
 
-`scripts/smoke-local-auth.sh` asserts that the batch-write and session-cookie
-gaps *fail cleanly* — a mapped SDK error rather than a 500, a hang, or a
-half-applied write — so a gap stays a gap rather than becoming a surprise. If
+`scripts/smoke-local-auth.sh` asserts that the phone, `v2`, federated,
+batch-write, and session-cookie gaps *fail cleanly* — `501` with a message
+naming the gap, a mapped SDK error where an SDK call reaches them, and no
+account or code created on the way out — so a gap stays a gap rather than
+becoming a surprise. If
 one of them is implemented later, that check fails and says so. The
 out-of-band gap used to be in that list; it is now a set of real assertions
 above it, which is what that check is for.
@@ -1145,15 +1176,17 @@ instead of tripping over the last one's documents.
 
 Its triggers are commented out for now, matching `integration_tests.yml` — CI in
 this repository is manual-only until the repo-wide re-enable, so run it with
-`workflow_dispatch`.
+`workflow_dispatch`. The Node layer of the conformance suite does run on every
+pull request, as part of the fidelity regression gate below.
 
 ### Fidelity regression gate
 
 The smoke suites above have a second job: they are the merge gate. Every pull
 request runs `scripts/fidelity-smoke-gate.sh` in the `fidelity smoke gate
 (official SDKs)` job of `.github/workflows/ci.yml`, a required check on `main`.
-It runs the Firestore, Auth and Datastore smoke suites against the in-memory
-**and** PostgreSQL stores, and compares what passed with
+It runs the Firestore, Auth and Datastore smoke suites, and the Node
+conformance runner (`tests/conformance/node/runner.mjs`, as `conformance/<store>`),
+against the in-memory **and** PostgreSQL stores, and compares what passed with
 [`tests/smoke-gate/baseline.json`](../../tests/smoke-gate/baseline.json): the
 names of the checks that pass on `main`, per suite run (`firestore/memory`,
 `auth/postgres`, …).
@@ -1220,6 +1253,11 @@ await check('an unsupported query reports a clear UNIMPLEMENTED instead of hangi
   // ...
 }, { unimplemented: ['query.aggregations', 'firestore.RunAggregationQuery'] })
 ```
+
+The conformance runner tags each probe with its own row and the status the
+matrix gives it, so the probe is what proves each row the runner drives. A
+probe that stops proving its row is a failed check in `conformance/memory` or
+`conformance/postgres`.
 
 The tags travel in the results file next to `ok`, and the gate fails, naming
 the row, when:

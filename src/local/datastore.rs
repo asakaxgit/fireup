@@ -31,6 +31,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use prost::Message;
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 use tracing::debug;
@@ -190,12 +191,6 @@ impl DatastoreApi {
         if !query.distinct_on.is_empty() {
             return Err(unimplemented("Datastore distinct_on", "not in Phase 3"));
         }
-        if !query.start_cursor.is_empty() || !query.end_cursor.is_empty() {
-            return Err(unimplemented(
-                "Datastore query cursors",
-                "use offset/limit for Phase 3",
-            ));
-        }
         if query.find_nearest.is_some() {
             return Err(unimplemented("Datastore find_nearest", "vector search"));
         }
@@ -211,7 +206,7 @@ impl DatastoreApi {
             .map(|kind| kind.name.as_str())
             .filter(|name| !name.is_empty());
 
-        validate_filter(query.filter.as_ref())?;
+        validate_filter(query.filter.as_ref(), &self.project_id, &self.database_id)?;
         let ancestor = extract_ancestor(query.filter.as_ref())?;
         let ancestor = match (ancestor.as_ref(), partition_ancestor) {
             (Some(from_filter), Some(from_partition)) => {
@@ -293,64 +288,98 @@ impl DatastoreApi {
             });
         }
 
-        if !query.order.is_empty() {
-            candidates.sort_by(|left, right| {
-                let left = document_to_entity(left, &self.project_id, &self.database_id).ok();
-                let right = document_to_entity(right, &self.project_id, &self.database_id).ok();
-                match (left, right) {
-                    (Some(left), Some(right)) => compare_entities(
-                        &left,
-                        &right,
-                        &query.order,
-                        &self.project_id,
-                        &self.database_id,
-                    ),
-                    _ => Ordering::Equal,
-                }
-            });
-        }
+        let start = decode_cursor(&query.start_cursor, "start")?;
+        let end = decode_cursor(&query.end_cursor, "end")?;
 
-        let offset = query.offset.max(0) as usize;
-        if offset > candidates.len() {
-            candidates.clear();
-        } else {
-            candidates = candidates.split_off(offset);
-        }
+        let mut rows = candidates
+            .into_iter()
+            .map(|document| {
+                let entity = document_to_entity(&document, &self.project_id, &self.database_id)?;
+                Ok((document, entity))
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
+        let position = |entity: &Entity, cursor: &Entity| {
+            compare_positions(
+                entity,
+                cursor,
+                &query.order,
+                &self.project_id,
+                &self.database_id,
+            )
+        };
+        rows.sort_by(|(_, left), (_, right)| position(left, right));
 
-        if let Some(limit) = query.limit {
-            let limit = limit.max(0) as usize;
-            if candidates.len() > limit {
-                candidates.truncate(limit);
+        // Both cursors are the position just after an entity: a page starts
+        // after its start cursor and runs up to and including its end cursor.
+        if let Some(start) = start.as_ref() {
+            rows.retain(|(_, entity)| position(entity, start) == Ordering::Greater);
+        }
+        let mut more_results = MoreResultsType::NoMoreResults;
+        if let Some(end) = end.as_ref() {
+            let before_end =
+                rows.partition_point(|(_, entity)| position(entity, end) != Ordering::Greater);
+            if before_end < rows.len() {
+                rows.truncate(before_end);
+                more_results = MoreResultsType::MoreResultsAfterCursor;
             }
         }
 
-        if let Some(token) = transaction {
-            self.transactions.record_reads(token, &candidates, &[])?;
+        let offset = (query.offset.max(0) as usize).min(rows.len());
+        let skipped_cursor = match offset.checked_sub(1) {
+            Some(last) => encode_cursor(&rows[last].1, &query.order),
+            None => Vec::new(),
+        };
+        let mut rows = rows.split_off(offset);
+
+        if let Some(limit) = query.limit {
+            let limit = limit.max(0) as usize;
+            if rows.len() > limit {
+                rows.truncate(limit);
+                more_results = MoreResultsType::MoreResultsAfterLimit;
+            }
         }
 
-        let mut entity_results = Vec::with_capacity(candidates.len());
-        for document in candidates {
-            let entity = self.entity_from_document(&document).await?;
-            entity_results.push(EntityResult {
+        // Where the next page starts: after the last entity this batch
+        // returned, else after the last one it skipped, else where this one
+        // started. Never empty — an empty cursor is how a client asks for the
+        // first page, so returning one would silently restart the query.
+        let end_cursor = match rows.last() {
+            Some((_, entity)) => encode_cursor(entity, &query.order),
+            None if !skipped_cursor.is_empty() => skipped_cursor.clone(),
+            None if query.start_cursor.is_empty() => CURSOR_TAG.to_vec(),
+            None => query.start_cursor.clone(),
+        };
+
+        if let Some(token) = transaction {
+            let documents = rows
+                .iter()
+                .map(|(document, _)| document.clone())
+                .collect::<Vec<_>>();
+            self.transactions.record_reads(token, &documents, &[])?;
+        }
+
+        let entity_results = rows
+            .into_iter()
+            .map(|(document, entity)| EntityResult {
+                cursor: encode_cursor(&entity, &query.order),
                 entity: Some(entity),
                 version: document
                     .update_time
                     .as_ref()
                     .map(|ts| ts.seconds)
                     .unwrap_or(0),
-                create_time: document.create_time.clone(),
-                update_time: document.update_time.clone(),
-                cursor: Vec::new(),
-            });
-        }
+                create_time: document.create_time,
+                update_time: document.update_time,
+            })
+            .collect();
 
         Ok(QueryResultBatch {
             entity_result_type: ResultType::Full as i32,
             entity_results,
-            skipped_cursor: Vec::new(),
-            more_results: MoreResultsType::NoMoreResults as i32,
-            end_cursor: Vec::new(),
-            skipped_results: query.offset.max(0),
+            skipped_cursor,
+            more_results: more_results as i32,
+            end_cursor,
+            skipped_results: offset as i32,
             snapshot_version: 0,
             read_time: Some(now_timestamp()),
         })
@@ -936,14 +965,17 @@ fn flatten_conjunction<'a>(filters: &'a [Filter], terms: &mut Vec<&'a Filter>) {
 
 fn range_filter(filter: &Filter) -> Option<&PropertyFilter> {
     match filter.filter_type.as_ref() {
+        // A key is one value, never an array, so a `__key__` range needs no
+        // grouping, and `operands` has no key to give it.
         Some(FilterType::PropertyFilter(property))
-            if matches!(
-                PropertyOp::try_from(property.op),
-                Ok(PropertyOp::LessThan
-                    | PropertyOp::LessThanOrEqual
-                    | PropertyOp::GreaterThan
-                    | PropertyOp::GreaterThanOrEqual)
-            ) =>
+            if !is_key_filter(property)
+                && matches!(
+                    PropertyOp::try_from(property.op),
+                    Ok(PropertyOp::LessThan
+                        | PropertyOp::LessThanOrEqual
+                        | PropertyOp::GreaterThan
+                        | PropertyOp::GreaterThanOrEqual)
+                ) =>
         {
             Some(property)
         }
@@ -965,6 +997,9 @@ pub(crate) fn property_matches(
     project_id: &str,
     database_id: &str,
 ) -> bool {
+    if is_key_filter(filter) {
+        return key_matches(entity, filter);
+    }
     let Some((actual, expected)) = operands(entity, filter, project_id, database_id) else {
         return false;
     };
@@ -987,9 +1022,6 @@ fn operands(
         return None;
     }
     let expected = filter.value.as_ref()?;
-    if reference.name == "__key__" {
-        return None; // HAS_ANCESTOR already stripped; other key filters later.
-    }
     let actual = entity.properties.get(&reference.name)?;
 
     // Both sides cross into the Firestore values the store actually holds, for
@@ -1014,26 +1046,36 @@ fn operands(
 /// `validate_filter` has already refused an `IN` or `NOT_IN` whose value is not
 /// a non-empty array.
 fn element_matches(element: &FsValue, op: Option<PropertyOp>, expected: &FsValue) -> bool {
-    let equals =
-        |candidate: &FsValue| query::comparable(element, candidate) == Some(Ordering::Equal);
+    operator_matches(op, expected, fs_list, |candidate| {
+        query::comparable(element, candidate)
+    })
+}
+
+/// What one operator says, given how the stored value compares to a candidate.
+///
+/// `compare` answers `None` for "a filter cannot compare these two at all" —
+/// different types, or a `NaN` on either side — and that is no match for
+/// *every* operator, including equality. The comparator this replaced instead
+/// returned `Ordering::Equal` for every type pair it did not name, so
+/// `priority = 3` matched an entity whose `priority` was a string, a blob, or a
+/// list, and so did `<=` and `>=`. Real Datastore returns none of those.
+fn operator_matches<T>(
+    op: Option<PropertyOp>,
+    expected: &T,
+    list: impl Fn(&T) -> Option<&[T]>,
+    compare: impl Fn(&T) -> Option<Ordering>,
+) -> bool {
+    let equals = |candidate: &T| compare(candidate) == Some(Ordering::Equal);
     match op {
         Some(PropertyOp::NotEqual) => return !equals(expected),
-        Some(PropertyOp::In) => {
-            return fs_list(expected).is_some_and(|list| list.iter().any(equals))
-        }
+        Some(PropertyOp::In) => return list(expected).is_some_and(|list| list.iter().any(equals)),
         Some(PropertyOp::NotIn) => {
-            return fs_list(expected).is_some_and(|list| !list.iter().any(equals))
+            return list(expected).is_some_and(|list| !list.iter().any(equals))
         }
         _ => {}
     }
 
-    // `None` is "a filter cannot compare these two at all" — different types,
-    // or a `NaN` on either side — and it is no match for *every* operator,
-    // including equality. The comparator this replaced instead returned
-    // `Ordering::Equal` for every type pair it did not name, so `priority = 3`
-    // matched an entity whose `priority` was a string, a blob, or a list, and
-    // so did `<=` and `>=`. Real Datastore returns none of those.
-    let Some(ord) = query::comparable(element, expected) else {
+    let Some(ord) = compare(expected) else {
         return false;
     };
     match op {
@@ -1048,6 +1090,85 @@ fn element_matches(element: &FsValue, op: Option<PropertyOp>, expected: &FsValue
         }
         // `validate_filter` refused every other operator before the read.
         _ => false,
+    }
+}
+
+/// The pseudo-property a filter or an order names to mean the entity's key.
+const KEY_PROPERTY: &str = "__key__";
+
+fn is_key_filter(filter: &PropertyFilter) -> bool {
+    filter
+        .property
+        .as_ref()
+        .is_some_and(|reference| reference.name == KEY_PROPERTY)
+}
+
+/// A `__key__` filter, which compares the entity's key rather than a property.
+///
+/// The operators mean what they mean for a property, under `compare_keys`.
+/// `validate_filter` has already refused a value that is not a key in this
+/// database, so a key from another project never reaches here to compare by
+/// its path alone.
+fn key_matches(entity: &Entity, filter: &PropertyFilter) -> bool {
+    let (Some(actual), Some(expected)) = (entity.key.as_ref(), filter.value.as_ref()) else {
+        return false;
+    };
+    operator_matches(
+        PropertyOp::try_from(filter.op).ok(),
+        expected,
+        ds_list,
+        |candidate| ds_key(candidate).map(|key| compare_keys(actual, key)),
+    )
+}
+
+/// The order Datastore gives two keys in the same partition.
+///
+/// The public queries page orders keys by "Ancestor path", then "Entity
+/// kind", then "Identifier (key name or numeric ID)", with each ancestor
+/// element "compared similarly: by kind (string), then by key name or numeric
+/// ID". Kinds and names order by byte value, numeric ids numerically, and an
+/// id precedes a name. Element by element, that is the public Firestore order
+/// for references — "by path elements" — so a key orders before its own
+/// descendants, as a shorter path does there.
+///
+/// This is the order of a `__key__` filter, of a `__key__` sort, and the
+/// tie-break a query cursor needs to resume between entities a sort calls
+/// equal; keep those on this one function.
+pub(crate) fn compare_keys(left: &Key, right: &Key) -> Ordering {
+    use crate::protos::google::datastore::v1::key::path_element::IdType;
+
+    fn identifier(id: Option<&IdType>) -> (u8, i64, &str) {
+        match id {
+            // An incomplete element orders first. Nothing stored has one, and
+            // `validate_filter` refuses one in a filter value.
+            None => (0, 0, ""),
+            Some(IdType::Id(id)) => (1, *id, ""),
+            Some(IdType::Name(name)) => (2, 0, name.as_str()),
+        }
+    }
+    left.path
+        .iter()
+        .zip(&right.path)
+        .map(|(left, right)| {
+            left.kind.cmp(&right.kind).then_with(|| {
+                identifier(left.id_type.as_ref()).cmp(&identifier(right.id_type.as_ref()))
+            })
+        })
+        .find(|ord| *ord != Ordering::Equal)
+        .unwrap_or_else(|| left.path.len().cmp(&right.path.len()))
+}
+
+fn ds_key(value: &DsValue) -> Option<&Key> {
+    match &value.value_type {
+        Some(DsValueType::KeyValue(key)) => Some(key),
+        _ => None,
+    }
+}
+
+fn ds_list(value: &DsValue) -> Option<&[DsValue]> {
+    match &value.value_type {
+        Some(DsValueType::ArrayValue(array)) => Some(&array.values),
+        _ => None,
     }
 }
 
@@ -1082,12 +1203,17 @@ struct FilterCounts {
 /// which turned an illegal query into an empty result; this answers
 /// `INVALID_ARGUMENT` instead. The "comes first in `order_by`" requirement is
 /// not enforced, as it is not for the range operators either.
-fn validate_filter(filter: Option<&Filter>) -> Result<(), Status> {
+fn validate_filter(
+    filter: Option<&Filter>,
+    project_id: &str,
+    database_id: &str,
+) -> Result<(), Status> {
     let Some(filter) = filter else {
         return Ok(());
     };
     let mut counts = FilterCounts::default();
     count_filter(filter, false, &mut counts)?;
+    validate_key_filters(filter, project_id, database_id)?;
 
     if counts.not_equal + counts.not_in > 1 {
         return Err(Status::invalid_argument(
@@ -1163,6 +1289,48 @@ fn count_filter(filter: &Filter, under_or: bool, counts: &mut FilterCounts) -> R
     }
 }
 
+/// Refuse a `__key__` filter whose value is not a complete key in this
+/// database, rather than let it match nothing.
+///
+/// `compare_keys` orders keys within one partition, so a key from another
+/// project would otherwise be compared by its path alone. Checked through
+/// `key_to_document_name`, the same gate a written or looked-up key passes, so
+/// a namespace is refused here as it is there. `HAS_ANCESTOR` carries a key
+/// too, and `extract_ancestor` already holds it to this.
+fn validate_key_filters(
+    filter: &Filter,
+    project_id: &str,
+    database_id: &str,
+) -> Result<(), Status> {
+    match filter.filter_type.as_ref() {
+        Some(FilterType::CompositeFilter(composite)) => composite
+            .filters
+            .iter()
+            .try_for_each(|child| validate_key_filters(child, project_id, database_id)),
+        Some(FilterType::PropertyFilter(property)) if is_key_filter(property) => {
+            let value = property.value.as_ref();
+            let keys = match PropertyOp::try_from(property.op) {
+                Ok(PropertyOp::HasAncestor) => return Ok(()),
+                Ok(PropertyOp::In | PropertyOp::NotIn) => value
+                    .and_then(ds_list)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(Some)
+                    .collect(),
+                _ => vec![value],
+            };
+            for value in keys {
+                let key = value.and_then(ds_key).ok_or_else(|| {
+                    Status::invalid_argument("a __key__ filter needs a key value")
+                })?;
+                key_to_document_name(key, project_id, database_id)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// `IN` and `NOT_IN` require "a non-empty `ArrayValue`", and `NOT_IN` "with at
 /// most 10 values".
 fn candidate_list(filter: &PropertyFilter, op: &str, max: Option<usize>) -> Result<(), Status> {
@@ -1193,6 +1361,76 @@ fn candidate_list(filter: &PropertyFilter, op: &str, max: Option<usize>) -> Resu
     Ok(())
 }
 
+/// What every Fireup Datastore cursor starts with. On its own it is the
+/// position before the first entity.
+///
+/// A cursor is opaque bytes to a client, so its format is Fireup's own:
+/// this tag, then a protobuf `Entity` holding the key and the sort-property
+/// values of the entity the cursor sits just after. Carrying the values,
+/// rather than only the key, keeps a cursor usable after its entity is
+/// changed or deleted: the position does not depend on reading it back.
+const CURSOR_TAG: &[u8] = b"fireup.ds.cursor.1";
+
+/// The cursor for the position just after `entity` in a query sorted by
+/// `order`.
+fn encode_cursor(entity: &Entity, order: &[PropertyOrder]) -> Vec<u8> {
+    let properties = order
+        .iter()
+        .filter_map(|term| term.property.as_ref())
+        .filter_map(|property| {
+            let value = entity.properties.get(&property.name)?;
+            Some((property.name.clone(), value.clone()))
+        })
+        .collect();
+    let position = Entity {
+        key: entity.key.clone(),
+        properties,
+    };
+    let mut cursor = CURSOR_TAG.to_vec();
+    position.encode(&mut cursor).expect("a Vec grows to fit");
+    cursor
+}
+
+/// The position a client-supplied cursor names, or `None` for no bound: an
+/// empty cursor, or a bare [`CURSOR_TAG`].
+///
+/// Anything Fireup did not write is `INVALID_ARGUMENT`, never "no bound" — a
+/// cursor that silently restarted the query is the bug this replaced.
+fn decode_cursor(cursor: &[u8], which: &str) -> Result<Option<Entity>, Status> {
+    if cursor.is_empty() {
+        return Ok(None);
+    }
+    let invalid = || Status::invalid_argument(format!("the {which}_cursor is not a Fireup cursor"));
+    let body = cursor.strip_prefix(CURSOR_TAG).ok_or_else(invalid)?;
+    if body.is_empty() {
+        return Ok(None);
+    }
+    let position = Entity::decode(body).map_err(|_| invalid())?;
+    match position.key {
+        Some(_) => Ok(Some(position)),
+        None => Err(invalid()),
+    }
+}
+
+/// Where `left` sits relative to `right` in a query sorted by `order`, with
+/// the key breaking every tie, so no two stored entities share a position.
+/// That total order is what lets a cursor resume between entities the sort
+/// alone calls equal.
+fn compare_positions(
+    left: &Entity,
+    right: &Entity,
+    order: &[PropertyOrder],
+    project_id: &str,
+    database_id: &str,
+) -> Ordering {
+    compare_entities(left, right, order, project_id, database_id).then_with(|| {
+        match (left.key.as_ref(), right.key.as_ref()) {
+            (Some(left), Some(right)) => compare_keys(left, right),
+            _ => Ordering::Equal,
+        }
+    })
+}
+
 fn compare_entities(
     left: &Entity,
     right: &Entity,
@@ -1204,14 +1442,19 @@ fn compare_entities(
         let Some(PropertyReference { name }) = term.property.as_ref() else {
             continue;
         };
-        let left_value = left.properties.get(name);
-        let right_value = right.properties.get(name);
-        let ord = match (left_value, right_value) {
-            (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Less,
-            (Some(_), None) => Ordering::Greater,
-            (Some(left), Some(right)) => {
-                compare_ds_values(left, right, project_id, database_id)
+        let ord = if name == KEY_PROPERTY {
+            match (left.key.as_ref(), right.key.as_ref()) {
+                (Some(left), Some(right)) => compare_keys(left, right),
+                _ => Ordering::Equal,
+            }
+        } else {
+            match (left.properties.get(name), right.properties.get(name)) {
+                (None, None) => Ordering::Equal,
+                (None, Some(_)) => Ordering::Less,
+                (Some(_), None) => Ordering::Greater,
+                (Some(left), Some(right)) => {
+                    compare_ds_values(left, right, project_id, database_id)
+                }
             }
         };
         if ord != Ordering::Equal {

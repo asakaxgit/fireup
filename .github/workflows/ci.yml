@@ -212,7 +212,8 @@ jobs:
             advisories licenses bans sources
 
   # The fidelity regression gate: every official-SDK smoke suite (Firestore,
-  # Auth, Datastore) against both stores, compared with
+  # Auth, Datastore) and the Node conformance runner, against both stores,
+  # compared with
   # tests/smoke-gate/baseline.json. It fails when a check that passes on `main`
   # fails or goes missing, and names the check; a new check, or one that newly
   # passes, never fails it. It also fails when a row of the fidelity matrix is
@@ -266,6 +267,7 @@ jobs:
           cache-dependency-path: |
             tests/local-smoke/package-lock.json
             tests/local-smoke-datastore/package-lock.json
+            tests/conformance/node/package-lock.json
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -286,6 +288,7 @@ jobs:
         run: |
           npm ci --no-audit --no-fund --prefix tests/local-smoke
           npm ci --no-audit --no-fund --prefix tests/local-smoke-datastore
+          npm ci --no-audit --no-fund --prefix tests/conformance/node
 
       # The comparison rule and the baseline's coverage of the suite runs; the
       # matrix-coverage rule with the smoke suites' row tags and

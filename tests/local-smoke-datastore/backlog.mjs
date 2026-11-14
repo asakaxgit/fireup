@@ -101,28 +101,6 @@ await check('groupBy returns one entity per distinct value', async () => {
   }
 })
 
-// --- Cursors -------------------------------------------------------------
-
-await check('a limited query reports an end cursor and more results after the limit', async () => {
-  const [, info] = await datastore.runQuery(datastore.createQuery(kind).order('priority').limit(2))
-  if (!info?.endCursor) {
-    throw new Error(`no endCursor: ${JSON.stringify(info)}`)
-  }
-  if (info.moreResults !== 'MORE_RESULTS_AFTER_LIMIT') {
-    throw new Error(`moreResults is ${info.moreResults}, wanted MORE_RESULTS_AFTER_LIMIT`)
-  }
-})
-
-await check('a query resumes from the end cursor of the previous page', async () => {
-  const page = datastore.createQuery(kind).order('priority').limit(2)
-  const [first, info] = await datastore.runQuery(page)
-  expectNames(first, ['a', 'b'], 'first page')
-  const [rest] = await datastore.runQuery(
-    datastore.createQuery(kind).order('priority').start(info.endCursor),
-  )
-  expectNames(rest, ['c'], 'second page')
-})
-
 // --- Filters -------------------------------------------------------------
 
 await check('an AND of two equality filters matches both', async () => {
@@ -131,20 +109,6 @@ await check('an AND of two equality filters matches both', async () => {
     .filter(and([new PropertyFilter('owner', '=', 'ada'), new PropertyFilter('done', '=', false)]))
   const [rows] = await datastore.runQuery(query)
   expectNames(rows, ['a', 'c'], 'AND filter')
-})
-
-await check('a __key__ equality filter returns that entity', async () => {
-  const query = datastore.createQuery(kind).filter(new PropertyFilter('__key__', '=', key('b')))
-  const [rows] = await datastore.runQuery(query)
-  expectNames(rows, ['b'], '__key__ filter')
-})
-
-await check('a query orders by __key__ descending', async () => {
-  const [rows] = await datastore.runQuery(datastore.createQuery(kind).order('__key__', { descending: true }))
-  const got = rows.map((row) => row[datastore.KEY].name)
-  if (JSON.stringify(got) !== JSON.stringify(['c', 'b', 'a'])) {
-    throw new Error(`descending key order returned ${JSON.stringify(got)}`)
-  }
 })
 
 // --- Aggregations --------------------------------------------------------

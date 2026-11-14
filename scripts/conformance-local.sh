@@ -20,6 +20,10 @@
 #                                     (default: python3)
 #   FIREUP_CONFORMANCE_SKIP_PYTHON=1  skip layer 3 outright
 #   FIREUP_CONFORMANCE_SKIP_AUTH=1    skip layer 2
+#   FIREUP_SMOKE_RESULTS              write layer 1's probes to this file for
+#                                     the fidelity gate (tests/smoke-gate/);
+#                                     scripts/fidelity-smoke-gate.sh sets it,
+#                                     along with FIREUP_SMOKE_SUITE
 #
 # Needs network access the first time, to npm-install the client libraries.
 # The Python layer *skips with a message* when its libraries are missing — it
@@ -98,7 +102,9 @@ dump_log_on_failure() {
 
 echo
 echo "==> layer 1/3: the fidelity matrix, with the official Node SDKs"
-if ! node "$node_dir/runner.mjs"; then
+# `timeout`, as in the smoke scripts: an SDK client that never settles would
+# otherwise hang the fidelity gate's required check until the job is killed.
+if ! timeout 600 node "$node_dir/runner.mjs"; then
   status=1
   dump_log_on_failure
 fi
@@ -110,8 +116,10 @@ else
   echo
   echo "==> layer 2/3: the auth rows, with firebase-admin and the firebase client SDK"
   # smoke-local-auth.sh starts its own server on its own port, which keeps the
-  # auth accounts out of this run's document store.
-  if ! "$repo_root/scripts/smoke-local-auth.sh" "$((port + 1))"; then
+  # auth accounts out of this run's document store. FIREUP_SMOKE_RESULTS is
+  # layer 1's file: left set, the auth suite would overwrite it.
+  if ! env -u FIREUP_SMOKE_RESULTS -u FIREUP_SMOKE_SUITE \
+    "$repo_root/scripts/smoke-local-auth.sh" "$((port + 1))"; then
     status=1
   fi
 fi

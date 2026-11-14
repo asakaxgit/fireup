@@ -350,6 +350,40 @@ await check('equality on an array property matches any element', async () => {
   expectNames(rows, ['a', 'b'], 'array equality')
 }, { served: ['datastore.RunQuery'] })
 
+await check('a __key__ equality filter returns that entity', async () => {
+  const query = datastore.createQuery(filterKind).filter(new PropertyFilter('__key__', '=', filterKey('b')))
+  const [rows] = await datastore.runQuery(query)
+  expectNames(rows, ['b'], '__key__ filter')
+}, { served: ['datastore.RunQuery'] })
+
+await check('a query orders by __key__ descending', async () => {
+  const [rows] = await datastore.runQuery(datastore.createQuery(filterKind).order('__key__', { descending: true }))
+  const got = rows.map((row) => row[datastore.KEY].name)
+  if (JSON.stringify(got) !== JSON.stringify(['c', 'b', 'a'])) {
+    throw new Error(`descending key order returned ${JSON.stringify(got)}`)
+  }
+}, { served: ['datastore.RunQuery'] })
+
+await check('a limited query reports an end cursor and more results after the limit', async () => {
+  const [, info] = await datastore.runQuery(datastore.createQuery(filterKind).order('priority').limit(2))
+  if (!info?.endCursor) {
+    throw new Error(`no endCursor: ${JSON.stringify(info)}`)
+  }
+  if (info.moreResults !== 'MORE_RESULTS_AFTER_LIMIT') {
+    throw new Error(`moreResults is ${info.moreResults}, wanted MORE_RESULTS_AFTER_LIMIT`)
+  }
+}, { served: ['datastore.cursors'] })
+
+await check('a query resumes from the end cursor of the previous page', async () => {
+  const page = datastore.createQuery(filterKind).order('priority').limit(2)
+  const [first, info] = await datastore.runQuery(page)
+  expectNames(first, ['a', 'b'], 'first page')
+  const [rest] = await datastore.runQuery(
+    datastore.createQuery(filterKind).order('priority').start(info.endCursor),
+  )
+  expectNames(rest, ['c'], 'second page')
+}, { served: ['datastore.cursors'] })
+
 await check('delete removes the entity', async () => {
   await datastore.delete(key)
   const [afterDelete] = await datastore.get(key)

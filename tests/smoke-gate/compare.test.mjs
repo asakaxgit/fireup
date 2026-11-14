@@ -104,9 +104,9 @@ test('baselineFrom keeps the passing checks, sorted', () => {
 test('baseline.json covers every suite run in scripts/fidelity-smoke-gate.sh', () => {
   const committed = JSON.parse(readFileSync(new URL('./baseline.json', import.meta.url), 'utf8'))
   const script = readFileSync(new URL('../../scripts/fidelity-smoke-gate.sh', import.meta.url), 'utf8')
-  const runs = [...script.matchAll(/^\s+"(\w+) (\w+) smoke-local-\w+\.sh"$/gm)].map(([, suite, store]) => `${suite}/${store}`)
+  const runs = [...script.matchAll(/^\s+"(\w+) (\w+) [\w-]+\.sh"$/gm)].map(([, suite, store]) => `${suite}/${store}`)
 
-  assert.equal(runs.length, 6, 'expected the gate script to list six suite runs')
+  assert.equal(runs.length, 8, 'expected the gate script to list eight suite runs')
   assert.deepEqual(Object.keys(committed.suites).sort(), runs.sort())
   for (const [suite, names] of Object.entries(committed.suites)) {
     assert.ok(names.length > 0, `${suite} has no baseline checks`)

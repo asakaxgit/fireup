@@ -25,6 +25,12 @@
  * and a probe with no matrix row fails. Adding a row to the README without
  * adding a check here cannot pass.
  *
+ * Each probe is also a check in the fidelity gate's result format
+ * (tests/smoke-gate/results.mjs), named by its row id and tagged with the
+ * status it asserts, so `scripts/fidelity-smoke-gate.sh` runs this file on
+ * every pull request and a probe that starts failing fails the build. With
+ * FIREUP_SMOKE_RESULTS unset nothing is written.
+ *
  * Usage (scripts/conformance-local.sh does all of this for you):
  *   FIRESTORE_EMULATOR_HOST=127.0.0.1:4589 \
  *   DATASTORE_EMULATOR_HOST=127.0.0.1:4589 \
@@ -42,6 +48,7 @@ import { firestoreProbes } from './probes-firestore.mjs'
 import { queryProbes } from './probes-queries.mjs'
 import { datastoreProbes } from './probes-datastore.mjs'
 import { transformProbes } from './probes-transforms.mjs'
+import { writeResults } from '../../smoke-gate/results.mjs'
 
 const require = createRequire(import.meta.url)
 const { Firestore } = require('@google-cloud/firestore')
@@ -140,12 +147,20 @@ const main = async () => {
   const context = buildContext(db, datastore, raw)
 
   const results = []
+  // Written after every probe, not once at the end, so a run that hangs and is
+  // killed still leaves the probes it got through for the gate to read.
+  const record = (result) => {
+    results.push(result)
+    writeResults(
+      results.map(({ feature: { id, status }, ok }) => ({ name: id, ok, covers: { [status]: [id] } })),
+    )
+  }
   for (const feature of nodeFeatures) {
     if (only && !feature.id.includes(only)) continue
 
     const probe = probes.get(feature.id)
     if (!probe) {
-      results.push({
+      record({
         feature,
         ok: false,
         error: new Error(
@@ -159,7 +174,7 @@ const main = async () => {
 
     const branch = probe[feature.status]
     if (!branch) {
-      results.push({
+      record({
         feature,
         ok: false,
         error: new Error(
@@ -173,10 +188,10 @@ const main = async () => {
 
     try {
       await branch(context)
-      results.push({ feature, ok: true })
+      record({ feature, ok: true })
       console.log(`  ok      ${feature.id} [${feature.status}]`)
     } catch (error) {
-      results.push({ feature, ok: false, error })
+      record({ feature, ok: false, error })
       console.log(`  FAIL    ${feature.id} [${feature.status}]`)
       console.log(`          ${error?.message ?? error}`)
     }

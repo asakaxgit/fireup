@@ -36,6 +36,12 @@ postgres_url="$FIREUP_SMOKE_POSTGRES_URL"
 
 # One line per suite run: <suite> <store> <script>. The suite id
 # "<suite>/<store>" is the key in baseline.json.
+#
+# `conformance` is the Node half of the conformance suite
+# (tests/conformance/node/runner.mjs): one check per fidelity-matrix row it
+# drives, which is how those rows are proven on a pull request. Its auth and
+# Python layers are skipped here: the auth suite already has its own runs, and
+# the Python one is optional.
 runs=(
   "firestore memory smoke-local-firestore.sh"
   "firestore postgres smoke-local-firestore.sh"
@@ -43,6 +49,8 @@ runs=(
   "auth postgres smoke-local-auth.sh"
   "datastore memory smoke-local-datastore.sh"
   "datastore postgres smoke-local-datastore.sh"
+  "conformance memory conformance-local.sh"
+  "conformance postgres conformance-local.sh"
 )
 
 for run in "${runs[@]}"; do
@@ -55,6 +63,9 @@ for run in "${runs[@]}"; do
   # script here and the gate below would never say which check broke.
   status=0
   FIREUP_SMOKE_POSTGRES_URL="$url" \
+    FIREUP_CONFORMANCE_POSTGRES_URL="$url" \
+    FIREUP_CONFORMANCE_SKIP_AUTH=1 \
+    FIREUP_CONFORMANCE_SKIP_PYTHON=1 \
     FIREUP_SMOKE_SUITE="$suite/$store" \
     FIREUP_SMOKE_RESULTS="$results_dir/$suite-$store.json" \
     "$repo_root/scripts/$script" || status=$?
