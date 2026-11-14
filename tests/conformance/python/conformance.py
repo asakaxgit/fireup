@@ -161,6 +161,9 @@ def _batch_get(ctx: Context):
 
 @probe("firestore.BeginTransaction", "served")
 def _begin_transaction(ctx: Context):
+    # Unlike the Node SDK, which begins lazily with `new_transaction`, the
+    # Python SDK sends BeginTransaction before the first read, so a refused
+    # BeginTransaction fails this probe without a raw call.
     ref = ctx.fresh_collection("begintransaction").document("c")
     ref.set({"n": 1})
 

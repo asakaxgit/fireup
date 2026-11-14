@@ -171,7 +171,7 @@ export const firestoreProbes = [
 
   {
     id: 'firestore.BeginTransaction',
-    served: async ({ db, freshCollection }) => {
+    served: async ({ raw, db, projectId, freshCollection }) => {
       const counters = freshCollection('begintransaction')
       const ref = counters.doc('c')
       await ref.set({ n: 1 })
@@ -184,6 +184,32 @@ export const firestoreProbes = [
       })
       assert.equal(result, 2)
       assert.equal((await ref.get()).get('n'), 2)
+
+      // The Node SDK never sends this RPC: runTransaction() begins lazily, with
+      // `new_transaction` on the first read. With BeginTransaction refused, the
+      // block above still passes, so only a raw call proves the row.
+      const database = databaseName(projectId)
+      const name = documentName(projectId, ref.path)
+      const { transaction } = await unary(raw.firestore, 'BeginTransaction', {
+        database,
+        options: { read_write: {} },
+      })
+      assert.ok(transaction?.length > 0, 'BeginTransaction must return a token')
+
+      const results = await serverStream(raw.firestore, 'BatchGetDocuments', {
+        database,
+        documents: [name],
+        transaction,
+      })
+      assert.equal(plainFields(results[0].found).n, 2, 'a read in the transaction sees the document')
+
+      const commit = await unary(raw.firestore, 'Commit', {
+        database,
+        transaction,
+        writes: [{ update: { name, fields: { n: value.integer(3) } } }],
+      })
+      assert.ok(commit.commit_time, 'committing the token returns a commit_time')
+      assert.equal((await ref.get()).get('n'), 3, 'the write committed under the token must land')
     },
   },
 
