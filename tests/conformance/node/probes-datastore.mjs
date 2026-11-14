@@ -14,7 +14,7 @@ import { createRequire } from 'node:module'
 import { GRPC, unary } from './grpc-client.mjs'
 
 const require = createRequire(import.meta.url)
-const { PropertyFilter, and } = require('@google-cloud/datastore')
+const { PropertyFilter, and, or } = require('@google-cloud/datastore')
 
 const expectCode = async (expected, fn) => {
   let error
@@ -176,6 +176,30 @@ export const datastoreProbes = [
             ),
         ),
         ['d'],
+      )
+
+      // !=, IN, NOT_IN and OR, with scalar semantics.
+      const ordered = (filter) => datastore.createQuery(kind).filter(filter).order('priority')
+      assert.deepEqual(await run(ordered(new PropertyFilter('priority', '!=', 2))), ['a', 'c', 'd'])
+      assert.deepEqual(await run(ordered(new PropertyFilter('priority', 'IN', [1, 4]))), ['a', 'd'])
+      assert.deepEqual(await run(ordered(new PropertyFilter('priority', 'NOT_IN', [1, 4]))), ['b', 'c'])
+      assert.deepEqual(
+        await run(
+          ordered(or([new PropertyFilter('priority', '=', 1), new PropertyFilter('done', '=', true)])),
+        ),
+        ['a', 'c'],
+      )
+
+      // The proto allows one NOT_EQUAL or NOT_IN per query. A second is
+      // INVALID_ARGUMENT, not an empty answer.
+      await expectCode(3, () =>
+        run(
+          datastore
+            .createQuery(kind)
+            .filter(
+              and([new PropertyFilter('priority', '!=', 1), new PropertyFilter('owner', '!=', 'ada')]),
+            ),
+        ),
       )
 
       // order (both directions), limit, offset.

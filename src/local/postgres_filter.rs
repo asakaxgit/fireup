@@ -28,6 +28,7 @@
 //!   references, geo points, and `__name__`.
 //! - `<`, `<=`, `>`, `>=` on numbers, booleans, strings, references,
 //!   timestamps, and `__name__`.
+//! - `>= []`, which is exactly "the field holds an array".
 //! - `IS NULL` / `IS NAN` exactly, and `IS NOT NULL` / `IS NOT NAN` as the
 //!   field-presence half of their meaning.
 //! - The implicit "a document must carry every field it is ordered by".
@@ -44,7 +45,7 @@
 //! | `ARRAY_CONTAINS`, `ARRAY_CONTAINS_ANY` | Firestore compares elements by value, where an integer `1` equals a double `1.0`; JSONB containment compares them as written. |
 //! | `==` on an array or map | Same reason: the numeric equivalence applies at every depth inside the value. |
 //! | `<`/`>` on bytes | Values are stored base64-encoded, and base64 does not sort like the bytes it encodes. |
-//! | `<`/`>` on null, geo points, arrays, maps | No ordering a SQL expression can express cheaply, and no real query uses them. |
+//! | `<`/`>` on null, geo points, arrays (other than `>= []`), maps | No ordering a SQL expression can express cheaply, and no real query uses them. |
 //! | `OR` with one unpushable branch | That branch could match any row, so the whole `OR` could. |
 //! | `offset` / `limit` / cursors | All three are positional, resolved against the ordered result the pre-filter has already fed, so there is no way to know which rows they would keep. |
 //!
@@ -382,6 +383,12 @@ fn range(path: &Path, op: &str, value: &Value, binder: &mut Binder) -> Option<St
             binder,
         )),
         Some(ValueType::TimestampValue(_)) => timestamp_range(path, op, value, binder),
+        // The empty array is the least array, so `>= []` is exactly "holds an
+        // array". The Datastore translation asks this to keep every
+        // array-valued property, whose elements it cannot test in SQL.
+        Some(ValueType::ArrayValue(array)) if array.values.is_empty() && op == ">=" => {
+            Some(format!("(({}) ? 'arrayValue')", binder.address(path)))
+        }
         _ => None,
     }
 }
@@ -858,6 +865,41 @@ mod tests {
             .is_none(),
             "an integer inside the array must still match a double"
         );
+    }
+
+    #[test]
+    fn at_least_the_empty_array_means_holds_an_array() {
+        let array = |values| Value {
+            value_type: Some(ValueType::ArrayValue(
+                crate::protos::google::firestore::v1::ArrayValue { values },
+            )),
+        };
+
+        let any_array = compiled(&compare_node(
+            "tags",
+            Comparison::GreaterThanOrEqual,
+            array(Vec::new()),
+        ));
+        assert_eq!(any_array.sql, "((fields -> $3) ? 'arrayValue')");
+        assert_eq!(any_array.params, vec!["tags".to_string()]);
+
+        // Only that one bound is exact; any other array bound stays in process.
+        for (op, values) in [
+            (Comparison::GreaterThan, Vec::new()),
+            (Comparison::GreaterThanOrEqual, vec![integer(1)]),
+        ] {
+            assert!(
+                compile(
+                    Prefilter {
+                        filter: Some(&compare_node("tags", op, array(values))),
+                        required_fields: &[],
+                    },
+                    3
+                )
+                .is_none(),
+                "{op:?} is not pushed"
+            );
+        }
     }
 
     #[test]

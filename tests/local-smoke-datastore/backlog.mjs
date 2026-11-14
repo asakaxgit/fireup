@@ -17,7 +17,7 @@
  * was reverse-engineered.
  */
 
-import { and, Datastore, or, PropertyFilter } from '@google-cloud/datastore'
+import { and, Datastore, PropertyFilter } from '@google-cloud/datastore'
 
 import { writeResults } from '../smoke-gate/results.mjs'
 
@@ -125,44 +125,12 @@ await check('a query resumes from the end cursor of the previous page', async ()
 
 // --- Filters -------------------------------------------------------------
 
-await check('a != filter excludes the matching entity', async () => {
-  const query = datastore.createQuery(kind).filter(new PropertyFilter('priority', '!=', 2))
-  const [rows] = await datastore.runQuery(query)
-  expectNames(rows, ['a', 'c'], '!= filter')
-})
-
-await check('an IN filter matches any listed value', async () => {
-  const query = datastore.createQuery(kind).filter(new PropertyFilter('priority', 'IN', [1, 3]))
-  const [rows] = await datastore.runQuery(query)
-  expectNames(rows, ['a', 'c'], 'IN filter')
-})
-
-await check('a NOT_IN filter excludes the listed values', async () => {
-  const query = datastore.createQuery(kind).filter(new PropertyFilter('priority', 'NOT_IN', [1, 3]))
-  const [rows] = await datastore.runQuery(query)
-  expectNames(rows, ['b'], 'NOT_IN filter')
-})
-
-await check('an OR composite filter matches either branch', async () => {
-  const query = datastore
-    .createQuery(kind)
-    .filter(or([new PropertyFilter('priority', '=', 1), new PropertyFilter('owner', '=', 'bob')]))
-  const [rows] = await datastore.runQuery(query)
-  expectNames(rows, ['a', 'b'], 'OR filter')
-})
-
 await check('an AND of two equality filters matches both', async () => {
   const query = datastore
     .createQuery(kind)
     .filter(and([new PropertyFilter('owner', '=', 'ada'), new PropertyFilter('done', '=', false)]))
   const [rows] = await datastore.runQuery(query)
   expectNames(rows, ['a', 'c'], 'AND filter')
-})
-
-await check('equality on an array property matches any element', async () => {
-  const query = datastore.createQuery(kind).filter(new PropertyFilter('tags', '=', 'y'))
-  const [rows] = await datastore.runQuery(query)
-  expectNames(rows, ['a', 'b'], 'array equality')
 })
 
 await check('a __key__ equality filter returns that entity', async () => {
