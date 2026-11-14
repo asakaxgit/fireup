@@ -687,15 +687,27 @@ fn unreadable_key(place: &str, text: &str) -> String {
 /// assumed to be dash + 2; the fixed +2 let `-   name:` over `    if: false`
 /// through unread. A bare `-` (or `- # comment`) opening the step is refused:
 /// its keys could start anywhere, and a walk-up that only knew `- ` skipped it
-/// and landed on the step before.
+/// and landed on the step before. A `-` line counts only if it sits left of
+/// every non-blank line between it and `at`: a `- a: b` inside an earlier
+/// key's block scalar is deeper than that key, so it can never pass for the
+/// step and hide the real step's `if: false` above it.
 fn step_opener(lines: &[&str], at: usize, needle: &str) -> Result<(usize, usize), String> {
+    let mut ceiling = usize::MAX;
     let start = (0..=at)
         .rev()
         .find(|&above| {
-            let inner = without_comment(lines[above]).trim_start();
-            inner
-                .strip_prefix('-')
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']))
+            let bare = without_comment(lines[above]);
+            let inner = bare.trim_start();
+            if inner.is_empty() {
+                return false;
+            }
+            let indent = bare.len() - inner.len();
+            let opens = indent < ceiling
+                && inner
+                    .strip_prefix('-')
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']));
+            ceiling = ceiling.min(indent);
+            opens
         })
         .ok_or_else(|| {
             format!(
@@ -929,6 +941,25 @@ mod supply_chain_reporter_controls {
                 "{opener:?} passed"
             );
         }
+    }
+
+    #[test]
+    fn a_dash_line_inside_a_block_scalar_is_not_the_pin_step() {
+        // The nearest `-` above the command is inside `NOTE: |`; YAML reads the
+        // step's own `if: false`.
+        let hidden = ci_with("").replace(
+            "      - name: Supply-chain pins\n        run:",
+            "      - name: Supply-chain pins\n        if: false\n        env:\n          \
+             NOTE: |\n            - a: b\n        run:",
+        );
+        let conditions = reporting_step(&hidden, GUARDED_TARGET).expect("located");
+        assert_eq!(
+            conditions,
+            vec![StepCondition {
+                key: "if".to_string(),
+                value: "false".to_string()
+            }]
+        );
     }
 
     #[test]
@@ -1972,6 +2003,22 @@ mod fidelity_gate_controls {
         assert!(
             verdict.is_err_and(|why| why.contains("has a line left of its keys")),
             "a key left of the first passed"
+        );
+    }
+
+    #[test]
+    fn a_dash_line_inside_a_block_scalar_is_not_the_gate_step() {
+        // `steps:` in the scalar gets past the job reader; `- a: b` was taken as
+        // the step, so the real step's `if: false` went unread.
+        let ci = ci_with(
+            "",
+            "        if: false\n        env:\n          NOTE: |\n            steps:\n            \
+             - a: b\n",
+        );
+        let verdict = fidelity_gate_is_unconditional(&ci);
+        assert!(
+            verdict.is_err_and(|why| why.contains("step carries `if: false`")),
+            "a step hidden behind a block scalar's `-` passed"
         );
     }
 
