@@ -13,7 +13,7 @@
 //! ```
 //!
 //! The URL goes through the shared `postgres_test_env` guard, which refuses the
-//! host Paperclip role/database outright and never falls back to a default
+//! roles/databases named in `FIREUP_TEST_POSTGRES_DENY` and never falls back to a default
 //! connection. See `PROJECT_STATUS.md` for the throwaway-Postgres setup.
 //!
 //! Each test uses its own generated project id, so its documents are disjoint
