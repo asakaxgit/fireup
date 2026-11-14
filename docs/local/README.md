@@ -383,7 +383,8 @@ translation, and it reuses the SQL above unchanged:
 | `OR` with one untranslatable branch | no — that branch could match any entity, so dropping it would drop them |
 | `HAS_ANCESTOR` | it chooses *which* collection to read rather than narrowing one, so it is not a predicate |
 | `NOT_IN`, `!=` | no — a negation keeps nearly every entity, and the PostgreSQL pushdown declines the Firestore spellings of both anyway; they are evaluated in process |
-| A property *path* (`a.b`), an escaped property name, `__key__` | no |
+| A property *path* (`a.b`), an escaped property name | no |
+| `__key__` | no — a key orders by path element, numeric ids as numbers and before names, which the document name's string order does not follow (`10` sorts before `9`); evaluated in process |
 
 Two things about the shape of that work are worth knowing:
 
@@ -525,7 +526,7 @@ What to know before trusting a listener here:
 | RPC | Status | Notes |
 |---|---|---|
 | `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
-| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`), `AND`, `OR`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
+| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`), `__key__` filters with the same operators, `AND`, `OR`, order (by `__key__` too), limit, offset, `HAS_ANCESTOR`. GQL refused. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
 | `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` and `property_mask` (below). |
 | `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. A read-only transaction may be committed when it carries no mutations, as Google's public [read-only transaction sample](https://cloud.google.com/datastore/docs/concepts/transactions) does; with mutations it is `INVALID_ARGUMENT`. (Firestore `Commit` still refuses a read-only transaction.) |
 | `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
@@ -552,6 +553,17 @@ sorts the array as one value. A filter the proto's "Requires" lists rule out —
 non-empty array, a `NOT_IN` of more than 10 values, an unset operator — is
 `INVALID_ARGUMENT` rather than an empty answer. The "comes first in
 `order_by`" requirements are not enforced.
+
+A `__key__` filter compares the entity's key, and a `__key__` order sorts by
+it, in the order the public queries page gives keys: path element by path
+element, each by kind and then identifier, kinds and names by byte value,
+numeric ids numerically, and a numeric id before a name. A key orders before
+its own descendants. Every operator a property filter takes works on
+`__key__`. Its value must be a complete key in this project and database —
+anything else is `INVALID_ARGUMENT`, and a key in a non-default namespace is
+`UNIMPLEMENTED`, as everywhere else. One caveat comes from how keys are
+stored: a key *name* made only of digits is stored as a document id that reads
+back as a numeric id, so it orders among the ids.
 
 #### Datastore property transforms
 

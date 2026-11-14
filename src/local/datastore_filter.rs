@@ -160,10 +160,11 @@ fn property_predicate(
     database_id: &str,
 ) -> Option<Predicate> {
     let name = filter.property.as_ref().map(|r| r.name.as_str())?;
-    // `__key__` filters other than the `HAS_ANCESTOR` stripped upstream are not
-    // served by the in-process evaluator, so there is nothing to be equivalent
-    // to. Note this is *not* `Path::Name`: a key compares as a Datastore key,
-    // whose ordering is by path element, not as the document's resource string.
+    // Declined, though the in-process evaluator serves `__key__` filters. A key
+    // is *not* `Path::Name`: it compares as a Datastore key, by path element
+    // with numeric ids before names and ids ordered as numbers, while the
+    // document's resource string orders `10` before `9` and a name such as `5`
+    // between them. Pushing it would drop entities the filter keeps.
     if name == "__key__" {
         return None;
     }

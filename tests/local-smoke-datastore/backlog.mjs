@@ -133,20 +133,6 @@ await check('an AND of two equality filters matches both', async () => {
   expectNames(rows, ['a', 'c'], 'AND filter')
 })
 
-await check('a __key__ equality filter returns that entity', async () => {
-  const query = datastore.createQuery(kind).filter(new PropertyFilter('__key__', '=', key('b')))
-  const [rows] = await datastore.runQuery(query)
-  expectNames(rows, ['b'], '__key__ filter')
-})
-
-await check('a query orders by __key__ descending', async () => {
-  const [rows] = await datastore.runQuery(datastore.createQuery(kind).order('__key__', { descending: true }))
-  const got = rows.map((row) => row[datastore.KEY].name)
-  if (JSON.stringify(got) !== JSON.stringify(['c', 'b', 'a'])) {
-    throw new Error(`descending key order returned ${JSON.stringify(got)}`)
-  }
-})
-
 // --- Aggregations --------------------------------------------------------
 
 await check('a count() aggregation counts the matching entities', async () => {

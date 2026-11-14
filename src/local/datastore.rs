@@ -211,7 +211,7 @@ impl DatastoreApi {
             .map(|kind| kind.name.as_str())
             .filter(|name| !name.is_empty());
 
-        validate_filter(query.filter.as_ref())?;
+        validate_filter(query.filter.as_ref(), &self.project_id, &self.database_id)?;
         let ancestor = extract_ancestor(query.filter.as_ref())?;
         let ancestor = match (ancestor.as_ref(), partition_ancestor) {
             (Some(from_filter), Some(from_partition)) => {
@@ -936,14 +936,17 @@ fn flatten_conjunction<'a>(filters: &'a [Filter], terms: &mut Vec<&'a Filter>) {
 
 fn range_filter(filter: &Filter) -> Option<&PropertyFilter> {
     match filter.filter_type.as_ref() {
+        // A key is one value, never an array, so a `__key__` range needs no
+        // grouping, and `operands` has no key to give it.
         Some(FilterType::PropertyFilter(property))
-            if matches!(
-                PropertyOp::try_from(property.op),
-                Ok(PropertyOp::LessThan
-                    | PropertyOp::LessThanOrEqual
-                    | PropertyOp::GreaterThan
-                    | PropertyOp::GreaterThanOrEqual)
-            ) =>
+            if !is_key_filter(property)
+                && matches!(
+                    PropertyOp::try_from(property.op),
+                    Ok(PropertyOp::LessThan
+                        | PropertyOp::LessThanOrEqual
+                        | PropertyOp::GreaterThan
+                        | PropertyOp::GreaterThanOrEqual)
+                ) =>
         {
             Some(property)
         }
@@ -965,6 +968,9 @@ pub(crate) fn property_matches(
     project_id: &str,
     database_id: &str,
 ) -> bool {
+    if is_key_filter(filter) {
+        return key_matches(entity, filter);
+    }
     let Some((actual, expected)) = operands(entity, filter, project_id, database_id) else {
         return false;
     };
@@ -987,9 +993,6 @@ fn operands(
         return None;
     }
     let expected = filter.value.as_ref()?;
-    if reference.name == "__key__" {
-        return None; // HAS_ANCESTOR already stripped; other key filters later.
-    }
     let actual = entity.properties.get(&reference.name)?;
 
     // Both sides cross into the Firestore values the store actually holds, for
@@ -1014,26 +1017,36 @@ fn operands(
 /// `validate_filter` has already refused an `IN` or `NOT_IN` whose value is not
 /// a non-empty array.
 fn element_matches(element: &FsValue, op: Option<PropertyOp>, expected: &FsValue) -> bool {
-    let equals =
-        |candidate: &FsValue| query::comparable(element, candidate) == Some(Ordering::Equal);
+    operator_matches(op, expected, fs_list, |candidate| {
+        query::comparable(element, candidate)
+    })
+}
+
+/// What one operator says, given how the stored value compares to a candidate.
+///
+/// `compare` answers `None` for "a filter cannot compare these two at all" —
+/// different types, or a `NaN` on either side — and that is no match for
+/// *every* operator, including equality. The comparator this replaced instead
+/// returned `Ordering::Equal` for every type pair it did not name, so
+/// `priority = 3` matched an entity whose `priority` was a string, a blob, or a
+/// list, and so did `<=` and `>=`. Real Datastore returns none of those.
+fn operator_matches<T>(
+    op: Option<PropertyOp>,
+    expected: &T,
+    list: impl Fn(&T) -> Option<&[T]>,
+    compare: impl Fn(&T) -> Option<Ordering>,
+) -> bool {
+    let equals = |candidate: &T| compare(candidate) == Some(Ordering::Equal);
     match op {
         Some(PropertyOp::NotEqual) => return !equals(expected),
-        Some(PropertyOp::In) => {
-            return fs_list(expected).is_some_and(|list| list.iter().any(equals))
-        }
+        Some(PropertyOp::In) => return list(expected).is_some_and(|list| list.iter().any(equals)),
         Some(PropertyOp::NotIn) => {
-            return fs_list(expected).is_some_and(|list| !list.iter().any(equals))
+            return list(expected).is_some_and(|list| !list.iter().any(equals))
         }
         _ => {}
     }
 
-    // `None` is "a filter cannot compare these two at all" — different types,
-    // or a `NaN` on either side — and it is no match for *every* operator,
-    // including equality. The comparator this replaced instead returned
-    // `Ordering::Equal` for every type pair it did not name, so `priority = 3`
-    // matched an entity whose `priority` was a string, a blob, or a list, and
-    // so did `<=` and `>=`. Real Datastore returns none of those.
-    let Some(ord) = query::comparable(element, expected) else {
+    let Some(ord) = compare(expected) else {
         return false;
     };
     match op {
@@ -1048,6 +1061,85 @@ fn element_matches(element: &FsValue, op: Option<PropertyOp>, expected: &FsValue
         }
         // `validate_filter` refused every other operator before the read.
         _ => false,
+    }
+}
+
+/// The pseudo-property a filter or an order names to mean the entity's key.
+const KEY_PROPERTY: &str = "__key__";
+
+fn is_key_filter(filter: &PropertyFilter) -> bool {
+    filter
+        .property
+        .as_ref()
+        .is_some_and(|reference| reference.name == KEY_PROPERTY)
+}
+
+/// A `__key__` filter, which compares the entity's key rather than a property.
+///
+/// The operators mean what they mean for a property, under `compare_keys`.
+/// `validate_filter` has already refused a value that is not a key in this
+/// database, so a key from another project never reaches here to compare by
+/// its path alone.
+fn key_matches(entity: &Entity, filter: &PropertyFilter) -> bool {
+    let (Some(actual), Some(expected)) = (entity.key.as_ref(), filter.value.as_ref()) else {
+        return false;
+    };
+    operator_matches(
+        PropertyOp::try_from(filter.op).ok(),
+        expected,
+        ds_list,
+        |candidate| ds_key(candidate).map(|key| compare_keys(actual, key)),
+    )
+}
+
+/// The order Datastore gives two keys in the same partition.
+///
+/// The public queries page orders keys by "Ancestor path", then "Entity
+/// kind", then "Identifier (key name or numeric ID)", with each ancestor
+/// element "compared similarly: by kind (string), then by key name or numeric
+/// ID". Kinds and names order by byte value, numeric ids numerically, and an
+/// id precedes a name. Element by element, that is the public Firestore order
+/// for references — "by path elements" — so a key orders before its own
+/// descendants, as a shorter path does there.
+///
+/// This is the order of a `__key__` filter, of a `__key__` sort, and the
+/// tie-break a query cursor needs to resume between entities a sort calls
+/// equal; keep those on this one function.
+pub(crate) fn compare_keys(left: &Key, right: &Key) -> Ordering {
+    use crate::protos::google::datastore::v1::key::path_element::IdType;
+
+    fn identifier(id: Option<&IdType>) -> (u8, i64, &str) {
+        match id {
+            // An incomplete element orders first. Nothing stored has one, and
+            // `validate_filter` refuses one in a filter value.
+            None => (0, 0, ""),
+            Some(IdType::Id(id)) => (1, *id, ""),
+            Some(IdType::Name(name)) => (2, 0, name.as_str()),
+        }
+    }
+    left.path
+        .iter()
+        .zip(&right.path)
+        .map(|(left, right)| {
+            left.kind.cmp(&right.kind).then_with(|| {
+                identifier(left.id_type.as_ref()).cmp(&identifier(right.id_type.as_ref()))
+            })
+        })
+        .find(|ord| *ord != Ordering::Equal)
+        .unwrap_or_else(|| left.path.len().cmp(&right.path.len()))
+}
+
+fn ds_key(value: &DsValue) -> Option<&Key> {
+    match &value.value_type {
+        Some(DsValueType::KeyValue(key)) => Some(key),
+        _ => None,
+    }
+}
+
+fn ds_list(value: &DsValue) -> Option<&[DsValue]> {
+    match &value.value_type {
+        Some(DsValueType::ArrayValue(array)) => Some(&array.values),
+        _ => None,
     }
 }
 
@@ -1082,12 +1174,17 @@ struct FilterCounts {
 /// which turned an illegal query into an empty result; this answers
 /// `INVALID_ARGUMENT` instead. The "comes first in `order_by`" requirement is
 /// not enforced, as it is not for the range operators either.
-fn validate_filter(filter: Option<&Filter>) -> Result<(), Status> {
+fn validate_filter(
+    filter: Option<&Filter>,
+    project_id: &str,
+    database_id: &str,
+) -> Result<(), Status> {
     let Some(filter) = filter else {
         return Ok(());
     };
     let mut counts = FilterCounts::default();
     count_filter(filter, false, &mut counts)?;
+    validate_key_filters(filter, project_id, database_id)?;
 
     if counts.not_equal + counts.not_in > 1 {
         return Err(Status::invalid_argument(
@@ -1163,6 +1260,48 @@ fn count_filter(filter: &Filter, under_or: bool, counts: &mut FilterCounts) -> R
     }
 }
 
+/// Refuse a `__key__` filter whose value is not a complete key in this
+/// database, rather than let it match nothing.
+///
+/// `compare_keys` orders keys within one partition, so a key from another
+/// project would otherwise be compared by its path alone. Checked through
+/// `key_to_document_name`, the same gate a written or looked-up key passes, so
+/// a namespace is refused here as it is there. `HAS_ANCESTOR` carries a key
+/// too, and `extract_ancestor` already holds it to this.
+fn validate_key_filters(
+    filter: &Filter,
+    project_id: &str,
+    database_id: &str,
+) -> Result<(), Status> {
+    match filter.filter_type.as_ref() {
+        Some(FilterType::CompositeFilter(composite)) => composite
+            .filters
+            .iter()
+            .try_for_each(|child| validate_key_filters(child, project_id, database_id)),
+        Some(FilterType::PropertyFilter(property)) if is_key_filter(property) => {
+            let value = property.value.as_ref();
+            let keys = match PropertyOp::try_from(property.op) {
+                Ok(PropertyOp::HasAncestor) => return Ok(()),
+                Ok(PropertyOp::In | PropertyOp::NotIn) => value
+                    .and_then(ds_list)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(Some)
+                    .collect(),
+                _ => vec![value],
+            };
+            for value in keys {
+                let key = value.and_then(ds_key).ok_or_else(|| {
+                    Status::invalid_argument("a __key__ filter needs a key value")
+                })?;
+                key_to_document_name(key, project_id, database_id)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// `IN` and `NOT_IN` require "a non-empty `ArrayValue`", and `NOT_IN` "with at
 /// most 10 values".
 fn candidate_list(filter: &PropertyFilter, op: &str, max: Option<usize>) -> Result<(), Status> {
@@ -1204,14 +1343,19 @@ fn compare_entities(
         let Some(PropertyReference { name }) = term.property.as_ref() else {
             continue;
         };
-        let left_value = left.properties.get(name);
-        let right_value = right.properties.get(name);
-        let ord = match (left_value, right_value) {
-            (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Less,
-            (Some(_), None) => Ordering::Greater,
-            (Some(left), Some(right)) => {
-                compare_ds_values(left, right, project_id, database_id)
+        let ord = if name == KEY_PROPERTY {
+            match (left.key.as_ref(), right.key.as_ref()) {
+                (Some(left), Some(right)) => compare_keys(left, right),
+                _ => Ordering::Equal,
+            }
+        } else {
+            match (left.properties.get(name), right.properties.get(name)) {
+                (None, None) => Ordering::Equal,
+                (None, Some(_)) => Ordering::Less,
+                (Some(_), None) => Ordering::Greater,
+                (Some(left), Some(right)) => {
+                    compare_ds_values(left, right, project_id, database_id)
+                }
             }
         };
         if ord != Ordering::Equal {

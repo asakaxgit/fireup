@@ -15,14 +15,15 @@ use fireup::protos::google::datastore::v1::key::path_element::IdType;
 use fireup::protos::google::datastore::v1::key::PathElement;
 use fireup::protos::google::datastore::v1::mutation::Operation;
 use fireup::protos::google::datastore::v1::property_filter::Operator as PropertyOp;
+use fireup::protos::google::datastore::v1::property_order::Direction;
 use fireup::protos::google::datastore::v1::property_transform::{ServerValue, TransformType};
 use fireup::protos::google::datastore::v1::run_query_request::QueryType;
 use fireup::protos::google::datastore::v1::value::ValueType;
 use fireup::protos::google::datastore::v1::{
     filter::FilterType, AllocateIdsRequest, ArrayValue, BeginTransactionRequest, CommitRequest,
-    CompositeFilter, Entity, Filter, Key, KindExpression, LookupRequest, Mutation, PropertyFilter,
-    PropertyMask, PropertyReference, PropertyTransform, Query, RollbackRequest,
-    RunAggregationQueryRequest, RunQueryRequest, Value,
+    CompositeFilter, Entity, Filter, Key, KindExpression, LookupRequest, Mutation, PartitionId,
+    PropertyFilter, PropertyMask, PropertyOrder, PropertyReference, PropertyTransform, Query,
+    RollbackRequest, RunAggregationQueryRequest, RunQueryRequest, Value,
 };
 use tonic::transport::Channel;
 use tonic::Code;
@@ -1571,6 +1572,232 @@ async fn filters_the_proto_rules_out_are_invalid_arguments() {
         ),
     ] {
         let status = query_names(&mut client, "Refused", filter)
+            .await
+            .expect_err(what);
+        assert_eq!(status.code(), Code::InvalidArgument, "{what}: {status}");
+    }
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+fn key_value(key: Key) -> Value {
+    Value {
+        value_type: Some(ValueType::KeyValue(key)),
+        ..Default::default()
+    }
+}
+
+fn path_key(path: &[(&str, IdType)]) -> Key {
+    Key {
+        partition_id: None,
+        path: path
+            .iter()
+            .map(|(kind, id)| PathElement {
+                kind: kind.to_string(),
+                id_type: Some(id.clone()),
+            })
+            .collect(),
+    }
+}
+
+/// Seeds kind `Keyed` with two numeric ids, two names, and a child of id 9,
+/// so the public key order differs from the document name's string order in
+/// two places: `10` after `9`, and the child between them.
+async fn seed_keyed(client: &mut DatastoreClient<Channel>) {
+    let kind = "Keyed";
+    let keys = [
+        path_key(&[(kind, IdType::Id(10))]),
+        path_key(&[(kind, IdType::Name("b".into()))]),
+        path_key(&[(kind, IdType::Id(9)), (kind, IdType::Name("child".into()))]),
+        path_key(&[(kind, IdType::Name("a".into()))]),
+        path_key(&[(kind, IdType::Id(9))]),
+    ];
+    let mutations = keys
+        .into_iter()
+        .map(|key| Mutation {
+            operation: Some(Operation::Upsert(entity(key, HashMap::new()))),
+            ..Default::default()
+        })
+        .collect();
+    client
+        .commit(CommitRequest {
+            project_id: PROJECT.to_string(),
+            mode: CommitMode::NonTransactional as i32,
+            mutations,
+            ..Default::default()
+        })
+        .await
+        .expect("seed");
+}
+
+/// A `__key__` order sorts in the public key order: element by element, a
+/// numeric id before a name, ids as numbers, a key before its descendants.
+#[tokio::test]
+async fn a_query_orders_by_key_in_the_public_key_order() {
+    let (server, mut client) = start().await;
+    seed_keyed(&mut client).await;
+
+    let ascending = ["9", "child", "10", "a", "b"];
+    for (direction, want) in [
+        (Direction::Ascending, ascending.to_vec()),
+        (
+            Direction::Descending,
+            ascending.iter().rev().copied().collect(),
+        ),
+    ] {
+        let batch = client
+            .run_query(RunQueryRequest {
+                project_id: PROJECT.to_string(),
+                query_type: Some(QueryType::Query(Query {
+                    kind: vec![KindExpression {
+                        name: "Keyed".to_string(),
+                    }],
+                    order: vec![PropertyOrder {
+                        property: Some(PropertyReference {
+                            name: "__key__".to_string(),
+                        }),
+                        direction: direction as i32,
+                    }],
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+            .await
+            .expect("query")
+            .into_inner()
+            .batch
+            .expect("batch");
+        let got: Vec<String> = batch
+            .entity_results
+            .into_iter()
+            .filter_map(|result| result.entity?.key?.path.pop()?.id_type)
+            .map(|id| match id {
+                IdType::Name(name) => name,
+                IdType::Id(id) => id.to_string(),
+            })
+            .collect();
+        assert_eq!(got, want, "{direction:?}");
+    }
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// Every operator a property filter takes is served on `__key__`, under the
+/// same key order.
+#[tokio::test]
+async fn key_filters_are_served_in_the_public_key_order() {
+    let (server, mut client) = start().await;
+    seed_keyed(&mut client).await;
+
+    let id = |id| key_value(path_key(&[("Keyed", IdType::Id(id))]));
+    let name = |name: &str| key_value(path_key(&[("Keyed", IdType::Name(name.into()))]));
+    let by_key = |op, value| property_filter("__key__", op, value);
+    let keys = |values: Vec<Value>| Value {
+        value_type: Some(ValueType::ArrayValue(ArrayValue { values })),
+        ..Default::default()
+    };
+
+    for (filter, want) in [
+        (by_key(PropertyOp::Equal, id(10)), vec!["10"]),
+        (by_key(PropertyOp::Equal, name("a")), vec!["a"]),
+        // As strings, "10" < "9"; as ids, 10 > 9. The child of 9 is above 9.
+        (
+            by_key(PropertyOp::GreaterThan, id(9)),
+            vec!["10", "a", "b", "child"],
+        ),
+        // Every id precedes every name.
+        (
+            by_key(PropertyOp::LessThan, name("a")),
+            vec!["10", "9", "child"],
+        ),
+        (by_key(PropertyOp::LessThanOrEqual, id(9)), vec!["9"]),
+        (
+            by_key(PropertyOp::NotEqual, name("a")),
+            vec!["10", "9", "b", "child"],
+        ),
+        (
+            by_key(PropertyOp::In, keys(vec![id(9), name("b")])),
+            vec!["9", "b"],
+        ),
+        (
+            by_key(PropertyOp::NotIn, keys(vec![id(9), name("b")])),
+            vec!["10", "a", "child"],
+        ),
+        // Two ranges on `__key__` under AND, which the per-element grouping of
+        // property ranges must leave alone.
+        (
+            composite(
+                CompositeOp::And,
+                vec![
+                    by_key(PropertyOp::GreaterThanOrEqual, id(10)),
+                    by_key(PropertyOp::LessThan, name("b")),
+                ],
+            ),
+            vec!["10", "a"],
+        ),
+        (
+            composite(
+                CompositeOp::Or,
+                vec![
+                    by_key(PropertyOp::Equal, id(9)),
+                    by_key(PropertyOp::Equal, name("b")),
+                ],
+            ),
+            vec!["9", "b"],
+        ),
+    ] {
+        let got = query_names(&mut client, "Keyed", filter.clone())
+            .await
+            .unwrap_or_else(|status| panic!("{filter:?} was refused: {status}"));
+        assert_eq!(got, want, "{filter:?}");
+    }
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// A `__key__` filter whose value is not a complete key in this database is
+/// refused, rather than matching nothing.
+#[tokio::test]
+async fn a_key_filter_needs_a_complete_key_in_this_database() {
+    let (server, mut client) = start().await;
+
+    let mut elsewhere = named_key("Keyed", "a");
+    elsewhere.partition_id = Some(PartitionId {
+        project_id: "another-project".to_string(),
+        ..Default::default()
+    });
+    for (what, filter) in [
+        (
+            "a string",
+            property_filter("__key__", PropertyOp::Equal, string_value("a")),
+        ),
+        (
+            "an IN of strings",
+            property_filter(
+                "__key__",
+                PropertyOp::In,
+                Value {
+                    value_type: Some(ValueType::ArrayValue(ArrayValue {
+                        values: vec![string_value("a")],
+                    })),
+                    ..Default::default()
+                },
+            ),
+        ),
+        (
+            "an incomplete key",
+            property_filter(
+                "__key__",
+                PropertyOp::GreaterThan,
+                key_value(incomplete_key("Keyed")),
+            ),
+        ),
+        (
+            "a key in another project",
+            property_filter("__key__", PropertyOp::Equal, key_value(elsewhere)),
+        ),
+    ] {
+        let status = query_names(&mut client, "Keyed", filter)
             .await
             .expect_err(what);
         assert_eq!(status.code(), Code::InvalidArgument, "{what}: {status}");

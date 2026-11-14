@@ -380,7 +380,7 @@
       "status": "served",
       "driver": "node-sdk",
       "python": true,
-      "note": "Property filters =, <, <=, >, >=, !=, IN, NOT_IN under AND and OR, a filter the proto's Requires lists rule out is INVALID_ARGUMENT. An array-valued property matches when any one of its values does, for every operator, and range filters on one property under AND must hold for the same value. Ordering by an array-valued property does not yet use the smallest/greatest value."
+      "note": "Property filters =, <, <=, >, >=, !=, IN, NOT_IN under AND and OR, the same operators on __key__, and order by __key__ in the public key order; a filter the proto's Requires lists rule out is INVALID_ARGUMENT. An array-valued property matches when any one of its values does, for every operator, and range filters on one property under AND must hold for the same value. Ordering by an array-valued property does not yet use the smallest/greatest value."
     },
     {
       "id": "datastore.Commit",

@@ -350,6 +350,20 @@ await check('equality on an array property matches any element', async () => {
   expectNames(rows, ['a', 'b'], 'array equality')
 }, { served: ['datastore.RunQuery'] })
 
+await check('a __key__ equality filter returns that entity', async () => {
+  const query = datastore.createQuery(filterKind).filter(new PropertyFilter('__key__', '=', filterKey('b')))
+  const [rows] = await datastore.runQuery(query)
+  expectNames(rows, ['b'], '__key__ filter')
+}, { served: ['datastore.RunQuery'] })
+
+await check('a query orders by __key__ descending', async () => {
+  const [rows] = await datastore.runQuery(datastore.createQuery(filterKind).order('__key__', { descending: true }))
+  const got = rows.map((row) => row[datastore.KEY].name)
+  if (JSON.stringify(got) !== JSON.stringify(['c', 'b', 'a'])) {
+    throw new Error(`descending key order returned ${JSON.stringify(got)}`)
+  }
+}, { served: ['datastore.RunQuery'] })
+
 await check('delete removes the entity', async () => {
   await datastore.delete(key)
   const [afterDelete] = await datastore.get(key)
