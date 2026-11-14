@@ -228,9 +228,11 @@ jobs:
   #
   # This job is a required status check on `main`, by its `name:` below — so
   # renaming it unbinds the requirement. And neither the job nor the gate step
-  # may carry an `if:` or `continue-on-error:` that switches it off: a skipped
-  # job satisfies a required check. `fidelity_matrix_tests`, in the `test` job,
-  # fails if either appears.
+  # may carry an `if:` or `continue-on-error:` that switches it off, and the job
+  # takes no `needs:`: a skipped job satisfies a required check. The gate step's
+  # `run:` is the gate script alone, with no `${{ }}` in it, so nothing
+  # (`|| true`, `; true`) replaces its exit status. `fidelity_matrix_tests`, in
+  # the `test` job, fails on any of these.
   fidelity:
     name: fidelity smoke gate (official SDKs)
     runs-on: ubuntu-latest

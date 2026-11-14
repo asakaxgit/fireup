@@ -11,6 +11,7 @@
 //! which is the point: it fails in `cargo test` in a second, long before
 //! anybody waits on the SDK layer.
 
+use saphyr::{LoadableYamlNode, Yaml};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -560,11 +561,47 @@ const STEP_CONDITION_KEYS: &[&str] = &["if", "continue-on-error"];
 /// A commented-out key is not a key, and `ci.yml` documents its own settings in
 /// prose -- a reader that matched anywhere in the line would find the comment
 /// and report on a setting that is not in effect.
+///
+/// YAML opens a comment only at a `#` that starts the line or follows a space
+/// or tab. Cutting at every `#` hid the rest of `run: gate x#|| true`, which
+/// YAML keeps whole and bash runs as `gate x# || true`.
 fn without_comment(line: &str) -> &str {
-    match line.split_once('#') {
-        Some((before, _)) => before.trim_end(),
-        None => line.trim_end(),
+    let mut previous = None;
+    for (at, c) in line.char_indices() {
+        if c == '#' && previous.is_none_or(|p: char| p == ' ' || p == '\t') {
+            return line[..at].trim_end();
+        }
+        previous = Some(c);
     }
+    line.trim_end()
+}
+
+/// The plain-scalar value of the key on line `at`, whose inline text is
+/// `inline`, with its continuation lines folded in the way YAML does: every
+/// following line indented past `indent` joins the value with a space, and a
+/// blank line between them joins with a newline instead. Reading only the key's
+/// own line let `if: always()` over an indented `&& false` through as
+/// `always()`, when YAML gives `always() && false`.
+fn folded_value(lines: &[&str], at: usize, inline: &str, indent: usize) -> String {
+    let mut value = inline.trim().to_string();
+    let mut after_blank = false;
+    for next in &lines[at + 1..] {
+        let bare = without_comment(next);
+        let body = bare.trim_start();
+        if body.is_empty() {
+            after_blank = true;
+            continue;
+        }
+        if bare.len() - body.len() <= indent {
+            break;
+        }
+        if !value.is_empty() {
+            value.push(if after_blank { '\n' } else { ' ' });
+        }
+        value.push_str(body);
+        after_blank = false;
+    }
+    value
 }
 
 /// Indentation of `line`, ignoring any comment on it.
@@ -596,6 +633,124 @@ fn unquote(value: &str) -> &str {
     value
 }
 
+/// The value of `key` if `text` is that mapping key, in any spelling YAML
+/// parses to it: `key:`, `key :`, `'key':` and `"key":`. Matching only the
+/// bare `key:` let `'needs': test` and `if : false` through as no key at all.
+fn key_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let rest = [format!("'{key}'"), format!("\"{key}\""), key.to_string()]
+        .iter()
+        .find_map(|spelling| text.strip_prefix(spelling.as_str()))?;
+    rest.trim_start().strip_prefix(':')
+}
+
+/// Whether `text` opens with a mapping key `key_value` can read: a plain name of
+/// letters, digits, `_` and `-`, optionally inside one pair of quotes, then `:`
+/// and whitespace or the end of the line. YAML has more spellings of a key than
+/// any list of them -- `"i\x66":`, `? if` over `: false`, `!!str if:`, an alias
+/// `*k :` -- and each parses to `if`. Listing spellings let each new one through;
+/// refusing every key outside the one readable shape closes the class.
+fn plain_key(text: &str) -> bool {
+    let (name, rest) = ['\'', '"']
+        .iter()
+        .find_map(|&quote| {
+            let inner = text.strip_prefix(quote)?;
+            let end = inner.find(quote)?;
+            Some((&inner[..end], &inner[end + 1..]))
+        })
+        .unwrap_or_else(|| {
+            let end = text
+                .find(|c: char| c == ':' || c == ' ')
+                .unwrap_or(text.len());
+            (&text[..end], &text[end..])
+        });
+    let named = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let after = rest.trim_start().strip_prefix(':');
+    named && after.is_some_and(|after| after.is_empty() || after.starts_with([' ', '\t']))
+}
+
+/// The refusal for a key line `plain_key` cannot read, on the `place` in `ci.yml`.
+fn unreadable_key(place: &str, text: &str) -> String {
+    format!(
+        "{place} has a key this reader cannot read: `{text}`. YAML spells one key many \
+         ways -- escapes in a quoted key, `? key` explicit keys, `!!str` tags, `*alias` \
+         keys -- and a condition hidden in any of them would switch the step or job off \
+         unseen. Write every key as a plain name (letters, digits, `_`, `-`), optionally \
+         in quotes without a `\\`, followed by `: `."
+    )
+}
+
+/// `Err` unless `ci` loads under `saphyr`, which holds to the YAML spec. This
+/// line reader assumes the indentation the spec requires; libyaml-based readers
+/// (PyYAML, and js-yaml too) accept more. A quoted string whose continuation
+/// line sits left of its key -- `NOTE: "x` over `      - a: b` over `"` -- loads
+/// in both, and its `- a: b` passed for the step and hid the real `if: false`.
+/// Refusing what the spec refuses closes that whole class, not one spelling.
+/// The guards call it last, so a shape the line reader already refuses keeps
+/// its own, more specific message.
+fn spec_strict(ci: &str) -> Result<(), String> {
+    Yaml::load_from_str(ci).map(drop).map_err(|error| {
+        format!(
+            "ci.yml does not load under a YAML-spec reader ({error}). Lenient readers \
+             such as PyYAML accept lines this guard cannot place -- a quoted string \
+             continued left of its key can hide a step's `if: false` -- so it refuses \
+             rather than guessing. Indent every continuation line past its key."
+        )
+    })
+}
+
+/// The line that opens the step holding line `at`, and the column the step's
+/// keys sit at. YAML puts a step's keys wherever its first key lands, so that
+/// column is read off the `-` line -- `-   name:` puts them at dash + 4 -- not
+/// assumed to be dash + 2; the fixed +2 let `-   name:` over `    if: false`
+/// through unread. A bare `-` (or `- # comment`) opening the step is refused:
+/// its keys could start anywhere, and a walk-up that only knew `- ` skipped it
+/// and landed on the step before. A `-` line counts only if it sits left of
+/// every non-blank line between it and `at`: a `- a: b` inside an earlier
+/// key's block scalar is deeper than that key, so it can never pass for the
+/// step and hide the real step's `if: false` above it. A quoted string's
+/// continuation lines are not bound by that ceiling in PyYAML or js-yaml, but
+/// the YAML spec does bind them, and `spec_strict` refuses the file first.
+fn step_opener(lines: &[&str], at: usize, needle: &str) -> Result<(usize, usize), String> {
+    let mut ceiling = usize::MAX;
+    let start = (0..=at)
+        .rev()
+        .find(|&above| {
+            let bare = without_comment(lines[above]);
+            let inner = bare.trim_start();
+            if inner.is_empty() {
+                return false;
+            }
+            let indent = bare.len() - inner.len();
+            let opens = indent < ceiling
+                && inner
+                    .strip_prefix('-')
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']));
+            ceiling = ceiling.min(indent);
+            opens
+        })
+        .ok_or_else(|| {
+            format!(
+                "ci.yml's `{needle}` is not inside a step -- no `-` line opens a block \
+                 above it. This reader only understands the step list form, so it \
+                 refuses rather than guessing which keys govern that command."
+            )
+        })?;
+    let bare = without_comment(lines[start]);
+    let after_dash = &bare.trim_start()[1..];
+    let first_key = after_dash.trim_start_matches(' ');
+    if first_key.is_empty() || first_key.starts_with('\t') {
+        return Err(format!(
+            "the ci.yml step running `{needle}` opens with a bare `-`, so its keys could \
+             start at any column and this reader cannot tell which lines govern the \
+             step. Put the step's first key on the `-` line: `- name: ...`."
+        ));
+    }
+    Ok((start, bare.len() - first_key.len()))
+}
+
 /// One live `if:` or `continue-on-error:` on a step.
 #[derive(Debug, PartialEq, Eq)]
 struct StepCondition {
@@ -624,7 +779,9 @@ fn reporting_step(ci: &str, target: &str) -> Result<Vec<StepCondition>, String> 
          executes. Restore the step, or point GUARDED_TARGET at wherever the \
          target moved."
     );
-    step_conditions(ci, &needle, &missing).map(|(_, conditions)| conditions)
+    let (_, conditions) = step_conditions(ci, &needle, &missing)?;
+    spec_strict(ci)?;
+    Ok(conditions)
 }
 
 /// The live `if:` / `continue-on-error:` on the one step whose command contains
@@ -657,52 +814,55 @@ fn step_conditions(
         }
     };
 
-    // Walk up to the `- ` that opens the step holding that command.
-    let mut start = None;
-    for above in (0..=at).rev() {
-        let bare = without_comment(lines[above]);
-        if bare.trim_start().starts_with("- ") {
-            start = Some(above);
-            break;
-        }
-    }
-    let Some(start) = start else {
-        return Err(format!(
-            "ci.yml's `{needle}` is not inside a step -- no `- ` line opens a block \
-             above it. This reader only understands the step list form, so it refuses \
-             rather than guessing which keys govern that command."
-        ));
-    };
-
+    let (start, key_indent) = step_opener(&lines, at, needle)?;
     let step_indent = indent_of(lines[start]);
-    let key_indent = step_indent + 2;
     let mut conditions = Vec::new();
 
     // A step's first key sits on the `- ` line itself, so read that one too:
     // `- if: false` followed by `name:` is the same step with the same effect.
-    let inline = without_comment(lines[start]).trim_start();
-    let mut keyed: Vec<&str> = vec![inline.trim_start_matches("- ")];
+    let mut keyed: Vec<(usize, &str)> = vec![(
+        start,
+        without_comment(lines[start])
+            .get(key_indent..)
+            .unwrap_or_default(),
+    )];
 
-    for line in &lines[start + 1..] {
+    for (at, line) in lines.iter().enumerate().skip(start + 1) {
         let bare = without_comment(line);
         let inner = bare.trim_start();
         if inner.is_empty() {
             continue;
         }
-        if bare.len() - inner.len() <= step_indent {
+        let indent = bare.len() - inner.len();
+        if indent <= step_indent {
             break;
         }
-        if indent_of(line) == key_indent {
-            keyed.push(inner);
+        if indent < key_indent {
+            return Err(format!(
+                "the ci.yml step running `{needle}` has a line left of its keys: `{inner}`. \
+                 The step's keys start at column {key_indent}, where its first key does, \
+                 and a line between the `-` and that column is no key this reader can \
+                 place. Line every key of the step up under the first."
+            ));
+        }
+        if indent == key_indent {
+            keyed.push((at, inner));
         }
     }
 
-    for text in keyed {
+    for (at, text) in keyed {
+        if !plain_key(text) {
+            return Err(unreadable_key(
+                &format!("the ci.yml step running `{needle}`"),
+                text,
+            ));
+        }
         for key in STEP_CONDITION_KEYS {
-            if let Some(value) = text.strip_prefix(&format!("{key}:")) {
+            if let Some(value) = key_value(text, key) {
+                let value = folded_value(&lines, at, value, key_indent);
                 conditions.push(StepCondition {
                     key: (*key).to_string(),
-                    value: unquote(value.trim()).to_string(),
+                    value: unquote(&value).to_string(),
                 });
             }
         }
@@ -775,6 +935,70 @@ mod supply_chain_reporter_controls {
             reporting_step(&ci, GUARDED_TARGET).is_ok(),
             "the reader cannot find the {GUARDED_TARGET} step in the real ci.yml, so \
              every promise above is about a step it never located"
+        );
+    }
+
+    #[test]
+    fn the_pin_step_reader_handles_the_same_shapes() {
+        let pin = "      - name: Supply-chain pins\n        run:";
+        let base = ci_with("");
+        let wide = base.replace(
+            pin,
+            "      -   name: Supply-chain pins\n          if: false\n          run:",
+        );
+        let conditions = reporting_step(&wide, GUARDED_TARGET).expect("located");
+        assert_eq!(
+            conditions,
+            vec![StepCondition {
+                key: "if".to_string(),
+                value: "false".to_string()
+            }]
+        );
+        for opener in ["-", "- # pins"] {
+            let bare = base.replace(
+                pin,
+                &format!("      {opener}\n        name: Supply-chain pins\n        if: false\n        run:"),
+            );
+            assert!(
+                reporting_step(&bare, GUARDED_TARGET)
+                    .is_err_and(|why| why.contains("opens with a bare `-`")),
+                "{opener:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dash_line_inside_a_block_scalar_is_not_the_pin_step() {
+        // The nearest `-` above the command is inside `NOTE: |`; YAML reads the
+        // step's own `if: false`.
+        let hidden = ci_with("").replace(
+            "      - name: Supply-chain pins\n        run:",
+            "      - name: Supply-chain pins\n        if: false\n        env:\n          \
+             NOTE: |\n            - a: b\n        run:",
+        );
+        let conditions = reporting_step(&hidden, GUARDED_TARGET).expect("located");
+        assert_eq!(
+            conditions,
+            vec![StepCondition {
+                key: "if".to_string(),
+                value: "false".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_dash_line_inside_a_quoted_string_is_not_the_pin_step() {
+        // A quoted scalar's continuation lines may sit at any column, so the
+        // ceiling does not stop `- a: b`; YAML reads the step's own `if: false`.
+        let hidden = ci_with("").replace(
+            "      - name: Supply-chain pins\n        run:",
+            "      - name: Supply-chain pins\n        if: false\n        env:\n          \
+             NOTE: \"x\n      - a: b\n          \"\n        run:",
+        );
+        assert!(
+            reporting_step(&hidden, GUARDED_TARGET)
+                .is_err_and(|why| why.contains("does not load under a YAML-spec reader")),
+            "a step hidden behind a quoted string's `-` passed"
         );
     }
 
@@ -991,6 +1215,9 @@ struct ReporterCommand {
     /// run 42362531653 — and that is `-e` **without** `-o pipefail`, so a pipe
     /// discards the command's exit status unless the body asks for it back.
     pipefail: bool,
+    /// `true` if it is the only command in its `run:` body, so the step's exit
+    /// status is this command's and nothing else's.
+    alone: bool,
 }
 
 /// The command on the `ci.yml` step that runs `target`.
@@ -1000,23 +1227,26 @@ struct ReporterCommand {
 /// say which command runs the target, for the reason it gives too — the
 /// reporter gone is worse than anything written on it.
 fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
-    let lines: Vec<&str> = ci.lines().collect();
     let needle = format!("--test {target}");
+    let missing =
+        format!("ci.yml runs no `{needle}`, so nothing in CI reports the {target} assertions.");
+    command_running(ci, &needle, &missing)
+}
+
+/// The command on the one `ci.yml` step whose `run:` holds `needle`. `missing`
+/// is the error when no step does; the other refusals are `reporter_command`'s.
+fn command_running(ci: &str, needle: &str, missing: &str) -> Result<ReporterCommand, String> {
+    let lines: Vec<&str> = ci.lines().collect();
 
     let found: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| without_comment(line).contains(&needle))
+        .filter(|(_, line)| without_comment(line).contains(needle))
         .map(|(at, _)| at)
         .collect();
     let at = match found[..] {
         [at] => at,
-        [] => {
-            return Err(format!(
-                "ci.yml runs no `{needle}`, so nothing in CI reports the {target} \
-                 assertions."
-            ))
-        }
+        [] => return Err(missing.to_string()),
         _ => {
             return Err(format!(
                 "ci.yml has {} steps running `{needle}`; which of them is the reporter \
@@ -1026,19 +1256,7 @@ fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
         }
     };
 
-    let mut start = None;
-    for above in (0..=at).rev() {
-        if without_comment(lines[above]).trim_start().starts_with("- ") {
-            start = Some(above);
-            break;
-        }
-    }
-    let Some(start) = start else {
-        return Err(format!(
-            "ci.yml's `{needle}` is not inside a step -- no `- ` line opens a block \
-             above it, and this reader only understands the step list form."
-        ));
-    };
+    let (start, _) = step_opener(&lines, at, needle)?;
 
     // The `run:` that holds it: either the needle's own line, or a block
     // scalar opened above it inside the same step.
@@ -1059,6 +1277,10 @@ fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
     let inline = run_body.strip_prefix("run:").unwrap_or_default().trim();
 
     let mut raw: Vec<&str> = Vec::new();
+    // An inline value folds its indented continuation lines in, so `run: gate`
+    // over an indented `|| true` is the one command `gate || true`. A blank
+    // line folds to a newline, so what follows it is a command of its own.
+    let folded;
     if inline.starts_with('|') || inline.starts_with('>') {
         for next in &lines[run_at + 1..] {
             let bare = without_comment(next);
@@ -1072,7 +1294,8 @@ fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
             raw.push(body);
         }
     } else if !inline.is_empty() {
-        raw.push(inline);
+        folded = folded_value(&lines, run_at, inline, run_indent);
+        raw.extend(folded.lines());
     }
     if raw.is_empty() {
         return Err(format!(
@@ -1102,7 +1325,7 @@ fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
     let running: Vec<usize> = logical
         .iter()
         .enumerate()
-        .filter(|(_, line)| line.contains(&needle))
+        .filter(|(_, line)| line.contains(needle))
         .map(|(at, _)| at)
         .collect();
     // No control covers the `_` arm below, and that is deliberate rather than
@@ -1128,6 +1351,7 @@ fn reporter_command(ci: &str, target: &str) -> Result<ReporterCommand, String> {
             text.starts_with("set ") && text.contains("pipefail")
         }),
         command: logical[command_at].clone(),
+        alone: logical.len() == 1,
     })
 }
 
@@ -1402,17 +1626,30 @@ mod reporter_command_controls {
 //
 // `scripts/fidelity-smoke-gate.sh` fails a pull request that breaks an SDK
 // smoke check passing on `main`, and its job in `ci.yml` is a required status
-// check. Being required does not cover the two cheapest ways to switch it off.
+// check. Being required does not cover the cheap ways to switch it off.
 // `continue-on-error: true` on the gate step lets the step fail and the job
 // conclude success, and an `if:` that skips the job reports Success to a
-// required check. Both are one line in `ci.yml`, and a gate cannot report its
-// own removal, so the guard lives here, in the `test` job.
+// required check. So do two edits found in review: `|| true` after the gate
+// command discards its exit status, and a `needs:` on the job skips the gate
+// whenever the needed job is skipped or fails. All are one line in `ci.yml`,
+// and a gate cannot report its own removal, so the guard lives here, in the
+// `test` job.
 
 /// What makes a step the fidelity gate: the command, not the step's `name:`.
 const FIDELITY_GATE_COMMAND: &str = "scripts/fidelity-smoke-gate.sh";
 
-/// The live `if:` / `continue-on-error:` on the job containing the step that
-/// opens at line `step_start`.
+/// The job keys that decide whether the gate job runs and whether its verdict
+/// counts. `needs:` is here because a job whose needed job is skipped or fails
+/// is itself skipped, and a skipped job satisfies a required check.
+const JOB_CONDITION_KEYS: &[&str] = &["if", "continue-on-error", "needs"];
+
+/// Characters that make a shell word more than a plain argument: a list or
+/// pipe operator, a redirect, a subshell or a substitution. Any of them after
+/// the gate script means the step's exit status may no longer be the script's.
+const SHELL_OPERATOR_CHARS: &[char] = &['|', '&', ';', '<', '>', '(', ')', '`'];
+
+/// The live `if:` / `continue-on-error:` / `needs:` on the job containing the
+/// step that opens at line `step_start`.
 ///
 /// Walks up from the step to its `steps:` key, takes that key's indentation as
 /// the job's key indentation, and reads the job's own keys from the line that
@@ -1442,7 +1679,7 @@ fn job_conditions(ci: &str, step_start: usize) -> Result<Vec<StepCondition>, Str
     let job_indent = indent_of(lines[job_at]);
 
     let mut conditions = Vec::new();
-    for line in &lines[job_at + 1..] {
+    for (at, line) in lines.iter().enumerate().skip(job_at + 1) {
         let bare = without_comment(line);
         if bare.trim().is_empty() {
             continue;
@@ -1453,11 +1690,15 @@ fn job_conditions(ci: &str, step_start: usize) -> Result<Vec<StepCondition>, Str
         if indent_of(line) != key_indent {
             continue;
         }
-        for key in STEP_CONDITION_KEYS {
-            if let Some(value) = bare.trim_start().strip_prefix(&format!("{key}:")) {
+        if !plain_key(bare.trim_start()) {
+            return Err(unreadable_key("the fidelity gate's job", bare.trim_start()));
+        }
+        for key in JOB_CONDITION_KEYS {
+            if let Some(value) = key_value(bare.trim_start(), key) {
+                let value = folded_value(&lines, at, value, key_indent);
                 conditions.push(StepCondition {
                     key: (*key).to_string(),
-                    value: unquote(value.trim()).to_string(),
+                    value: unquote(&value).to_string(),
                 });
             }
         }
@@ -1475,8 +1716,46 @@ fn fidelity_gate_is_unconditional(ci: &str) -> Result<(), String> {
     let (start, on_step) = step_conditions(ci, FIDELITY_GATE_COMMAND, &missing)?;
     let on_job = job_conditions(ci, start)?;
 
+    let gate = command_running(ci, FIDELITY_GATE_COMMAND, &missing)?;
+    let command = gate.command.trim();
+    let arguments = command.strip_prefix(FIDELITY_GATE_COMMAND);
+    // `${{ }}` is substituted into the script text before bash parses it, so an
+    // expression can bring back any operator the check below rules out.
+    let plain = arguments.is_some_and(|rest| {
+        (rest.is_empty() || rest.starts_with(' '))
+            && !rest.contains(SHELL_OPERATOR_CHARS)
+            && !rest.contains("${{")
+    });
+    if !gate.alone || !plain {
+        return Err(format!(
+            "the fidelity gate's `run:` does not end its exit status at the gate script: \
+             `{command}`. A step concludes with its shell's last exit status, so `|| true`, \
+             `|| :`, `|| exit 0`, `; true` or another command after the script turns a \
+             failing gate into a passing step, and a command before it can stop the script \
+             running at all. The gate step's `run:` must be that one command, starting with \
+             `{FIDELITY_GATE_COMMAND}`, with plain arguments only -- none of \
+             {SHELL_OPERATOR_CHARS:?} and no `${{{{ }}}}` expression, which Actions \
+             pastes into the script before the shell parses it. Set environment through \
+             the step's `env:` and read it as `$NAME`."
+        ));
+    }
+
     for (place, conditions) in [("step", on_step), ("job", on_job)] {
         for StepCondition { key, value } in conditions {
+            if key == "needs" {
+                return Err(format!(
+                    "the fidelity gate's job carries `needs:{}`. When a needed job is \
+                     skipped or fails, this job is skipped too, and a skipped job satisfies \
+                     a required check -- so a regression merges green whenever the needed \
+                     job does not run. The gate needs nothing from another job; drop the \
+                     `needs:`.",
+                    if value.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {value}")
+                    }
+                ));
+            }
             let holds = if key == "continue-on-error" {
                 value == "false"
             } else {
@@ -1492,7 +1771,7 @@ fn fidelity_gate_is_unconditional(ci: &str) -> Result<(), String> {
             }
         }
     }
-    Ok(())
+    spec_strict(ci)
 }
 
 #[test]
@@ -1551,6 +1830,39 @@ mod fidelity_gate_controls {
     }
 
     #[test]
+    fn a_condition_continued_on_the_next_line_is_caught() {
+        // YAML folds an indented continuation into the value: `always() && false`.
+        for (job, step, place) in [
+            (
+                "    if: always()\n      && false\n",
+                "",
+                "job carries `if: always() && false`",
+            ),
+            (
+                "    if: always()\n\n      && false\n",
+                "",
+                "job carries `if: always()\n&& false`",
+            ),
+            (
+                "",
+                "        if: success()\n          && false\n",
+                "step carries `if: success() && false`",
+            ),
+            (
+                "",
+                "        continue-on-error: false\n          || true\n",
+                "step carries `continue-on-error: false || true`",
+            ),
+        ] {
+            let verdict = fidelity_gate_is_unconditional(&ci_with(job, step));
+            assert!(
+                verdict.is_err_and(|why| why.contains(place)),
+                "{job:?}{step:?} passed"
+            );
+        }
+    }
+
+    #[test]
     fn conditions_that_still_run_pass() {
         assert_eq!(
             fidelity_gate_is_unconditional(&ci_with("    if: always()\n", "")),
@@ -1561,6 +1873,236 @@ mod fidelity_gate_controls {
             "        continue-on-error: false\n",
         );
         assert_eq!(fidelity_gate_is_unconditional(&strict), Ok(()));
+    }
+
+    #[test]
+    fn discarding_the_gate_commands_exit_status_is_caught() {
+        let gate = format!("run: {FIDELITY_GATE_COMMAND}");
+        for tail in [
+            " || true",
+            " ||true",
+            " || :",
+            " || exit 0",
+            " ; true",
+            "; true",
+            " | tee log",
+            " & wait",
+            // A plain scalar continued on an indented line folds into the run.
+            "\n          || true",
+            // Actions pastes the expression in before bash parses the line.
+            " ${{ env.X }}",
+            // A `#` not after whitespace opens no YAML comment, and none in bash.
+            " x#|| true",
+            " \"#\" || true",
+        ] {
+            let ci = ci_with("", "").replace(&gate, &format!("{gate}{tail}"));
+            let verdict = fidelity_gate_is_unconditional(&ci);
+            assert!(
+                verdict.is_err_and(
+                    |why| why.contains("does not end its exit status at the gate script")
+                ),
+                "{tail:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_around_the_gate_in_a_block_is_caught() {
+        let gate = format!("run: {FIDELITY_GATE_COMMAND}");
+        for body in [
+            format!("run: |\n          {FIDELITY_GATE_COMMAND}\n          true"),
+            format!("run: |\n          set +e\n          {FIDELITY_GATE_COMMAND}"),
+            format!("run: |\n          {FIDELITY_GATE_COMMAND} \\\n            || true"),
+            format!("run: |\n          {FIDELITY_GATE_COMMAND} ${{{{ env.X }}}}"),
+            // A blank line inside a plain scalar folds to a newline: two commands.
+            format!("run: {FIDELITY_GATE_COMMAND}\n\n          true"),
+            format!("run: true || {FIDELITY_GATE_COMMAND}"),
+            format!("run: ! {FIDELITY_GATE_COMMAND}"),
+            format!("run: {FIDELITY_GATE_COMMAND}-old"),
+        ] {
+            let ci = ci_with("", "").replace(&gate, &body);
+            let verdict = fidelity_gate_is_unconditional(&ci);
+            assert!(
+                verdict.is_err_and(
+                    |why| why.contains("does not end its exit status at the gate script")
+                ),
+                "{body:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_arguments_to_the_gate_pass() {
+        let gate = format!("run: {FIDELITY_GATE_COMMAND}");
+        for body in [
+            format!("{gate} results"),
+            format!("{gate} \"$RESULTS\""),
+            format!("{gate}\n          results"),
+            format!("run: |\n          {FIDELITY_GATE_COMMAND}"),
+        ] {
+            let ci = ci_with("", "").replace(&gate, &body);
+            assert_eq!(fidelity_gate_is_unconditional(&ci), Ok(()), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn a_needs_on_the_gate_job_is_caught() {
+        for needs in [
+            "    needs: test\n",
+            "    needs: [test, deny]\n",
+            "    needs:\n      - other\n",
+        ] {
+            let verdict = fidelity_gate_is_unconditional(&ci_with(needs, ""));
+            assert!(
+                verdict.is_err_and(|why| why.contains("drop the `needs:`")),
+                "{needs:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_respelled_key_is_still_read() {
+        for (job, step) in [
+            ("    needs : test\n", ""),
+            ("    'needs': test\n", ""),
+            ("    \"if\": false\n", ""),
+            ("    if : false\n", ""),
+            ("", "        'continue-on-error': true\n"),
+        ] {
+            let verdict = fidelity_gate_is_unconditional(&ci_with(job, step));
+            assert!(
+                verdict.is_err_and(|why| why.contains(" carries `")),
+                "{job:?}{step:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_spelled_outside_the_plain_shape_is_caught() {
+        // Each parses to `if`/`needs`/`continue-on-error` under YAML.
+        for (job, step) in [
+            ("    \"i\\x66\": false\n", ""),
+            ("    \"\\u0069f\": false\n", ""),
+            ("    ? if\n    : false\n", ""),
+            ("    !!str needs: test\n", ""),
+            ("    *k : false\n", ""),
+            ("    &k if: false\n", ""),
+            ("", "        \"continue-on-\\x65rror\": true\n"),
+            ("", "        ? if\n        : false\n"),
+        ] {
+            let verdict = fidelity_gate_is_unconditional(&ci_with(job, step));
+            assert!(
+                verdict.is_err_and(|why| why.contains("has a key this reader cannot read")),
+                "{job:?}{step:?} passed"
+            );
+        }
+    }
+
+    /// The gate step respelled as `opener` over keys indented by `keys` spaces.
+    fn gate_step_as(opener: &str, keys: &str) -> String {
+        ci_with("", "").replace(
+            "      - name: Fidelity regression gate\n        run:",
+            &format!(
+                "      {opener}\n{keys}name: Fidelity regression gate\n{keys}if: false\n{keys}run:"
+            ),
+        )
+    }
+
+    #[test]
+    fn a_step_whose_keys_sit_past_dash_plus_two_is_read() {
+        // `-   name:` puts the step's keys at dash + 4; YAML reads `if: false` there.
+        let ci = ci_with("", "").replace(
+            "      - name: Fidelity regression gate\n        run:",
+            "      -   name: Fidelity regression gate\n          if: false\n          run:",
+        );
+        let verdict = fidelity_gate_is_unconditional(&ci);
+        assert!(
+            verdict.is_err_and(|why| why.contains("step carries `if: false`")),
+            "a wide-dash step passed"
+        );
+    }
+
+    #[test]
+    fn a_bare_dash_step_opener_is_caught() {
+        for opener in ["-", "- # gate", "-\t"] {
+            let verdict = fidelity_gate_is_unconditional(&gate_step_as(opener, "        "));
+            assert!(
+                verdict.is_err_and(|why| why.contains("opens with a bare `-`")),
+                "{opener:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_left_of_the_steps_keys_is_caught() {
+        let ci = ci_with("", "").replace(
+            "      - name: Fidelity regression gate\n        run:",
+            "      -   name: Fidelity regression gate\n        if: false\n          run:",
+        );
+        let verdict = fidelity_gate_is_unconditional(&ci);
+        assert!(
+            verdict.is_err_and(|why| why.contains("has a line left of its keys")),
+            "a key left of the first passed"
+        );
+    }
+
+    #[test]
+    fn a_dash_line_inside_a_block_scalar_is_not_the_gate_step() {
+        // `steps:` in the scalar gets past the job reader; `- a: b` was taken as
+        // the step, so the real step's `if: false` went unread.
+        let ci = ci_with(
+            "",
+            "        if: false\n        env:\n          NOTE: |\n            steps:\n            \
+             - a: b\n",
+        );
+        let verdict = fidelity_gate_is_unconditional(&ci);
+        assert!(
+            verdict.is_err_and(|why| why.contains("step carries `if: false`")),
+            "a step hidden behind a block scalar's `-` passed"
+        );
+    }
+
+    #[test]
+    fn a_dash_line_inside_a_quoted_string_is_not_the_gate_step() {
+        let ci = ci_with(
+            "",
+            "        if: false\n        env:\n          NOTE: \"x\n      - a: b\n          \"\n",
+        );
+        let verdict = fidelity_gate_is_unconditional(&ci);
+        assert!(
+            verdict.is_err_and(|why| why.contains("does not load under a YAML-spec reader")),
+            "a step hidden behind a quoted string's `-` passed"
+        );
+    }
+
+    #[test]
+    fn plain_and_quoted_keys_are_readable() {
+        for text in [
+            "if: x",
+            "if:",
+            "'if' : x",
+            "\"runs-on\": x",
+            "timeout_minutes: 5",
+        ] {
+            assert!(plain_key(text), "{text:?}");
+        }
+        for text in [
+            "? if",
+            "!!str if: x",
+            "*k : x",
+            "\"i\\x66\": x",
+            "if:false",
+            ": x",
+            "- if: x",
+        ] {
+            assert!(!plain_key(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_key_that_only_starts_like_a_condition_passes() {
+        let ci = ci_with("    if-unrelated: false\n", "        needsless: true\n");
+        assert_eq!(fidelity_gate_is_unconditional(&ci), Ok(()));
     }
 
     #[test]
