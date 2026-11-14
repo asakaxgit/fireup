@@ -40,6 +40,8 @@ import {
   verifyPasswordResetCode,
 } from 'firebase/auth'
 
+import { writeResults } from '../smoke-gate/results.mjs'
+
 const PROJECT_ID = 'fireup-smoke'
 
 // The client SDK requires an apiKey in its config and appends it to every
@@ -61,6 +63,7 @@ const check = async (name, fn) => {
     console.log(`  FAIL ${name}`)
     console.log(`       ${error?.message ?? error}`)
   }
+  writeResults(checks)
 }
 
 /// Assert a call fails with the Firebase error code the SDK assigns, not with

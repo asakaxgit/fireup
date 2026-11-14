@@ -1006,6 +1006,10 @@ scripts/conformance-local.sh
 scripts/smoke-local-firestore.sh
 scripts/smoke-local-datastore.sh
 scripts/smoke-local-auth.sh
+
+# The merge gate: every smoke suite on both stores, against the committed
+# baseline. See "Fidelity regression gate" below.
+FIREUP_SMOKE_POSTGRES_URL=... scripts/fidelity-smoke-gate.sh
 ```
 
 Each smoke script builds the binary, starts the server on a free port, runs its
@@ -1118,3 +1122,52 @@ instead of tripping over the last one's documents.
 Its triggers are commented out for now, matching `integration_tests.yml` — CI in
 this repository is manual-only until the repo-wide re-enable, so run it with
 `workflow_dispatch`.
+
+### Fidelity regression gate
+
+The smoke suites above have a second job: they are the merge gate. Every pull
+request runs `scripts/fidelity-smoke-gate.sh` in the `fidelity smoke gate
+(official SDKs)` job of `.github/workflows/ci.yml`, a required check on `main`.
+It runs the Firestore, Auth and Datastore smoke suites against the in-memory
+**and** PostgreSQL stores, and compares what passed with
+[`tests/smoke-gate/baseline.json`](../../tests/smoke-gate/baseline.json): the
+names of the checks that pass on `main`, per suite run (`firestore/memory`,
+`auth/postgres`, …).
+
+- A check in the baseline that now fails, or no longer runs, fails the job. The
+  log names each one as `REGRESSED <suite>: <check> (<reason>)`, and each is an
+  annotation on the run. A check that disappears counts as failed. Renaming or
+  deleting a check takes its protection with it, so that has to show in the
+  diff.
+- A new check, or a check that newly passes, never fails the job. The log lists
+  it under `new` until the baseline includes it.
+
+Each suite writes `{ suite, checks: [{ name, ok }] }` through
+`tests/smoke-gate/results.mjs` after every check, so a suite that crashes or
+hangs part-way still reports the checks it got through. The comparison rule has
+its own tests: `node --test tests/smoke-gate/compare.test.mjs`.
+
+Run the gate locally against a database you own. Use a fresh database for every
+run: the Firestore smoke suite assumes an empty store, and on a store that
+already holds a previous run's documents its query and listing checks fail.
+
+```bash
+FIREUP_SMOKE_POSTGRES_URL=postgresql://fireup@127.0.0.1:55433/fireup_gate \
+  scripts/fidelity-smoke-gate.sh /tmp/fireup-smoke-results
+```
+
+**Updating the baseline.** Do this when a pull request adds checks you want
+protected, or removes or renames one on purpose. Run the gate into a results
+directory, then rewrite the baseline from it, and commit the diff with the
+change that caused it:
+
+```bash
+node tests/smoke-gate/gate.mjs --update /tmp/fireup-smoke-results
+git diff tests/smoke-gate/baseline.json
+```
+
+`--update` rewrites only the suite runs present in the results directory and
+leaves the others as they are. To drop a suite run, edit the file by hand.
+`compare.test.mjs` also fails if the baseline and the runs listed in
+`scripts/fidelity-smoke-gate.sh` disagree. A reviewer should read every removed
+line in `baseline.json` as a behaviour that stops being protected.

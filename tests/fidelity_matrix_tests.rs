@@ -617,25 +617,36 @@ struct StepCondition {
 /// is worse than any condition on it, and a reader that picked the first of two
 /// would be reporting on whichever it happened to find.
 fn reporting_step(ci: &str, target: &str) -> Result<Vec<StepCondition>, String> {
-    let lines: Vec<&str> = ci.lines().collect();
     let needle = format!("--test {target}");
+    let missing = format!(
+        "ci.yml runs no `{needle}`, so nothing in CI reports the {target} \
+         assertions. Whatever they promise, they promise it to a file nobody \
+         executes. Restore the step, or point GUARDED_TARGET at wherever the \
+         target moved."
+    );
+    step_conditions(ci, &needle, &missing).map(|(_, conditions)| conditions)
+}
+
+/// The live `if:` / `continue-on-error:` on the one step whose command contains
+/// `needle`, with the line that opens that step. `missing` is the error when no
+/// step runs `needle`; the other refusals are the ones `reporting_step`
+/// documents.
+fn step_conditions(
+    ci: &str,
+    needle: &str,
+    missing: &str,
+) -> Result<(usize, Vec<StepCondition>), String> {
+    let lines: Vec<&str> = ci.lines().collect();
 
     let found: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| without_comment(line).contains(&needle))
+        .filter(|(_, line)| without_comment(line).contains(needle))
         .map(|(at, _)| at)
         .collect();
     let at = match found[..] {
         [at] => at,
-        [] => {
-            return Err(format!(
-                "ci.yml runs no `{needle}`, so nothing in CI reports the {target} \
-                 assertions. Whatever they promise, they promise it to a file nobody \
-                 executes. Restore the step, or point GUARDED_TARGET at wherever the \
-                 target moved."
-            ))
-        }
+        [] => return Err(missing.to_string()),
         _ => {
             return Err(format!(
                 "ci.yml has {} steps running `{needle}`; which of them is the reporter \
@@ -697,7 +708,7 @@ fn reporting_step(ci: &str, target: &str) -> Result<Vec<StepCondition>, String> 
         }
     }
 
-    Ok(conditions)
+    Ok((start, conditions))
 }
 
 #[test]
@@ -1382,5 +1393,179 @@ mod reporter_command_controls {
                          test --locked --test dependency_pin_tests\n        run: cargo test \
                          --locked --lib\n";
         assert!(reporter_command(commented, GUARDED_TARGET).is_err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The job that runs the fidelity regression gate
+// ---------------------------------------------------------------------------
+//
+// `scripts/fidelity-smoke-gate.sh` fails a pull request that breaks an SDK
+// smoke check passing on `main`, and its job in `ci.yml` is a required status
+// check. Being required does not cover the two cheapest ways to switch it off.
+// `continue-on-error: true` on the gate step lets the step fail and the job
+// conclude success, and an `if:` that skips the job reports Success to a
+// required check. Both are one line in `ci.yml`, and a gate cannot report its
+// own removal, so the guard lives here, in the `test` job.
+
+/// What makes a step the fidelity gate: the command, not the step's `name:`.
+const FIDELITY_GATE_COMMAND: &str = "scripts/fidelity-smoke-gate.sh";
+
+/// The live `if:` / `continue-on-error:` on the job containing the step that
+/// opens at line `step_start`.
+///
+/// Walks up from the step to its `steps:` key, takes that key's indentation as
+/// the job's key indentation, and reads the job's own keys from the line that
+/// names the job. `Err` when that shape is not there, rather than reporting an
+/// empty, passing list for a layout this reader does not understand.
+fn job_conditions(ci: &str, step_start: usize) -> Result<Vec<StepCondition>, String> {
+    let lines: Vec<&str> = ci.lines().collect();
+    let step_indent = indent_of(lines[step_start]);
+
+    let steps_at = (0..step_start)
+        .rev()
+        .find(|&at| {
+            let bare = without_comment(lines[at]);
+            !bare.trim().is_empty() && indent_of(lines[at]) < step_indent
+        })
+        .filter(|&at| without_comment(lines[at]).trim() == "steps:")
+        .ok_or("the gate step is not directly under a `steps:` key")?;
+    let key_indent = indent_of(lines[steps_at]);
+
+    let job_at = (0..steps_at)
+        .rev()
+        .find(|&at| {
+            let bare = without_comment(lines[at]);
+            !bare.trim().is_empty() && indent_of(lines[at]) < key_indent
+        })
+        .ok_or("the gate step's `steps:` key belongs to no job")?;
+    let job_indent = indent_of(lines[job_at]);
+
+    let mut conditions = Vec::new();
+    for line in &lines[job_at + 1..] {
+        let bare = without_comment(line);
+        if bare.trim().is_empty() {
+            continue;
+        }
+        if indent_of(line) <= job_indent {
+            break;
+        }
+        if indent_of(line) != key_indent {
+            continue;
+        }
+        for key in STEP_CONDITION_KEYS {
+            if let Some(value) = bare.trim_start().strip_prefix(&format!("{key}:")) {
+                conditions.push(StepCondition {
+                    key: (*key).to_string(),
+                    value: unquote(value.trim()).to_string(),
+                });
+            }
+        }
+    }
+    Ok(conditions)
+}
+
+/// `Err` naming the first condition that can switch the fidelity gate off.
+fn fidelity_gate_is_unconditional(ci: &str) -> Result<(), String> {
+    let missing = format!(
+        "ci.yml runs no `{FIDELITY_GATE_COMMAND}`, so nothing fails a pull request \
+         that breaks an SDK check passing on main. Restore the `fidelity` job's gate \
+         step, or point FIDELITY_GATE_COMMAND at wherever it moved."
+    );
+    let (start, on_step) = step_conditions(ci, FIDELITY_GATE_COMMAND, &missing)?;
+    let on_job = job_conditions(ci, start)?;
+
+    for (place, conditions) in [("step", on_step), ("job", on_job)] {
+        for StepCondition { key, value } in conditions {
+            let holds = if key == "continue-on-error" {
+                value == "false"
+            } else {
+                CONDITIONS_THAT_STILL_RUN.contains(&value.as_str())
+            };
+            if !holds {
+                return Err(format!(
+                    "the fidelity gate's {place} carries `{key}: {value}`. A skipped job \
+                     satisfies a required check and a discarded step failure concludes the \
+                     job success, so either one lets a fidelity regression merge green. \
+                     Allowed: `continue-on-error: false`, or `if:` one of {CONDITIONS_THAT_STILL_RUN:?}."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_fidelity_gate_cannot_be_switched_off_in_ci_yml() {
+    let ci = read(&repo_root().join(".github/workflows/ci.yml"));
+    if let Err(why) = fidelity_gate_is_unconditional(&ci) {
+        panic!("{why}");
+    }
+}
+
+#[cfg(test)]
+mod fidelity_gate_controls {
+    use super::*;
+
+    /// A job in the shape `ci.yml` uses, with `job` added to the job's keys and
+    /// `step` to the gate step's.
+    fn ci_with(job: &str, step: &str) -> String {
+        format!(
+            "jobs:\n  fidelity:\n    name: gate\n{job}    runs-on: ubuntu-latest\n    steps:\n      \
+             - uses: actions/checkout@v4\n      - name: Fidelity regression gate\n{step}        \
+             run: scripts/fidelity-smoke-gate.sh\n  other:\n    if: false\n    steps:\n      \
+             - run: true\n"
+        )
+    }
+
+    #[test]
+    fn an_unconditional_job_passes() {
+        // The `if: false` on the neighbouring job must not be read as this one's.
+        assert_eq!(fidelity_gate_is_unconditional(&ci_with("", "")), Ok(()));
+    }
+
+    #[test]
+    fn skipping_the_job_is_caught() {
+        for off in ["    if: false\n", "    if: github.event_name == 'push'\n"] {
+            let verdict = fidelity_gate_is_unconditional(&ci_with(off, ""));
+            assert!(
+                verdict.is_err_and(|why| why.contains("job carries `if:")),
+                "{off:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn discarding_the_verdict_is_caught_on_the_job_and_the_step() {
+        let on_job = fidelity_gate_is_unconditional(&ci_with("    continue-on-error: true\n", ""));
+        assert!(on_job.is_err_and(|why| why.contains("job carries `continue-on-error: true`")));
+        let on_step =
+            fidelity_gate_is_unconditional(&ci_with("", "        continue-on-error: true\n"));
+        assert!(on_step.is_err_and(|why| why.contains("step carries `continue-on-error: true`")));
+    }
+
+    #[test]
+    fn skipping_the_step_is_caught() {
+        let verdict = fidelity_gate_is_unconditional(&ci_with("", "        if: false\n"));
+        assert!(verdict.is_err_and(|why| why.contains("step carries `if: false`")));
+    }
+
+    #[test]
+    fn conditions_that_still_run_pass() {
+        assert_eq!(
+            fidelity_gate_is_unconditional(&ci_with("    if: always()\n", "")),
+            Ok(())
+        );
+        let strict = ci_with(
+            "    continue-on-error: false\n",
+            "        continue-on-error: false\n",
+        );
+        assert_eq!(fidelity_gate_is_unconditional(&strict), Ok(()));
+    }
+
+    #[test]
+    fn a_missing_gate_step_fails_closed() {
+        let ci = ci_with("", "").replace(FIDELITY_GATE_COMMAND, "true");
+        assert!(fidelity_gate_is_unconditional(&ci).is_err());
     }
 }

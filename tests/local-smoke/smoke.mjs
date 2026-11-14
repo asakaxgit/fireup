@@ -20,6 +20,8 @@
 import { FieldPath, FieldValue, Firestore, Timestamp } from '@google-cloud/firestore'
 import { strict as assert } from 'node:assert'
 
+import { writeResults } from '../smoke-gate/results.mjs'
+
 const PROJECT_ID = 'fireup-smoke'
 
 const checks = []
@@ -34,6 +36,7 @@ const check = async (name, fn) => {
     console.log(`  FAIL ${name}`)
     console.log(`       ${error?.message ?? error}`)
   }
+  writeResults(checks)
 }
 
 // gRPC status codes we assert on, from the public gRPC spec.
