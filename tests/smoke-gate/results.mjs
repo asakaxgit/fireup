@@ -19,6 +19,16 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
+/**
+ * A failed check also carries its error's gRPC `code` and `message`. The gate
+ * ignores both; the triage role (`triage.mjs`) groups failures by them.
+ */
+const toResult = ({ name, ok, error }) => {
+  if (ok || error === undefined) return { name, ok }
+  const code = typeof error?.code === 'number' || typeof error?.code === 'string' ? error.code : null
+  return { name, ok, error: { code, message: String(error?.message ?? error) } }
+}
+
 export const writeResults = (checks) => {
   const path = process.env.FIREUP_SMOKE_RESULTS
   if (!path) return
@@ -32,6 +42,6 @@ export const writeResults = (checks) => {
   }
 
   mkdirSync(dirname(path), { recursive: true })
-  const body = { suite, checks: checks.map(({ name, ok }) => ({ name, ok })) }
+  const body = { suite, checks: checks.map(toResult) }
   writeFileSync(path, `${JSON.stringify(body, null, 2)}\n`)
 }

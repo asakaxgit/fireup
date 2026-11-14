@@ -6,6 +6,9 @@
 # Usage: scripts/smoke-local-datastore.sh [port]
 #
 # Set FIREUP_SMOKE_POSTGRES_URL to run against the PostgreSQL store.
+# Set FIREUP_SMOKE_ENTRY to run another file in tests/local-smoke-datastore —
+# `backlog.mjs`, the triage role's input (docs/local/TRIAGE.md) — against the
+# same server setup.
 
 set -euo pipefail
 
@@ -71,7 +74,7 @@ echo "==> running the Datastore SDK smoke test"
 # should be a red test, not a stalled CI job.
 if DATASTORE_EMULATOR_HOST="127.0.0.1:$port" \
    FIREUP_SMOKE_PROJECT_ID=fireup-local \
-   timeout 120 node "$smoke_dir/smoke.mjs"; then
+   timeout 120 node "$smoke_dir/${FIREUP_SMOKE_ENTRY:-smoke.mjs}"; then
   status=0
 else
   status=$?

@@ -1171,3 +1171,11 @@ leaves the others as they are. To drop a suite run, edit the file by hand.
 `compare.test.mjs` also fails if the baseline and the runs listed in
 `scripts/fidelity-smoke-gate.sh` disagree. A reviewer should read every removed
 line in `baseline.json` as a behaviour that stops being protected.
+
+**The backlog behind the gate.** `tests/local-smoke-datastore/backlog.mjs`
+holds Datastore checks that are not yet expected to pass. It runs as
+`datastore-backlog/<store>`, which the baseline does not list, so it never fails
+the gate. A failed check's results entry also carries the gRPC `error`, which
+the gate ignores. The [triage role](TRIAGE.md) groups those failures by root
+cause and files one fixer issue per group. A fix moves its checks into
+`smoke.mjs` and the baseline, where the gate then protects them.
