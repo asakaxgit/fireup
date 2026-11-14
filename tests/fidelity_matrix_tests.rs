@@ -560,11 +560,47 @@ const STEP_CONDITION_KEYS: &[&str] = &["if", "continue-on-error"];
 /// A commented-out key is not a key, and `ci.yml` documents its own settings in
 /// prose -- a reader that matched anywhere in the line would find the comment
 /// and report on a setting that is not in effect.
+///
+/// YAML opens a comment only at a `#` that starts the line or follows a space
+/// or tab. Cutting at every `#` hid the rest of `run: gate x#|| true`, which
+/// YAML keeps whole and bash runs as `gate x# || true`.
 fn without_comment(line: &str) -> &str {
-    match line.split_once('#') {
-        Some((before, _)) => before.trim_end(),
-        None => line.trim_end(),
+    let mut previous = None;
+    for (at, c) in line.char_indices() {
+        if c == '#' && previous.is_none_or(|p: char| p == ' ' || p == '\t') {
+            return line[..at].trim_end();
+        }
+        previous = Some(c);
     }
+    line.trim_end()
+}
+
+/// The plain-scalar value of the key on line `at`, whose inline text is
+/// `inline`, with its continuation lines folded in the way YAML does: every
+/// following line indented past `indent` joins the value with a space, and a
+/// blank line between them joins with a newline instead. Reading only the key's
+/// own line let `if: always()` over an indented `&& false` through as
+/// `always()`, when YAML gives `always() && false`.
+fn folded_value(lines: &[&str], at: usize, inline: &str, indent: usize) -> String {
+    let mut value = inline.trim().to_string();
+    let mut after_blank = false;
+    for next in &lines[at + 1..] {
+        let bare = without_comment(next);
+        let body = bare.trim_start();
+        if body.is_empty() {
+            after_blank = true;
+            continue;
+        }
+        if bare.len() - body.len() <= indent {
+            break;
+        }
+        if !value.is_empty() {
+            value.push(if after_blank { '\n' } else { ' ' });
+        }
+        value.push_str(body);
+        after_blank = false;
+    }
+    value
 }
 
 /// Indentation of `line`, ignoring any comment on it.
@@ -691,9 +727,9 @@ fn step_conditions(
     // A step's first key sits on the `- ` line itself, so read that one too:
     // `- if: false` followed by `name:` is the same step with the same effect.
     let inline = without_comment(lines[start]).trim_start();
-    let mut keyed: Vec<&str> = vec![inline.trim_start_matches("- ")];
+    let mut keyed: Vec<(usize, &str)> = vec![(start, inline.trim_start_matches("- "))];
 
-    for line in &lines[start + 1..] {
+    for (at, line) in lines.iter().enumerate().skip(start + 1) {
         let bare = without_comment(line);
         let inner = bare.trim_start();
         if inner.is_empty() {
@@ -703,16 +739,17 @@ fn step_conditions(
             break;
         }
         if indent_of(line) == key_indent {
-            keyed.push(inner);
+            keyed.push((at, inner));
         }
     }
 
-    for text in keyed {
+    for (at, text) in keyed {
         for key in STEP_CONDITION_KEYS {
             if let Some(value) = key_value(text, key) {
+                let value = folded_value(&lines, at, value, key_indent);
                 conditions.push(StepCondition {
                     key: (*key).to_string(),
-                    value: unquote(value.trim()).to_string(),
+                    value: unquote(&value).to_string(),
                 });
             }
         }
@@ -1075,11 +1112,10 @@ fn command_running(ci: &str, needle: &str, missing: &str) -> Result<ReporterComm
     let inline = run_body.strip_prefix("run:").unwrap_or_default().trim();
 
     let mut raw: Vec<&str> = Vec::new();
-    // An inline value continues on any following line indented past `run:`,
-    // and YAML folds those lines into it with a space: `run: gate` over an
-    // indented `|| true` is the one command `gate || true`. A blank line folds
-    // to a newline instead, so what follows it is a command of its own.
-    let mut folded: Vec<String> = Vec::new();
+    // An inline value folds its indented continuation lines in, so `run: gate`
+    // over an indented `|| true` is the one command `gate || true`. A blank
+    // line folds to a newline, so what follows it is a command of its own.
+    let folded;
     if inline.starts_with('|') || inline.starts_with('>') {
         for next in &lines[run_at + 1..] {
             let bare = without_comment(next);
@@ -1093,28 +1129,8 @@ fn command_running(ci: &str, needle: &str, missing: &str) -> Result<ReporterComm
             raw.push(body);
         }
     } else if !inline.is_empty() {
-        folded.push(inline.to_string());
-        let mut after_blank = false;
-        for next in &lines[run_at + 1..] {
-            let bare = without_comment(next);
-            let body = bare.trim_start();
-            if body.is_empty() {
-                after_blank = true;
-                continue;
-            }
-            if bare.len() - body.len() <= run_indent {
-                break;
-            }
-            match folded.last_mut() {
-                Some(line) if !after_blank => {
-                    line.push(' ');
-                    line.push_str(body);
-                }
-                _ => folded.push(body.to_string()),
-            }
-            after_blank = false;
-        }
-        raw.extend(folded.iter().map(String::as_str));
+        folded = folded_value(&lines, run_at, inline, run_indent);
+        raw.extend(folded.lines());
     }
     if raw.is_empty() {
         return Err(format!(
@@ -1498,7 +1514,7 @@ fn job_conditions(ci: &str, step_start: usize) -> Result<Vec<StepCondition>, Str
     let job_indent = indent_of(lines[job_at]);
 
     let mut conditions = Vec::new();
-    for line in &lines[job_at + 1..] {
+    for (at, line) in lines.iter().enumerate().skip(job_at + 1) {
         let bare = without_comment(line);
         if bare.trim().is_empty() {
             continue;
@@ -1511,9 +1527,10 @@ fn job_conditions(ci: &str, step_start: usize) -> Result<Vec<StepCondition>, Str
         }
         for key in JOB_CONDITION_KEYS {
             if let Some(value) = key_value(bare.trim_start(), key) {
+                let value = folded_value(&lines, at, value, key_indent);
                 conditions.push(StepCondition {
                     key: (*key).to_string(),
-                    value: unquote(value.trim()).to_string(),
+                    value: unquote(&value).to_string(),
                 });
             }
         }
@@ -1645,6 +1662,39 @@ mod fidelity_gate_controls {
     }
 
     #[test]
+    fn a_condition_continued_on_the_next_line_is_caught() {
+        // YAML folds an indented continuation into the value: `always() && false`.
+        for (job, step, place) in [
+            (
+                "    if: always()\n      && false\n",
+                "",
+                "job carries `if: always() && false`",
+            ),
+            (
+                "    if: always()\n\n      && false\n",
+                "",
+                "job carries `if: always()\n&& false`",
+            ),
+            (
+                "",
+                "        if: success()\n          && false\n",
+                "step carries `if: success() && false`",
+            ),
+            (
+                "",
+                "        continue-on-error: false\n          || true\n",
+                "step carries `continue-on-error: false || true`",
+            ),
+        ] {
+            let verdict = fidelity_gate_is_unconditional(&ci_with(job, step));
+            assert!(
+                verdict.is_err_and(|why| why.contains(place)),
+                "{job:?}{step:?} passed"
+            );
+        }
+    }
+
+    #[test]
     fn conditions_that_still_run_pass() {
         assert_eq!(
             fidelity_gate_is_unconditional(&ci_with("    if: always()\n", "")),
@@ -1673,6 +1723,9 @@ mod fidelity_gate_controls {
             "\n          || true",
             // Actions pastes the expression in before bash parses the line.
             " ${{ env.X }}",
+            // A `#` not after whitespace opens no YAML comment, and none in bash.
+            " x#|| true",
+            " \"#\" || true",
         ] {
             let ci = ci_with("", "").replace(&gate, &format!("{gate}{tail}"));
             let verdict = fidelity_gate_is_unconditional(&ci);
