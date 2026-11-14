@@ -5,7 +5,10 @@
  * enough for a person reading one run, and useless for answering "did a check
  * that passed on `main` stop passing?" — which is what `gate.mjs` asks. So each
  * suite also hands its checks to `writeResults`, which writes
- * `{ suite, checks: [{ name, ok }] }` to the file named by FIREUP_SMOKE_RESULTS.
+ * `{ suite, checks: [{ name, ok, covers? }] }` to the file named by
+ * FIREUP_SMOKE_RESULTS. `covers` is the fidelity-matrix rows a check asserts,
+ * keyed by the status it asserts them with (`{ served: ['firestore.Commit'] }`);
+ * `matrix-coverage.mjs` reads it.
  *
  * Call it after every check, not once at the end. A suite that throws halfway,
  * or that `timeout` kills because the client hung, then still leaves the checks
@@ -23,10 +26,11 @@ import { dirname } from 'node:path'
  * A failed check also carries its error's gRPC `code` and `message`. The gate
  * ignores both; the triage role (`triage.mjs`) groups failures by them.
  */
-const toResult = ({ name, ok, error }) => {
-  if (ok || error === undefined) return { name, ok }
+const toResult = ({ name, ok, covers, error }) => {
+  const result = covers ? { name, ok, covers } : { name, ok }
+  if (ok || error === undefined) return result
   const code = typeof error?.code === 'number' || typeof error?.code === 'string' ? error.code : null
-  return { name, ok, error: { code, message: String(error?.message ?? error) } }
+  return { ...result, error: { code, message: String(error?.message ?? error) } }
 }
 
 export const writeResults = (checks) => {

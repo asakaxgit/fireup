@@ -83,6 +83,8 @@
     "datastore/memory": [
       "a nested property_mask path stays refused with UNIMPLEMENTED",
       "a property_mask write accumulates and deletes",
+      "a read-only transaction reads committed data",
+      "a read-only transaction that writes stays refused with INVALID_ARGUMENT",
       "a transaction commit is visible to a later read",
       "allocateIds returns complete keys",
       "an equality query returns it",
@@ -95,6 +97,8 @@
     "datastore/postgres": [
       "a nested property_mask path stays refused with UNIMPLEMENTED",
       "a property_mask write accumulates and deletes",
+      "a read-only transaction reads committed data",
+      "a read-only transaction that writes stays refused with INVALID_ARGUMENT",
       "a transaction commit is visible to a later read",
       "allocateIds returns complete keys",
       "an equality query returns it",

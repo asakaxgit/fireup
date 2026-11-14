@@ -53,13 +53,15 @@ const FAKE_API_KEY = 'fireup-local-no-api-key-needed'
 
 const checks = []
 
-const check = async (name, fn) => {
+// `covers` names the fidelity-matrix rows the check asserts, keyed by the
+// status it asserts them with; see tests/smoke-gate/matrix-coverage.mjs.
+const check = async (name, fn, covers) => {
   try {
     await fn()
-    checks.push({ name, ok: true })
+    checks.push({ name, ok: true, covers })
     console.log(`  ok   ${name}`)
   } catch (error) {
-    checks.push({ name, ok: false, error })
+    checks.push({ name, ok: false, covers, error })
     console.log(`  FAIL ${name}`)
     console.log(`       ${error?.message ?? error}`)
   }
@@ -128,19 +130,19 @@ const main = async () => {
     assert.equal(created.emailVerified, false)
     assert.equal(created.disabled, false)
     assert.ok(created.metadata.creationTime, 'server must stamp a creation time')
-  })
+  }, { served: ['auth.admin-create'] })
 
   await check('admin createUser() with a duplicate email fails with auth/email-already-exists', async () => {
     await expectAuthCode('auth/email-already-exists', () =>
       adminAuth.createUser({ email: 'alice@example.com', password: 'another-one' }),
     )
-  })
+  }, { served: ['auth.admin-create'] })
 
   await check('admin createUser() assigns a uid when none is given', async () => {
     const user = await adminAuth.createUser({ email: 'auto@example.com', password: 'hunter2hunter2' })
     assert.ok(user.uid.length > 0, 'server must assign a uid')
     assert.equal(user.email, 'auto@example.com')
-  })
+  }, { served: ['auth.admin-create'] })
 
   await check('admin getUser() reads the account back by uid', async () => {
     const user = await adminAuth.getUser('smoke-alice')
@@ -153,20 +155,20 @@ const main = async () => {
       user.providerData.map((p) => p.providerId),
       ['password'],
     )
-  })
+  }, { served: ['auth.admin-lookup'] })
 
   await check('admin getUser() on a missing uid fails with auth/user-not-found', async () => {
     await expectAuthCode('auth/user-not-found', () => adminAuth.getUser('nobody-at-all'))
-  })
+  }, { served: ['auth.admin-lookup'] })
 
   await check('admin getUserByEmail() reads the account back by email', async () => {
     const user = await adminAuth.getUserByEmail('alice@example.com')
     assert.equal(user.uid, 'smoke-alice')
-  })
+  }, { served: ['auth.admin-lookup'] })
 
   await check('admin getUserByEmail() on a missing email fails with auth/user-not-found', async () => {
     await expectAuthCode('auth/user-not-found', () => adminAuth.getUserByEmail('ghost@example.com'))
-  })
+  }, { served: ['auth.admin-lookup'] })
 
   await check('admin updateUser() changes the fields it was given and leaves the rest', async () => {
     const user = await adminAuth.updateUser('smoke-alice', {
@@ -176,7 +178,7 @@ const main = async () => {
     assert.equal(user.displayName, 'Alice Updated')
     assert.equal(user.emailVerified, true)
     assert.equal(user.email, 'alice@example.com', 'update must not drop untouched fields')
-  })
+  }, { served: ['auth.admin-update'] })
 
   await check('admin updateUser() can clear a field by passing null', async () => {
     const user = await adminAuth.updateUser('smoke-alice', { photoURL: null, displayName: null })
@@ -185,7 +187,7 @@ const main = async () => {
 
     // Put the display name back; later checks read it.
     await adminAuth.updateUser('smoke-alice', { displayName: 'Alice Updated' })
-  })
+  }, { served: ['auth.admin-update'] })
 
   await check('admin updateUser() can disable and re-enable an account', async () => {
     const disabled = await adminAuth.updateUser('smoke-alice', { disabled: true })
@@ -193,14 +195,14 @@ const main = async () => {
 
     const enabled = await adminAuth.updateUser('smoke-alice', { disabled: false })
     assert.equal(enabled.disabled, false)
-  })
+  }, { served: ['auth.admin-update'] })
 
   await check('admin setCustomUserClaims() stores claims and getUser() reports them', async () => {
     await adminAuth.setCustomUserClaims('smoke-alice', { role: 'admin', tier: 3 })
 
     const user = await adminAuth.getUser('smoke-alice')
     assert.deepEqual(user.customClaims, { role: 'admin', tier: 3 })
-  })
+  }, { served: ['auth.admin-update'] })
 
   await check('admin setCustomUserClaims(null) clears claims', async () => {
     try {
@@ -217,7 +219,7 @@ const main = async () => {
       // one failure into five.
       await adminAuth.setCustomUserClaims('smoke-alice', { role: 'admin', tier: 3 })
     }
-  })
+  }, { served: ['auth.admin-update'] })
 
   await check('admin listUsers() pages through every account', async () => {
     // Enough accounts that a page size of 2 has to page more than once, so
@@ -253,7 +255,7 @@ const main = async () => {
         await adminAuth.deleteUser(user.uid)
       }
     }
-  })
+  }, { served: ['auth.admin-batchGet'] })
 
   // ----- custom tokens: admin mints, client redeems ------------------------
 
@@ -280,7 +282,7 @@ const main = async () => {
     assert.equal(claims.from, 'custom-token', 'custom-token claims must reach the ID token')
     assert.equal(claims.role, 'admin', 'account custom claims must reach the ID token too')
     assert.equal(claims.firebase.sign_in_provider, 'custom')
-  })
+  }, { served: ['auth.signInWithCustomToken'] })
 
   await check('client signInWithCustomToken() re-creates a uid that no longer exists', async () => {
     const doomed = await adminAuth.createUser({ uid: 'smoke-doomed' })
@@ -295,7 +297,7 @@ const main = async () => {
     assert.equal((await adminAuth.getUser('smoke-doomed')).uid, 'smoke-doomed')
 
     await adminAuth.deleteUser('smoke-doomed')
-  })
+  }, { served: ['auth.signInWithCustomToken'] })
 
   // ----- client SDK: the end-user surface ----------------------------------
 
@@ -306,7 +308,7 @@ const main = async () => {
     assert.equal(signedIn.user.email, 'alice@example.com')
     assert.equal(signedIn.user.emailVerified, true)
     assert.ok(signedIn.user.refreshToken, 'server must return a refresh token')
-  })
+  }, { served: ['auth.signInWithPassword'] })
 
   // The two checks below pin the server to the classic per-reason codes
   // (INVALID_PASSWORD / EMAIL_NOT_FOUND), which the SDK maps to
@@ -318,13 +320,13 @@ const main = async () => {
     await expectAuthCode('auth/wrong-password', () =>
       signInWithEmailAndPassword(clientAuth, 'alice@example.com', 'not-the-password'),
     )
-  })
+  }, { served: ['auth.signInWithPassword'] })
 
   await check('client signInWithEmailAndPassword() rejects an unknown email', async () => {
     await expectAuthCode('auth/user-not-found', () =>
       signInWithEmailAndPassword(clientAuth, 'ghost@example.com', 'correct-horse'),
     )
-  })
+  }, { served: ['auth.signInWithPassword'] })
 
   await check('client signInWithEmailAndPassword() rejects a disabled account', async () => {
     await adminAuth.updateUser('smoke-alice', { disabled: true })
@@ -335,7 +337,7 @@ const main = async () => {
     } finally {
       await adminAuth.updateUser('smoke-alice', { disabled: false })
     }
-  })
+  }, { served: ['auth.signInWithPassword'] })
 
   await check('client signInAnonymously() creates an anonymous account', async () => {
     const credential = await signInAnonymously(clientAuth)
@@ -345,7 +347,7 @@ const main = async () => {
 
     const claims = decodeClaims(await credential.user.getIdToken())
     assert.equal(claims.firebase.sign_in_provider, 'anonymous')
-  })
+  }, { served: ['auth.signUp'] })
 
   // ----- verifyIdToken over the unsigned emulator token --------------------
 
@@ -418,7 +420,7 @@ const main = async () => {
     // parseable by us.
     const decoded = await adminAuth.verifyIdToken(after)
     assert.equal(decoded.uid, 'smoke-alice')
-  })
+  }, { served: ['auth.token'] })
 
   await check('a revoked refresh token stops working', async () => {
     const credential = await signInWithEmailAndPassword(clientAuth, 'alice@example.com', 'correct-horse')
@@ -442,7 +444,7 @@ const main = async () => {
 
     // Leave the password where the remaining checks expect it.
     await adminAuth.updateUser('smoke-alice', { password: 'correct-horse' })
-  })
+  }, { served: ['auth.token'] })
 
   // ----- deletion ----------------------------------------------------------
 
@@ -450,11 +452,11 @@ const main = async () => {
     await adminAuth.createUser({ uid: 'smoke-temp', email: 'temp@example.com' })
     await adminAuth.deleteUser('smoke-temp')
     await expectAuthCode('auth/user-not-found', () => adminAuth.getUser('smoke-temp'))
-  })
+  }, { served: ['auth.admin-delete'] })
 
   await check('admin deleteUser() on a missing uid fails with auth/user-not-found', async () => {
     await expectAuthCode('auth/user-not-found', () => adminAuth.deleteUser('never-existed'))
-  })
+  }, { served: ['auth.admin-delete'] })
 
   // ----- out-of-band email flows -------------------------------------------
   //
@@ -503,7 +505,7 @@ const main = async () => {
     } finally {
       await adminAuth.deleteUser(user.uid)
     }
-  })
+  }, { served: ['auth.admin-sendOobCode', 'auth.resetPassword', 'auth.flow-password-reset'] })
 
   await check('client sendPasswordResetEmail() + verifyPasswordResetCode() + confirmPasswordReset() round-trips', async () => {
     const user = await adminAuth.createUser({ email: 'forgot@example.com', password: 'original-one' })
@@ -527,7 +529,7 @@ const main = async () => {
     } finally {
       await adminAuth.deleteUser(user.uid)
     }
-  })
+  }, { served: ['auth.sendOobCode', 'auth.resetPassword', 'auth.emulator-oob-codes', 'auth.flow-password-reset'], 'documented-divergence': ['auth.sending-email'] })
 
   await check('client sendEmailVerification() + applyActionCode() marks the address verified', async () => {
     const user = await adminAuth.createUser({
@@ -559,7 +561,7 @@ const main = async () => {
     } finally {
       await adminAuth.deleteUser(user.uid)
     }
-  })
+  }, { served: ['auth.sendOobCode', 'auth.update', 'auth.lookup', 'auth.emulator-oob-codes', 'auth.flow-verify-email'] })
 
   await check('admin generateEmailVerificationLink() returns an applicable link', async () => {
     const user = await adminAuth.createUser({ email: 'adminverify@example.com', emailVerified: false })
@@ -573,7 +575,7 @@ const main = async () => {
     } finally {
       await adminAuth.deleteUser(user.uid)
     }
-  })
+  }, { served: ['auth.admin-sendOobCode', 'auth.update', 'auth.flow-verify-email'] })
 
   await check('client signInWithEmailLink() signs in with no password at all', async () => {
     const email = 'passwordless@example.com'
@@ -609,7 +611,7 @@ const main = async () => {
         await adminAuth.deleteUser(uid)
       }
     }
-  })
+  }, { served: ['auth.sendOobCode', 'auth.signInWithEmailLink', 'auth.emulator-oob-codes', 'auth.flow-email-signin'] })
 
   await check('a reset link for an unknown address is refused with the mapped error', async () => {
     await expectAuthCode('auth/user-not-found', () =>
@@ -618,7 +620,7 @@ const main = async () => {
     await expectAuthCode('auth/invalid-action-code', () =>
       confirmPasswordReset(clientAuth, 'never-minted-code', 'some-password'),
     )
-  })
+  }, { served: ['auth.sendOobCode', 'auth.resetPassword'] })
 
   // ----- what is deliberately not served -----------------------------------
   //
@@ -647,7 +649,7 @@ const main = async () => {
       await adminAuth.deleteUser(a.uid)
       await adminAuth.deleteUser(b.uid)
     }
-  })
+  }, { unimplemented: ['auth.batch-account-writes'] })
 
   await check('admin importUsers() is refused cleanly (batchCreate is not served)', async () => {
     await assert.rejects(
@@ -658,7 +660,7 @@ const main = async () => {
 
     // A refused import must not have created anything on the way out.
     await expectAuthCode('auth/user-not-found', () => adminAuth.getUser('smoke-import'))
-  })
+  }, { unimplemented: ['auth.batch-account-writes'] })
 
   await check('admin createSessionCookie() is refused cleanly (session cookies are not served)', async () => {
     const idToken = await signedIn.user.getIdToken()
@@ -667,7 +669,7 @@ const main = async () => {
       /not served by fireup local/,
       'the refusal must name the gap, not report an unknown project',
     )
-  })
+  }, { unimplemented: ['auth.session-cookies'] })
 
   // The SDK checks above only prove the call failed. The fidelity matrix
   // promises a *shape* — 501 with a message naming the gap — and only a direct
@@ -697,7 +699,7 @@ const main = async () => {
       assert.match(message, names, `${path} must name the gap it is refusing for`)
       assert.match(message, /not served by fireup local/, `${path} must say who refused it`)
     }
-  })
+  }, { unimplemented: ['auth.batch-account-writes', 'auth.session-cookies'] })
 
   await deleteClientApp(clientApp)
   await deleteAdminApp(adminApp)

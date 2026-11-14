@@ -26,13 +26,15 @@ const PROJECT_ID = 'fireup-smoke'
 
 const checks = []
 
-const check = async (name, fn) => {
+// `covers` names the fidelity-matrix rows the check asserts, keyed by the
+// status it asserts them with; see tests/smoke-gate/matrix-coverage.mjs.
+const check = async (name, fn, covers) => {
   try {
     await fn()
-    checks.push({ name, ok: true })
+    checks.push({ name, ok: true, covers })
     console.log(`  ok   ${name}`)
   } catch (error) {
-    checks.push({ name, ok: false, error })
+    checks.push({ name, ok: false, covers, error })
     console.log(`  FAIL ${name}`)
     console.log(`       ${error?.message ?? error}`)
   }
@@ -122,13 +124,13 @@ const main = async () => {
     assert.equal(snapshot.id, 'alice')
     assert.ok(snapshot.createTime, 'server should stamp createTime')
     assert.ok(snapshot.updateTime, 'server should stamp updateTime')
-  })
+  }, { served: ['firestore.Commit', 'firestore.BatchGetDocuments'] })
 
   await check('get() on a missing document returns a non-existent snapshot', async () => {
     const snapshot = await users.doc('nobody').get()
     assert.equal(snapshot.exists, false)
     assert.equal(snapshot.data(), undefined)
-  })
+  }, { served: ['firestore.BatchGetDocuments'] })
 
   await check('update() merges fields instead of replacing the document', async () => {
     const ref = users.doc('alice')
@@ -136,7 +138,7 @@ const main = async () => {
 
     const snapshot = await ref.get()
     assert.deepEqual(snapshot.data(), { name: 'Alice', age: 32, active: true })
-  })
+  }, { served: ['firestore.Commit'] })
 
   await check('set({merge:true}) merges fields', async () => {
     const ref = users.doc('alice')
@@ -145,7 +147,7 @@ const main = async () => {
     const snapshot = await ref.get()
     assert.equal(snapshot.get('nickname'), 'Al')
     assert.equal(snapshot.get('name'), 'Alice', 'merge must not drop existing fields')
-  })
+  }, { served: ['firestore.Commit'] })
 
   await check('set() without merge replaces all fields', async () => {
     const ref = users.doc('alice')
@@ -153,7 +155,7 @@ const main = async () => {
 
     const snapshot = await ref.get()
     assert.deepEqual(snapshot.data(), { name: 'Alice' })
-  })
+  }, { served: ['firestore.Commit'] })
 
   await check('create() assigns an auto id when the client asks for one', async () => {
     const ref = await users.add({ name: 'Anonymous' })
@@ -161,17 +163,17 @@ const main = async () => {
 
     const snapshot = await ref.get()
     assert.equal(snapshot.get('name'), 'Anonymous')
-  })
+  }, { served: ['firestore.Commit'] })
 
   await check('create() on an existing document fails with ALREADY_EXISTS', async () => {
     const ref = users.doc('bob')
     await ref.create({ name: 'Bob' })
     await expectCode(GRPC_ALREADY_EXISTS, () => ref.create({ name: 'Bob again' }))
-  })
+  }, { served: ['firestore.Commit'] })
 
   await check('update() on a missing document fails with NOT_FOUND', async () => {
     await expectCode(GRPC_NOT_FOUND, () => users.doc('ghost').update({ name: 'Ghost' }))
-  })
+  }, { served: ['firestore.Commit'] })
 
   await check('delete() removes the document and is idempotent', async () => {
     const ref = users.doc('bob')
@@ -180,14 +182,14 @@ const main = async () => {
 
     await ref.delete()
     assert.equal((await ref.get()).exists, false, 'a second delete must not resurrect it')
-  })
+  }, { served: ['firestore.Commit'] })
 
   await check('getAll() reports found and missing documents in one call', async () => {
     const [found, missing] = await db.getAll(users.doc('alice'), users.doc('nobody'))
     assert.equal(found.exists, true)
     assert.equal(found.get('name'), 'Alice')
     assert.equal(missing.exists, false)
-  })
+  }, { served: ['firestore.BatchGetDocuments'] })
 
   await check('subcollection documents are addressable', async () => {
     const ref = users.doc('alice').collection('posts').doc('p1')
@@ -212,7 +214,7 @@ const main = async () => {
     await batch.commit()
 
     assert.equal((await cities.doc('tokyo').get()).get('population'), 37)
-  })
+  }, { served: ['firestore.Commit'] })
 
   await check('where() + orderBy() + limit() returns the right page in the right order', async () => {
     const snapshot = await cities
@@ -224,34 +226,34 @@ const main = async () => {
     assert.deepEqual(snapshot.docs.map((d) => d.id), ['tokyo', 'osaka'])
     assert.equal(snapshot.size, 2)
     assert.equal(snapshot.empty, false)
-  })
+  }, { served: ['firestore.RunQuery', 'query.comparison-operators', 'query.order-by', 'query.limit-offset'] })
 
   await check('an inequality filter works', async () => {
     const snapshot = await cities.where('population', '>', 18).orderBy('population').get()
     assert.deepEqual(snapshot.docs.map((d) => d.id), ['osaka', 'seoul', 'tokyo'])
-  })
+  }, { served: ['query.comparison-operators'] })
 
   await check("where('in') matches any of the listed values", async () => {
     const snapshot = await cities.where('country', 'in', ['KR', 'TW']).get()
     assert.deepEqual(snapshot.docs.map((d) => d.id), ['seoul'])
-  })
+  }, { served: ['query.membership-and-array-operators'] })
 
   await check('array-contains looks inside an array field', async () => {
     const snapshot = await cities.where('tags', 'array-contains', 'capital').get()
     assert.deepEqual(snapshot.docs.map((d) => d.id).sort(), ['seoul', 'tokyo'])
-  })
+  }, { served: ['query.membership-and-array-operators'] })
 
   await check('a query with no matches returns an empty snapshot, not an error', async () => {
     const snapshot = await cities.where('country', '==', 'NOWHERE').get()
     assert.equal(snapshot.empty, true)
     assert.equal(snapshot.size, 0)
-  })
+  }, { served: ['firestore.RunQuery'] })
 
   await check('select() returns only the projected fields', async () => {
     const snapshot = await cities.select('country').where('country', '==', 'KR').get()
     assert.deepEqual(snapshot.docs[0].data(), { country: 'KR' })
     assert.equal(snapshot.docs[0].id, 'seoul')
-  })
+  }, { served: ['query.projection'] })
 
   await check('limitToLast() returns the end of the ordered results', async () => {
     // The SDK implements this by flipping the order and reversing client-side,
@@ -259,7 +261,7 @@ const main = async () => {
     // fidelity matrix claims it works.
     const snapshot = await cities.orderBy('population').limitToLast(2).get()
     assert.deepEqual(snapshot.docs.map((d) => d.id), ['seoul', 'tokyo'])
-  })
+  }, { served: ['query.limit-to-last'] })
 
   await check('a document reference round-trips through a query result', async () => {
     const snapshot = await cities.where('country', '==', 'KR').get()
@@ -281,7 +283,7 @@ const main = async () => {
 
     assert.deepEqual(await ids(ordered.startAt(19)), ['osaka', 'seoul', 'tokyo'])
     assert.deepEqual(await ids(ordered.startAfter(19)), ['seoul', 'tokyo'])
-  })
+  }, { served: ['query.cursors'] })
 
   await check('endAt()/endBefore() bound the results from above', async () => {
     const ids = async (query) => (await query.get()).docs.map((d) => d.id)
@@ -289,12 +291,12 @@ const main = async () => {
 
     assert.deepEqual(await ids(ordered.endAt(25)), ['kyoto', 'osaka', 'seoul'])
     assert.deepEqual(await ids(ordered.endBefore(25)), ['kyoto', 'osaka'])
-  })
+  }, { served: ['query.cursors'] })
 
   await check('a start and an end cursor make a range', async () => {
     const snapshot = await cities.orderBy('population').startAfter(15).endBefore(37).get()
     assert.deepEqual(snapshot.docs.map((d) => d.id), ['osaka', 'seoul'])
-  })
+  }, { served: ['query.cursors'] })
 
   await check('startAfter(snapshot) pages through a collection exactly once', async () => {
     // The paging idiom from the published docs. The SDK sends every ordered
@@ -316,7 +318,7 @@ const main = async () => {
     }
 
     assert.deepEqual(seen, ['kyoto', 'osaka', 'seoul', 'tokyo'], 'each document exactly once, in order')
-  })
+  }, { served: ['query.cursors'] })
 
   await check('a cursor on a tied sort field does not repeat or drop a document', async () => {
     // Three documents share a population, so only __name__ separates them.
@@ -333,7 +335,7 @@ const main = async () => {
 
     const next = await tied.orderBy('population').startAfter(first.docs[1]).get()
     assert.deepEqual(next.docs.map((d) => d.id), ['c', 'd'], 'the tie must not swallow c')
-  })
+  }, { served: ['query.cursors'] })
 
   await check('collectionGroup() spans every depth under the database', async () => {
     const batch = db.batch()
@@ -349,12 +351,12 @@ const main = async () => {
       snapshot.docs.map((d) => d.ref.path),
       ['teams/a/squads/x/members/deep', 'teams/a/members/amy', 'teams/b/members/zoe'],
     )
-  })
+  }, { served: ['query.collection-group'] })
 
   await check('collectionGroup() still filters, orders and limits', async () => {
     const snapshot = await db.collectionGroup('members').where('rank', '>', 1).orderBy('rank').limit(1).get()
     assert.deepEqual(snapshot.docs.map((d) => d.ref.path), ['teams/a/members/amy'])
-  })
+  }, { served: ['query.collection-group'] })
 
   const residents = db.collection('residents')
 
@@ -366,18 +368,18 @@ const main = async () => {
 
     const snapshot = await residents.where('address.city', '==', 'Tokyo').get()
     assert.deepEqual(snapshot.docs.map((d) => d.id), ['alice'])
-  })
+  }, { served: ['query.nested-field-paths'] })
 
   await check('a nested field path orders by the value inside the map', async () => {
     const snapshot = await residents.orderBy('address.city').get()
     assert.deepEqual(snapshot.docs.map((d) => d.id), ['bob', 'alice'], 'Kyoto before Tokyo')
-  })
+  }, { served: ['query.nested-field-paths'] })
 
   await check('select() on a nested path returns the nesting, not a flat key', async () => {
     const snapshot = await residents.select('address.city').where('address.city', '==', 'Tokyo').get()
     assert.deepEqual(snapshot.docs[0].data(), { address: { city: 'Tokyo' } })
     assert.equal(snapshot.docs[0].get('address.city'), 'Tokyo')
-  })
+  }, { served: ['query.nested-field-paths', 'semantics.projection-keeps-nesting'] })
 
   await check('a one-segment FieldPath addresses a field whose name contains a dot', async () => {
     // The SDK serializes this as the backtick-quoted `address.city`, which has
@@ -390,21 +392,21 @@ const main = async () => {
 
     const nested = await residents.where('address.city', '==', 'Tokyo').get()
     assert.deepEqual(nested.docs.map((d) => d.id), ['alice'], 'the dotted string walks into the map')
-  })
+  }, { served: ['semantics.dotted-field-name-is-escaped'] })
 
   await check('a nested fieldMask on getAll() selects only that leaf', async () => {
     // getAll() is where the SDK exposes a read mask; it goes to
     // BatchGetDocuments with a DocumentMask on the wire.
     const [snapshot] = await db.getAll(residents.doc('alice'), { fieldMask: ['address.zip'] })
     assert.deepEqual(snapshot.data(), { address: { zip: '100-0001' } })
-  })
+  }, { served: ['query.nested-field-paths'] })
 
   await check('a one-segment FieldPath in a fieldMask stays one field name', async () => {
     const [snapshot] = await db.getAll(residents.doc('dan'), {
       fieldMask: [new FieldPath('address.city')],
     })
     assert.deepEqual(snapshot.data(), { 'address.city': 'Tokyo' })
-  })
+  }, { served: ['semantics.dotted-field-name-is-escaped'] })
 
   await check('listDocuments() lists a collection, including documents that only have children', async () => {
     await cities.doc('ghost').collection('districts').doc('d1').set({ name: 'Nowhere' })
@@ -412,7 +414,7 @@ const main = async () => {
     const refs = await cities.listDocuments()
     const ids = refs.map((ref) => ref.id).sort()
     assert.deepEqual(ids, ['ghost', 'kyoto', 'osaka', 'seoul', 'tokyo'])
-  })
+  }, { served: ['firestore.ListDocuments'] })
 
   await check('listCollections() reports collections at the root and under a document', async () => {
     const root = await db.listCollections()
@@ -422,7 +424,7 @@ const main = async () => {
 
     const nested = await cities.doc('ghost').listCollections()
     assert.deepEqual(nested.map((collection) => collection.id), ['districts'])
-  })
+  }, { served: ['firestore.ListCollectionIds'] })
 
   await check('runTransaction() reads and then writes atomically', async () => {
     const ref = cities.doc('tokyo')
@@ -435,8 +437,11 @@ const main = async () => {
 
     assert.equal(result, 38)
     assert.equal((await ref.get()).get('population'), 38)
-  })
+  }, { served: ['firestore.Commit'] })
 
+  // Not tagged firestore.Rollback. The SDK sends Rollback but ignores its
+  // answer, so this passes with Rollback answering UNIMPLEMENTED (measured);
+  // the conformance probe checks that row on the wire.
   await check('runTransaction() rolls back when the body throws', async () => {
     const ref = cities.doc('kyoto')
     await assert.rejects(
@@ -467,7 +472,7 @@ const main = async () => {
 
     assert.ok(attempts > 1, `the transaction should have been retried, attempts=${attempts}`)
     assert.equal((await ref.get()).get('population'), 21, 'the retry must read the new value')
-  })
+  }, { served: ['transaction.optimistic-concurrency'] })
 
   await check('a BulkWriter applies independent writes', async () => {
     const writer = db.bulkWriter()
@@ -477,7 +482,7 @@ const main = async () => {
 
     assert.equal((await cities.doc('nagoya').get()).get('population'), 9)
     assert.equal((await cities.doc('sapporo').get()).get('population'), 5)
-  })
+  }, { served: ['firestore.BatchWrite'] })
 
   // ---- Field transforms ----------------------------------------------------
   //
@@ -510,7 +515,7 @@ const main = async () => {
       snapshot.get('seen').toMillis() <= snapshot.updateTime.toMillis(),
       'the server timestamp must not be after the write that produced it',
     )
-  })
+  }, { served: ['transform.server-timestamp', 'transform.increment', 'transform.array-union'] })
 
   await check('increment() accumulates and arrayUnion() stays idempotent across updates', async () => {
     const ref = counters.doc('page')
@@ -521,14 +526,14 @@ const main = async () => {
     assert.equal(snapshot.get('hits'), 7, 'each increment reads the value the last one wrote')
     assert.deepEqual(snapshot.get('tags'), ['a', 'b', 'c'], 'an element already present is not appended twice')
     assert.equal(snapshot.get('label'), 'home', 'a transform must not disturb the other fields')
-  })
+  }, { served: ['transform.increment', 'transform.array-union'] })
 
   await check('arrayRemove() drops the elements it names', async () => {
     const ref = counters.doc('page')
     await ref.update({ tags: FieldValue.arrayRemove('a', 'c') })
 
     assert.deepEqual((await ref.get()).get('tags'), ['b'])
-  })
+  }, { served: ['transform.array-remove'] })
 
   await check('FieldValue.delete() removes the field and leaves the rest', async () => {
     // The SDK sends this as an update_mask naming the field with no value for it
@@ -544,7 +549,7 @@ const main = async () => {
     assert.equal(snapshot.get('keep'), 'yes', 'an unnamed field is untouched')
     assert.equal(snapshot.get('count'), 3)
     assert.deepEqual(Object.keys(snapshot.data()).sort(), ['count', 'keep'])
-  })
+  }, { served: ['query.masked-field-deletion'] })
 
   await check('increment() on a float field stays a float', async () => {
     const ref = counters.doc('ratio')
@@ -552,7 +557,7 @@ const main = async () => {
     await ref.update({ value: FieldValue.increment(1) })
 
     assert.equal((await ref.get()).get('value'), 2.5)
-  })
+  }, { served: ['transform.increment'] })
 
   await check('concurrent increments all land', async () => {
     // The whole reason a transform is computed server-side: ten clients adding
@@ -563,7 +568,7 @@ const main = async () => {
     await Promise.all(Array.from({ length: 10 }, () => ref.update({ hits: FieldValue.increment(1) })))
 
     assert.equal((await ref.get()).get('hits'), 10, 'no increment may be lost')
-  })
+  }, { served: ['transform.increment'] })
 
   await check('a transform the server does not serve reports UNIMPLEMENTED', async () => {
     // Nested field paths are a documented gap, and a transform on one has to
@@ -571,7 +576,7 @@ const main = async () => {
     await expectCode(GRPC_UNIMPLEMENTED, () =>
       counters.doc('page').update({ 'nested.at': FieldValue.serverTimestamp() }),
     )
-  })
+  }, { unimplemented: ['transform.nested-field-path'] })
 
   // ---- Phase 2.1: realtime listeners ---------------------------------------
   //
@@ -603,7 +608,7 @@ const main = async () => {
     } finally {
       listener.unsubscribe()
     }
-  })
+  }, { served: ['firestore.Listen'] })
 
   await check('onSnapshot() on a missing document reports a non-existent snapshot', async () => {
     const ref = watched.doc('never-written')
@@ -620,7 +625,7 @@ const main = async () => {
     } finally {
       listener.unsubscribe()
     }
-  })
+  }, { served: ['firestore.Listen'] })
 
   await check('onSnapshot() on a query reports documents entering and leaving the result set', async () => {
     const query = watched.where('city', '==', 'SF')
@@ -649,7 +654,7 @@ const main = async () => {
     } finally {
       listener.unsubscribe()
     }
-  })
+  }, { served: ['firestore.Listen'] })
 
   await check('onSnapshot() on a query ignores writes outside it', async () => {
     const query = watched.where('city', '==', 'SF')
@@ -668,7 +673,7 @@ const main = async () => {
     } finally {
       listener.unsubscribe()
     }
-  })
+  }, { served: ['firestore.Listen'] })
 
   await check('an unsupported query reports a clear UNIMPLEMENTED instead of hanging', async () => {
     // Aggregations are deliberately not served yet. The failure has to be
@@ -681,7 +686,7 @@ const main = async () => {
       return
     }
     assert.fail('count() should not have succeeded')
-  })
+  }, { unimplemented: ['query.aggregations', 'firestore.RunAggregationQuery'] })
 
   await db.terminate()
 

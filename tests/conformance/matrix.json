@@ -398,6 +398,14 @@
       "python": true
     },
     {
+      "id": "datastore.transaction.read-only-commit",
+      "docTable": null,
+      "label": "A read-only Datastore transaction commits when it writes nothing, and is refused with INVALID_ARGUMENT when it writes",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false
+    },
+    {
       "id": "datastore.AllocateIds",
       "docTable": "datastore-rpcs",
       "label": "AllocateIds",
