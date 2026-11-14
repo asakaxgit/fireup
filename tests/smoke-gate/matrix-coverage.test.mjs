@@ -178,7 +178,7 @@ test('every tag in the smoke suites names a matrix row under the status the matr
     }
   }
   // A floor, so a change to how tags are written cannot leave this checking
-  // nothing: 125 tags on 92 checks across the three suites when this was written.
+  // nothing: 127 tags on 94 checks across the three suites when this was written.
   assert.ok(tags >= 110, `found only ${tags} tags in the smoke suites; has the tag syntax changed?`)
 })
 
