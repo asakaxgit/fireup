@@ -73,8 +73,10 @@
 //! | `HAS_ANCESTOR` | already removed upstream by `strip_ancestor_filter`; it is *where* to read, not a predicate |
 //! | `AND` of the above | yes |
 //! | `AND` with one untranslatable child | the translatable children are pushed; the whole filter still decides in process |
-//! | `OR` | no — the in-process evaluator does not serve `OR` either, and translating it would quietly start |
-//! | `IN`, `NOT_IN`, `!=` | no — the in-process evaluator refuses them, and a pre-filter that implemented them would narrow a query the surface answers as empty |
+//! | `IN` with an array of candidates | yes, as the `Predicate`'s own `IN`: any candidate `=` the property |
+//! | `OR` whose every branch translates | yes |
+//! | `OR` with one untranslatable branch | no — that branch could match any entity, so dropping it would drop them |
+//! | `NOT_IN`, `!=` | no — a negation keeps nearly every entity, and the PostgreSQL pushdown declines the Firestore `!=`/`NOT_IN` anyway, so a translation could only add a way to be wrong |
 //! | A property *path* (`a.b`), an escaped name, `__key__` | no |
 //!
 //! A property's name is a document *field* name under
@@ -91,6 +93,7 @@ use crate::local::query::{Comparison, FieldPath, Path, Predicate};
 use crate::protos::google::datastore::v1::composite_filter::Operator as CompositeOp;
 use crate::protos::google::datastore::v1::filter::FilterType;
 use crate::protos::google::datastore::v1::property_filter::Operator as PropertyOp;
+use crate::protos::google::datastore::v1::value::ValueType as DsValueType;
 use crate::protos::google::datastore::v1::{Filter, PropertyFilter};
 
 /// Translate the property half of a Datastore query's filter into a pre-filter.
@@ -111,13 +114,20 @@ pub(crate) fn translate(
             property_predicate(property, project_id, database_id)
         }
         Some(FilterType::CompositeFilter(composite)) => {
-            // Only `AND` is translated. `OR` is not an oversight: the
-            // in-process evaluator serves `AND` alone and answers an `OR`
-            // filter with "no match", so a pre-filter for one would narrow a
-            // read whose answer is empty either way — and would quietly become
-            // wrong the day `OR` starts being served.
-            if CompositeOp::try_from(composite.op) != Ok(CompositeOp::And) {
-                return None;
+            match CompositeOp::try_from(composite.op).ok()? {
+                CompositeOp::And => {}
+                // An `OR` keeps every entity any branch keeps, so it is only
+                // narrower than "read everything" when *every* branch
+                // translated: a dropped branch could match any entity.
+                CompositeOp::Or => {
+                    let children = composite
+                        .filters
+                        .iter()
+                        .map(|child| translate(Some(child), project_id, database_id))
+                        .collect::<Option<Vec<_>>>()?;
+                    return (!children.is_empty()).then_some(Predicate::Any(children));
+                }
+                CompositeOp::Unspecified => return None,
             }
 
             // Dropping an untranslatable conjunct widens the predicate, which
@@ -170,11 +180,19 @@ fn property_predicate(
         PropertyOp::LessThanOrEqual => Comparison::LessThanOrEqual,
         PropertyOp::GreaterThan => Comparison::GreaterThan,
         PropertyOp::GreaterThanOrEqual => Comparison::GreaterThanOrEqual,
-        // `IN`, `NOT_IN`, `!=` and `HAS_ANCESTOR` all reach the in-process
-        // evaluator as "no match". Translating them would make a pre-filter
-        // answer a query the surface does not serve.
-        PropertyOp::In
-        | PropertyOp::NotIn
+        // The candidates cross `ds_value_to_fs` below as one array, element by
+        // element, exactly as `=` converts its single operand. Only an array
+        // is pushed; anything else was refused before the read.
+        PropertyOp::In => match filter.value.as_ref()?.value_type {
+            Some(DsValueType::ArrayValue(_)) => Comparison::In,
+            _ => return None,
+        },
+        // `!=` and `NOT_IN` are served in process only: a negation keeps
+        // nearly every entity, and `postgres_filter` declines to push the
+        // Firestore spellings of both, so translating them would narrow
+        // nothing while adding a way to be wrong. `HAS_ANCESTOR` was stripped
+        // upstream.
+        PropertyOp::NotIn
         | PropertyOp::NotEqual
         | PropertyOp::HasAncestor
         | PropertyOp::Unspecified => return None,
@@ -201,7 +219,6 @@ mod tests {
     use crate::local::entity_map::{document_to_entity, entity_to_document};
     use crate::protos::google::datastore::v1::key::path_element::IdType;
     use crate::protos::google::datastore::v1::key::PathElement;
-    use crate::protos::google::datastore::v1::value::ValueType as DsValueType;
     use crate::protos::google::datastore::v1::{
         ArrayValue as DsArrayValue, CompositeFilter, Entity, Key, PropertyReference,
         Value as DsValue,
@@ -260,6 +277,19 @@ mod tests {
                 filters,
             })),
         }
+    }
+
+    fn disjunction(filters: Vec<Filter>) -> Filter {
+        Filter {
+            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                op: CompositeOp::Or as i32,
+                filters,
+            })),
+        }
+    }
+
+    fn array(values: Vec<DsValue>) -> DsValue {
+        ds_value(DsValueType::ArrayValue(DsArrayValue { values }))
     }
 
     fn translated(filter: &Filter) -> Option<Predicate> {
@@ -370,7 +400,6 @@ mod tests {
             PropertyOp::GreaterThan,
             PropertyOp::GreaterThanOrEqual,
             PropertyOp::NotEqual,
-            PropertyOp::In,
         ] {
             for value in [
                 integer(3),
@@ -385,9 +414,40 @@ mod tests {
             filters.push(property("profile.plan", op, text("pro")));
             filters.push(property("__key__", op, integer(3)));
         }
+        for op in [PropertyOp::In, PropertyOp::NotIn] {
+            for candidates in [
+                vec![integer(3)],
+                vec![integer(1), double(3.0), text("urgent")],
+                vec![ds_value(DsValueType::NullValue(0)), integer(9)],
+            ] {
+                filters.push(property("priority", op, array(candidates)));
+            }
+            filters.push(property("assignee", op, array(vec![user_key("ada")])));
+        }
         filters.push(conjunction(vec![
             property("priority", PropertyOp::GreaterThanOrEqual, integer(3)),
             property("owner", PropertyOp::Equal, text("ada")),
+        ]));
+        // An OR every branch of which translates, one with a branch that does
+        // not, and an OR nested in an AND.
+        filters.push(disjunction(vec![
+            property(
+                "priority",
+                PropertyOp::In,
+                array(vec![integer(1), integer(9)]),
+            ),
+            property("owner", PropertyOp::Equal, text("dan")),
+        ]));
+        filters.push(disjunction(vec![
+            property("priority", PropertyOp::Equal, integer(3)),
+            property("owner", PropertyOp::NotEqual, text("ada")),
+        ]));
+        filters.push(conjunction(vec![
+            disjunction(vec![
+                property("owner", PropertyOp::Equal, text("ada")),
+                property("priority", PropertyOp::GreaterThan, integer(5)),
+            ]),
+            property("priority", PropertyOp::NotEqual, integer(1)),
         ]));
         filters.push(conjunction(vec![
             property("priority", PropertyOp::Equal, integer(3)),
@@ -570,8 +630,8 @@ mod tests {
     fn an_and_with_an_untranslatable_child_still_pushes_the_rest() {
         let predicate = translated(&conjunction(vec![
             property("priority", PropertyOp::Equal, integer(3)),
-            // `IN` is not served in process, so it cannot be translated.
-            property("owner", PropertyOp::In, text("ada")),
+            // `!=` is served in process only, so it is not translated.
+            property("owner", PropertyOp::NotEqual, text("ada")),
         ]))
         .expect("the translatable conjunct is still worth pushing");
 
@@ -584,23 +644,47 @@ mod tests {
     }
 
     #[test]
-    fn untranslatable_filters_narrow_nothing() {
-        let disjunction = Filter {
-            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
-                op: CompositeOp::Or as i32,
-                filters: vec![
-                    property("priority", PropertyOp::Equal, integer(3)),
-                    property("owner", PropertyOp::Equal, text("bob")),
-                ],
-            })),
-        };
+    fn an_in_filter_translates_to_any_candidate() {
+        let predicate = translated(&property(
+            "priority",
+            PropertyOp::In,
+            array(vec![integer(1), integer(3)]),
+        ))
+        .expect("an IN of candidates translates");
 
+        assert!(predicate.admits(&document(vec![("priority", fs_integer(3))])));
+        assert!(!predicate.admits(&document(vec![("priority", fs_integer(2))])));
+    }
+
+    #[test]
+    fn an_or_translates_only_when_every_branch_does() {
+        let predicate = translated(&disjunction(vec![
+            property("priority", PropertyOp::Equal, integer(3)),
+            property("owner", PropertyOp::Equal, text("bob")),
+        ]))
+        .expect("an OR of translatable branches translates");
+        assert!(matches!(&predicate, Predicate::Any(children) if children.len() == 2));
+        assert!(predicate.admits(&document(vec![("owner", fs_text("bob"))])));
+        assert!(!predicate.admits(&document(vec![("owner", fs_text("ada"))])));
+
+        assert!(
+            translated(&disjunction(vec![
+                property("priority", PropertyOp::Equal, integer(3)),
+                property("owner", PropertyOp::NotEqual, text("bob")),
+            ]))
+            .is_none(),
+            "the `!=` branch could match any entity, so the OR narrows nothing"
+        );
+    }
+
+    #[test]
+    fn untranslatable_filters_narrow_nothing() {
         for filter in [
             property("__key__", PropertyOp::Equal, text("x")),
             property("profile.plan", PropertyOp::Equal, text("pro")),
             property("priority", PropertyOp::NotEqual, integer(3)),
+            property("priority", PropertyOp::NotIn, array(vec![integer(3)])),
             property("owner", PropertyOp::In, text("ada")),
-            disjunction,
         ] {
             assert!(
                 translated(&filter).is_none(),

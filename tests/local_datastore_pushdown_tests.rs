@@ -32,14 +32,15 @@
 //! ## Confirming the corpus can fail
 //!
 //! A green old-vs-new comparison is worth nothing until the new path has been
-//! mutated and watched go red. Three mutations of
-//! `datastore_filter::property_predicate` were applied and confirmed to fail:
+//! mutated and watched go red. These mutations of `datastore_filter` were
+//! applied and confirmed to fail:
 //!
 //! | Mutation | What fails |
 //! | --- | --- |
 //! | `<` translated as `>` | the answer comparison, on `"priority < 3"`: the pushed path drops `a-low` |
 //! | equality translated as `None` | the `Narrows` count on `"priority = 3"`, and `a_selective_datastore_query_reads_fewer_rows_than_the_kind_holds` (11 rows read instead of 1) |
-//! | `IN` translated as `=` | the `ReadsEverything` count on `"owner IN [ada]"`: an untranslatable filter narrowed to 4 rows of 11 |
+//! | an `OR` keeps only its translatable branches | the answer comparison, on `"priority = 3 OR owner != ada"`: the pushed path drops every entity only the `!=` branch matched |
+//! | `IN` translated as `NOT_IN` | the `Narrows` count on `"owner IN [ada]"`: the PostgreSQL pushdown declines `NOT_IN`, so all 11 rows were read |
 //!
 //! Worth repeating whenever a translation is added. Note that the first of
 //! those three only fails because the Datastore data plane still answers with
@@ -441,6 +442,21 @@ fn conjunction(filters: Vec<ds::Filter>) -> ds::Filter {
     }
 }
 
+fn disjunction(filters: Vec<ds::Filter>) -> ds::Filter {
+    ds::Filter {
+        filter_type: Some(ds::filter::FilterType::CompositeFilter(
+            ds::CompositeFilter {
+                op: ds::composite_filter::Operator::Or as i32,
+                filters,
+            },
+        )),
+    }
+}
+
+fn array(values: Vec<ds::Value>) -> ds::Value {
+    ds_value(DsValueType::ArrayValue(ds::ArrayValue { values }))
+}
+
 fn has_ancestor(path: Vec<ds::key::PathElement>) -> ds::Filter {
     property_filter(
         "__key__",
@@ -604,6 +620,50 @@ fn cases() -> Vec<(&'static str, ds::Query, Expect)> {
             task_query(Some(has_ancestor(vec![named("Owner", "ada")]))),
             ReadsEverything,
         ),
+        (
+            "owner IN [ada]",
+            task_query(Some(property_filter(
+                "owner",
+                Op::In,
+                array(vec![text("ada")]),
+            ))),
+            Narrows,
+        ),
+        (
+            // Candidates of mixed types, including the double that equals an
+            // integer and the null that only matches a null.
+            "priority IN [1, 3.0, null]",
+            task_query(Some(property_filter(
+                "priority",
+                Op::In,
+                array(vec![
+                    integer(1),
+                    double(3.0),
+                    ds_value(DsValueType::NullValue(0)),
+                ]),
+            ))),
+            Narrows,
+        ),
+        (
+            "an OR of two terms",
+            task_query(Some(disjunction(vec![
+                property_filter("priority", Op::Equal, integer(3)),
+                property_filter("owner", Op::Equal, text("bob")),
+            ]))),
+            Narrows,
+        ),
+        (
+            // A pushed OR nested in an AND beside a conjunct that is not.
+            "(owner = ada OR priority IN [9]) AND priority != 1",
+            task_query(Some(conjunction(vec![
+                disjunction(vec![
+                    property_filter("owner", Op::Equal, text("ada")),
+                    property_filter("priority", Op::In, array(vec![integer(9)])),
+                ]),
+                property_filter("priority", Op::NotEqual, integer(1)),
+            ]))),
+            Narrows,
+        ),
         // --- the untranslatable shapes -------------------------------------
         //
         // Each must read everything. A narrowed read here is the failure this
@@ -615,8 +675,22 @@ fn cases() -> Vec<(&'static str, ds::Query, Expect)> {
             ReadsEverything,
         ),
         (
-            "owner IN [ada]",
-            task_query(Some(property_filter("owner", Op::In, text("ada")))),
+            "priority NOT_IN [1, 3]",
+            task_query(Some(property_filter(
+                "priority",
+                Op::NotIn,
+                array(vec![integer(1), integer(3)]),
+            ))),
+            ReadsEverything,
+        ),
+        (
+            // One branch is `!=`, which could match any entity, so the OR as a
+            // whole cannot narrow.
+            "priority = 3 OR owner != ada",
+            task_query(Some(disjunction(vec![
+                property_filter("priority", Op::Equal, integer(3)),
+                property_filter("owner", Op::NotEqual, text("ada")),
+            ]))),
             ReadsEverything,
         ),
         (
@@ -626,21 +700,6 @@ fn cases() -> Vec<(&'static str, ds::Query, Expect)> {
                 Op::Equal,
                 text("pro"),
             ))),
-            ReadsEverything,
-        ),
-        (
-            "an OR of two terms",
-            task_query(Some(ds::Filter {
-                filter_type: Some(ds::filter::FilterType::CompositeFilter(
-                    ds::CompositeFilter {
-                        op: ds::composite_filter::Operator::Or as i32,
-                        filters: vec![
-                            property_filter("priority", Op::Equal, integer(3)),
-                            property_filter("owner", Op::Equal, text("bob")),
-                        ],
-                    },
-                )),
-            })),
             ReadsEverything,
         ),
         (
@@ -667,10 +726,10 @@ fn cases() -> Vec<(&'static str, ds::Query, Expect)> {
             // One translatable conjunct and one that is not. The translatable
             // one is still pushed, so this narrows — and the whole filter is
             // still decided in process, which is what keeps it correct.
-            "priority = 3 AND owner IN [ada]",
+            "priority = 3 AND owner != bob",
             task_query(Some(conjunction(vec![
                 property_filter("priority", Op::Equal, integer(3)),
-                property_filter("owner", Op::In, text("ada")),
+                property_filter("owner", Op::NotEqual, text("bob")),
             ]))),
             Narrows,
         ),

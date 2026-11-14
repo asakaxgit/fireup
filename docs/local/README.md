@@ -378,8 +378,11 @@ translation, and it reuses the SQL above unchanged:
 | `=`, `<`, `<=`, `>`, `>=` on a plain property name | yes |
 | `AND` of those | yes |
 | `AND` with one untranslatable term | the translatable terms are, and the whole filter still decides in process |
+| `IN` with an array of candidates | yes |
+| `OR` whose every branch translates | yes |
+| `OR` with one untranslatable branch | no — that branch could match any entity, so dropping it would drop them |
 | `HAS_ANCESTOR` | it chooses *which* collection to read rather than narrowing one, so it is not a predicate |
-| `OR`, `IN`, `not-in`, `!=` | no — the in-process evaluator answers these as "no match", so a pre-filter for one would narrow a read whose answer is empty either way |
+| `NOT_IN`, `!=` | no — a negation keeps nearly every entity, and the PostgreSQL pushdown declines the Firestore spellings of both anyway; they are evaluated in process |
 | A property *path* (`a.b`), an escaped property name, `__key__` | no |
 
 Two things about the shape of that work are worth knowing:
@@ -401,7 +404,7 @@ Two things about the shape of that work are worth knowing:
   answers with its own evaluator rather than with the translated predicate, so
   the two stay independent implementations and the differential test has
   something to catch. See `tests/local_datastore_pushdown_tests.rs` for the
-  three mutations that confirm it does.
+  mutations that confirm it does.
 
 #### Where the speedup actually comes from
 
@@ -522,7 +525,7 @@ What to know before trusting a listener here:
 | RPC | Status | Notes |
 |---|---|---|
 | `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
-| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`), `AND`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
+| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`), `AND`, `OR`, order, limit, offset, `HAS_ANCESTOR`. GQL refused. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
 | `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` and `property_mask` (below). |
 | `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. A read-only transaction may be committed when it carries no mutations, as Google's public [read-only transaction sample](https://cloud.google.com/datastore/docs/concepts/transactions) does; with mutations it is `INVALID_ARGUMENT`. (Firestore `Commit` still refuses a read-only transaction.) |
 | `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
@@ -531,7 +534,17 @@ What to know before trusting a listener here:
 
 Kinds share the Postgres/`MemoryStore` rows with Firestore: `Task/sample` is
 `…/documents/Task/sample`. Non-default namespaces, GQL, projection queries,
-cursors, and nested property masks are refused.
+cursors, nested property masks, and `HAS_ANCESTOR` inside an `OR` are refused.
+
+Property filters compare one value against one value. `!=`, `IN` and `NOT_IN`
+are defined from `=`: a property of a different type is "not equal", and an
+entity without the property matches none of them. An **array-valued** property
+matches no property filter yet, `=` included; per-element matching is a
+separate change. A filter the proto's "Requires" lists rule out — two
+`NOT_EQUAL`/`NOT_IN`, `NOT_IN` beside `IN` or `OR`, an `IN`/`NOT_IN` without a
+non-empty array, a `NOT_IN` of more than 10 values, an unset operator — is
+`INVALID_ARGUMENT` rather than an empty answer. The "comes first in
+`order_by`" requirements are not enforced.
 
 #### Datastore property transforms
 

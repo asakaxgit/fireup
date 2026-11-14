@@ -6,7 +6,7 @@
  * was reverse-engineered.
  */
 
-import { Datastore, DatastoreClient } from '@google-cloud/datastore'
+import { Datastore, DatastoreClient, or, PropertyFilter } from '@google-cloud/datastore'
 
 import { writeResults } from '../smoke-gate/results.mjs'
 
@@ -291,6 +291,58 @@ await check('the maximum transform stays refused with UNIMPLEMENTED', async () =
     throw new Error(`expected UNIMPLEMENTED (12) for maximum, got ${refused && refused.code}`)
   }
 }, { unimplemented: ['datastore.transform.maximum-minimum'] })
+
+// --- Filters ---------------------------------------------------------------
+//
+// Moved from backlog.mjs once served. A kind of their own, with a run id in it,
+// so a durable store's earlier runs and the entities above do not join the
+// answer.
+
+const filterKind = `SmokeFilter_${Date.now().toString(36)}`
+const filterKey = (name) => datastore.key([filterKind, name])
+
+const names = (rows) => rows.map((row) => row[datastore.KEY].name).sort()
+
+const expectNames = (rows, want, what) => {
+  const got = names(rows)
+  if (JSON.stringify(got) !== JSON.stringify([...want].sort())) {
+    throw new Error(`${what}: got ${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`)
+  }
+}
+
+await check('seed the filter fixture', async () => {
+  await datastore.save([
+    { key: filterKey('a'), data: { priority: 1, done: false, owner: 'ada' } },
+    { key: filterKey('b'), data: { priority: 2, done: true, owner: 'bob' } },
+    { key: filterKey('c'), data: { priority: 3, done: false, owner: 'ada' } },
+  ])
+}, { served: ['datastore.Commit'] })
+
+await check('a != filter excludes the matching entity', async () => {
+  const query = datastore.createQuery(filterKind).filter(new PropertyFilter('priority', '!=', 2))
+  const [rows] = await datastore.runQuery(query)
+  expectNames(rows, ['a', 'c'], '!= filter')
+}, { served: ['datastore.RunQuery'] })
+
+await check('an IN filter matches any listed value', async () => {
+  const query = datastore.createQuery(filterKind).filter(new PropertyFilter('priority', 'IN', [1, 3]))
+  const [rows] = await datastore.runQuery(query)
+  expectNames(rows, ['a', 'c'], 'IN filter')
+}, { served: ['datastore.RunQuery'] })
+
+await check('a NOT_IN filter excludes the listed values', async () => {
+  const query = datastore.createQuery(filterKind).filter(new PropertyFilter('priority', 'NOT_IN', [1, 3]))
+  const [rows] = await datastore.runQuery(query)
+  expectNames(rows, ['b'], 'NOT_IN filter')
+}, { served: ['datastore.RunQuery'] })
+
+await check('an OR composite filter matches either branch', async () => {
+  const query = datastore
+    .createQuery(filterKind)
+    .filter(or([new PropertyFilter('priority', '=', 1), new PropertyFilter('owner', '=', 'bob')]))
+  const [rows] = await datastore.runQuery(query)
+  expectNames(rows, ['a', 'b'], 'OR filter')
+}, { served: ['datastore.RunQuery'] })
 
 await check('delete removes the entity', async () => {
   await datastore.delete(key)

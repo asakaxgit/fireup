@@ -379,7 +379,8 @@
       "label": "RunQuery",
       "status": "served",
       "driver": "node-sdk",
-      "python": true
+      "python": true,
+      "note": "Property filters =, <, <=, >, >=, !=, IN, NOT_IN under AND and OR, with scalar semantics; a filter the proto's Requires lists rule out is INVALID_ARGUMENT. Array-valued properties match no property filter yet."
     },
     {
       "id": "datastore.Commit",

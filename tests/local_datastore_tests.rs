@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use fireup::local;
 use fireup::protos::google::datastore::v1::commit_request::Mode as CommitMode;
+use fireup::protos::google::datastore::v1::composite_filter::Operator as CompositeOp;
 use fireup::protos::google::datastore::v1::datastore_client::DatastoreClient;
 use fireup::protos::google::datastore::v1::key::path_element::IdType;
 use fireup::protos::google::datastore::v1::key::PathElement;
@@ -19,9 +20,9 @@ use fireup::protos::google::datastore::v1::run_query_request::QueryType;
 use fireup::protos::google::datastore::v1::value::ValueType;
 use fireup::protos::google::datastore::v1::{
     filter::FilterType, AllocateIdsRequest, ArrayValue, BeginTransactionRequest, CommitRequest,
-    Entity, Filter, Key, KindExpression, LookupRequest, Mutation, PropertyFilter, PropertyMask,
-    PropertyReference, PropertyTransform, Query, RollbackRequest, RunAggregationQueryRequest,
-    RunQueryRequest, Value,
+    CompositeFilter, Entity, Filter, Key, KindExpression, LookupRequest, Mutation, PropertyFilter,
+    PropertyMask, PropertyReference, PropertyTransform, Query, RollbackRequest,
+    RunAggregationQueryRequest, RunQueryRequest, Value,
 };
 use tonic::transport::Channel;
 use tonic::Code;
@@ -1250,6 +1251,237 @@ async fn unservable_mask_paths_are_refused_and_write_nothing() {
         "a __key__-only mask wrote no properties"
     );
     assert_eq!(stored.properties["hits"], integer_value(7));
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+fn property_filter(name: &str, op: PropertyOp, value: Value) -> Filter {
+    Filter {
+        filter_type: Some(FilterType::PropertyFilter(PropertyFilter {
+            property: Some(PropertyReference {
+                name: name.to_string(),
+            }),
+            op: op as i32,
+            value: Some(value),
+        })),
+    }
+}
+
+fn composite(op: CompositeOp, filters: Vec<Filter>) -> Filter {
+    Filter {
+        filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+            op: op as i32,
+            filters,
+        })),
+    }
+}
+
+fn integers(values: &[i64]) -> Value {
+    Value {
+        value_type: Some(ValueType::ArrayValue(ArrayValue {
+            values: values.iter().copied().map(integer_value).collect(),
+        })),
+        ..Default::default()
+    }
+}
+
+/// The names a `RunQuery` over kind `kind` with `filter` answers, sorted.
+async fn query_names(
+    client: &mut DatastoreClient<Channel>,
+    kind: &str,
+    filter: Filter,
+) -> Result<Vec<String>, tonic::Status> {
+    let batch = client
+        .run_query(RunQueryRequest {
+            project_id: PROJECT.to_string(),
+            query_type: Some(QueryType::Query(Query {
+                kind: vec![KindExpression {
+                    name: kind.to_string(),
+                }],
+                filter: Some(filter),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+        .await?
+        .into_inner()
+        .batch
+        .expect("batch");
+    let mut names: Vec<String> = batch
+        .entity_results
+        .into_iter()
+        .filter_map(|result| result.entity?.key?.path.pop()?.id_type)
+        .map(|id| match id {
+            IdType::Name(name) => name,
+            IdType::Id(id) => id.to_string(),
+        })
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// `!=`, `IN`, `NOT_IN` and `OR` used to be accepted and answered with no
+/// entities at all. Each is served now, with scalar semantics: a property of
+/// another type is "not equal", and an array-valued or missing property
+/// matches none of them.
+#[tokio::test]
+async fn not_equal_in_not_in_and_or_filters_are_served() {
+    let (server, mut client) = start().await;
+
+    let kind = "Filtered";
+    let seed = [
+        (
+            "a",
+            vec![
+                ("priority", integer_value(1)),
+                ("owner", string_value("ada")),
+            ],
+        ),
+        (
+            "b",
+            vec![
+                ("priority", integer_value(2)),
+                ("owner", string_value("bob")),
+            ],
+        ),
+        (
+            "c",
+            vec![
+                ("priority", integer_value(3)),
+                ("owner", string_value("ada")),
+            ],
+        ),
+        ("text", vec![("priority", string_value("2"))]),
+        ("list", vec![("priority", integers(&[2, 5]))]),
+        ("bare", vec![("owner", string_value("bob"))]),
+    ];
+    let mutations = seed
+        .into_iter()
+        .map(|(name, properties)| Mutation {
+            operation: Some(Operation::Upsert(entity(
+                named_key(kind, name),
+                properties
+                    .into_iter()
+                    .map(|(property, value)| (property.to_string(), value))
+                    .collect(),
+            ))),
+            ..Default::default()
+        })
+        .collect();
+    client
+        .commit(CommitRequest {
+            project_id: PROJECT.to_string(),
+            mode: CommitMode::NonTransactional as i32,
+            mutations,
+            ..Default::default()
+        })
+        .await
+        .expect("seed");
+
+    for (filter, want) in [
+        (
+            property_filter("priority", PropertyOp::NotEqual, integer_value(2)),
+            vec!["a", "c", "text"],
+        ),
+        (
+            property_filter("priority", PropertyOp::In, integers(&[1, 3])),
+            vec!["a", "c"],
+        ),
+        (
+            property_filter("priority", PropertyOp::NotIn, integers(&[1, 3])),
+            vec!["b", "text"],
+        ),
+        (
+            composite(
+                CompositeOp::Or,
+                vec![
+                    property_filter("priority", PropertyOp::Equal, integer_value(1)),
+                    property_filter("owner", PropertyOp::Equal, string_value("bob")),
+                ],
+            ),
+            vec!["a", "b", "bare"],
+        ),
+        (
+            // A translatable OR inside an AND with an untranslatable `!=`: the
+            // pushed part narrows, the evaluator still decides.
+            composite(
+                CompositeOp::And,
+                vec![
+                    composite(
+                        CompositeOp::Or,
+                        vec![
+                            property_filter("owner", PropertyOp::Equal, string_value("ada")),
+                            property_filter("priority", PropertyOp::In, integers(&[2])),
+                        ],
+                    ),
+                    property_filter("priority", PropertyOp::NotEqual, integer_value(3)),
+                ],
+            ),
+            vec!["a", "b"],
+        ),
+    ] {
+        let got = query_names(&mut client, kind, filter.clone())
+            .await
+            .unwrap_or_else(|status| panic!("{filter:?} was refused: {status}"));
+        assert_eq!(got, want, "{filter:?}");
+    }
+
+    server.shutdown().await.expect("clean shutdown");
+}
+
+/// Where the proto's "Requires" list rules a filter out, the answer is
+/// `INVALID_ARGUMENT`, not an empty result.
+#[tokio::test]
+async fn filters_the_proto_rules_out_are_invalid_arguments() {
+    let (server, mut client) = start().await;
+
+    let not_equal = || property_filter("priority", PropertyOp::NotEqual, integer_value(2));
+    let not_in = || property_filter("priority", PropertyOp::NotIn, integers(&[1]));
+    let is_in = || property_filter("priority", PropertyOp::In, integers(&[1]));
+
+    for (what, filter) in [
+        (
+            "two NOT_EQUAL",
+            composite(CompositeOp::And, vec![not_equal(), not_equal()]),
+        ),
+        (
+            "NOT_EQUAL and NOT_IN",
+            composite(CompositeOp::And, vec![not_equal(), not_in()]),
+        ),
+        (
+            "NOT_IN and IN",
+            composite(CompositeOp::And, vec![not_in(), is_in()]),
+        ),
+        (
+            "NOT_IN under OR",
+            composite(CompositeOp::Or, vec![not_in(), is_in()]),
+        ),
+        (
+            "IN on a scalar",
+            property_filter("priority", PropertyOp::In, integer_value(1)),
+        ),
+        (
+            "IN on an empty array",
+            property_filter("priority", PropertyOp::In, integers(&[])),
+        ),
+        (
+            "NOT_IN of 11 values",
+            property_filter("priority", PropertyOp::NotIn, integers(&[0; 11])),
+        ),
+        (
+            "no operator",
+            property_filter("priority", PropertyOp::Unspecified, integer_value(1)),
+        ),
+        (
+            "no composite operator",
+            composite(CompositeOp::Unspecified, vec![is_in()]),
+        ),
+    ] {
+        let status = query_names(&mut client, "Refused", filter)
+            .await
+            .expect_err(what);
+        assert_eq!(status.code(), Code::InvalidArgument, "{what}: {status}");
+    }
 
     server.shutdown().await.expect("clean shutdown");
 }
