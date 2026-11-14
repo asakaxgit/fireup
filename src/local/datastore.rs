@@ -368,8 +368,8 @@ impl DatastoreApi {
                     .as_ref()
                     .map(|ts| ts.seconds)
                     .unwrap_or(0),
-                create_time: document.create_time.clone(),
-                update_time: document.update_time.clone(),
+                create_time: document.create_time,
+                update_time: document.update_time,
             })
             .collect();
 
