@@ -596,6 +596,16 @@ fn unquote(value: &str) -> &str {
     value
 }
 
+/// The value of `key` if `text` is that mapping key, in any spelling YAML
+/// parses to it: `key:`, `key :`, `'key':` and `"key":`. Matching only the
+/// bare `key:` let `'needs': test` and `if : false` through as no key at all.
+fn key_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let rest = [format!("'{key}'"), format!("\"{key}\""), key.to_string()]
+        .iter()
+        .find_map(|spelling| text.strip_prefix(spelling.as_str()))?;
+    rest.trim_start().strip_prefix(':')
+}
+
 /// One live `if:` or `continue-on-error:` on a step.
 #[derive(Debug, PartialEq, Eq)]
 struct StepCondition {
@@ -699,7 +709,7 @@ fn step_conditions(
 
     for text in keyed {
         for key in STEP_CONDITION_KEYS {
-            if let Some(value) = text.strip_prefix(&format!("{key}:")) {
+            if let Some(value) = key_value(text, key) {
                 conditions.push(StepCondition {
                     key: (*key).to_string(),
                     value: unquote(value.trim()).to_string(),
@@ -1065,6 +1075,11 @@ fn command_running(ci: &str, needle: &str, missing: &str) -> Result<ReporterComm
     let inline = run_body.strip_prefix("run:").unwrap_or_default().trim();
 
     let mut raw: Vec<&str> = Vec::new();
+    // An inline value continues on any following line indented past `run:`,
+    // and YAML folds those lines into it with a space: `run: gate` over an
+    // indented `|| true` is the one command `gate || true`. A blank line folds
+    // to a newline instead, so what follows it is a command of its own.
+    let mut folded: Vec<String> = Vec::new();
     if inline.starts_with('|') || inline.starts_with('>') {
         for next in &lines[run_at + 1..] {
             let bare = without_comment(next);
@@ -1078,7 +1093,28 @@ fn command_running(ci: &str, needle: &str, missing: &str) -> Result<ReporterComm
             raw.push(body);
         }
     } else if !inline.is_empty() {
-        raw.push(inline);
+        folded.push(inline.to_string());
+        let mut after_blank = false;
+        for next in &lines[run_at + 1..] {
+            let bare = without_comment(next);
+            let body = bare.trim_start();
+            if body.is_empty() {
+                after_blank = true;
+                continue;
+            }
+            if bare.len() - body.len() <= run_indent {
+                break;
+            }
+            match folded.last_mut() {
+                Some(line) if !after_blank => {
+                    line.push(' ');
+                    line.push_str(body);
+                }
+                _ => folded.push(body.to_string()),
+            }
+            after_blank = false;
+        }
+        raw.extend(folded.iter().map(String::as_str));
     }
     if raw.is_empty() {
         return Err(format!(
@@ -1474,7 +1510,7 @@ fn job_conditions(ci: &str, step_start: usize) -> Result<Vec<StepCondition>, Str
             continue;
         }
         for key in JOB_CONDITION_KEYS {
-            if let Some(value) = bare.trim_start().strip_prefix(&format!("{key}:")) {
+            if let Some(value) = key_value(bare.trim_start(), key) {
                 conditions.push(StepCondition {
                     key: (*key).to_string(),
                     value: unquote(value.trim()).to_string(),
@@ -1498,8 +1534,12 @@ fn fidelity_gate_is_unconditional(ci: &str) -> Result<(), String> {
     let gate = command_running(ci, FIDELITY_GATE_COMMAND, &missing)?;
     let command = gate.command.trim();
     let arguments = command.strip_prefix(FIDELITY_GATE_COMMAND);
+    // `${{ }}` is substituted into the script text before bash parses it, so an
+    // expression can bring back any operator the check below rules out.
     let plain = arguments.is_some_and(|rest| {
-        (rest.is_empty() || rest.starts_with(' ')) && !rest.contains(SHELL_OPERATOR_CHARS)
+        (rest.is_empty() || rest.starts_with(' '))
+            && !rest.contains(SHELL_OPERATOR_CHARS)
+            && !rest.contains("${{")
     });
     if !gate.alone || !plain {
         return Err(format!(
@@ -1509,7 +1549,9 @@ fn fidelity_gate_is_unconditional(ci: &str) -> Result<(), String> {
              failing gate into a passing step, and a command before it can stop the script \
              running at all. The gate step's `run:` must be that one command, starting with \
              `{FIDELITY_GATE_COMMAND}`, with plain arguments only -- none of \
-             {SHELL_OPERATOR_CHARS:?}. Set environment through the step's `env:`."
+             {SHELL_OPERATOR_CHARS:?} and no `${{{{ }}}}` expression, which Actions \
+             pastes into the script before the shell parses it. Set environment through \
+             the step's `env:` and read it as `$NAME`."
         ));
     }
 
@@ -1627,6 +1669,10 @@ mod fidelity_gate_controls {
             "; true",
             " | tee log",
             " & wait",
+            // A plain scalar continued on an indented line folds into the run.
+            "\n          || true",
+            // Actions pastes the expression in before bash parses the line.
+            " ${{ env.X }}",
         ] {
             let ci = ci_with("", "").replace(&gate, &format!("{gate}{tail}"));
             let verdict = fidelity_gate_is_unconditional(&ci);
@@ -1646,6 +1692,9 @@ mod fidelity_gate_controls {
             format!("run: |\n          {FIDELITY_GATE_COMMAND}\n          true"),
             format!("run: |\n          set +e\n          {FIDELITY_GATE_COMMAND}"),
             format!("run: |\n          {FIDELITY_GATE_COMMAND} \\\n            || true"),
+            format!("run: |\n          {FIDELITY_GATE_COMMAND} ${{{{ env.X }}}}"),
+            // A blank line inside a plain scalar folds to a newline: two commands.
+            format!("run: {FIDELITY_GATE_COMMAND}\n\n          true"),
             format!("run: true || {FIDELITY_GATE_COMMAND}"),
             format!("run: ! {FIDELITY_GATE_COMMAND}"),
             format!("run: {FIDELITY_GATE_COMMAND}-old"),
@@ -1666,6 +1715,8 @@ mod fidelity_gate_controls {
         let gate = format!("run: {FIDELITY_GATE_COMMAND}");
         for body in [
             format!("{gate} results"),
+            format!("{gate} \"$RESULTS\""),
+            format!("{gate}\n          results"),
             format!("run: |\n          {FIDELITY_GATE_COMMAND}"),
         ] {
             let ci = ci_with("", "").replace(&gate, &body);
@@ -1682,10 +1733,33 @@ mod fidelity_gate_controls {
         ] {
             let verdict = fidelity_gate_is_unconditional(&ci_with(needs, ""));
             assert!(
-                verdict.is_err_and(|why| why.contains("job carries `needs:")),
+                verdict.is_err_and(|why| why.contains("drop the `needs:`")),
                 "{needs:?} passed"
             );
         }
+    }
+
+    #[test]
+    fn a_respelled_key_is_still_read() {
+        for (job, step) in [
+            ("    needs : test\n", ""),
+            ("    'needs': test\n", ""),
+            ("    \"if\": false\n", ""),
+            ("    if : false\n", ""),
+            ("", "        'continue-on-error': true\n"),
+        ] {
+            let verdict = fidelity_gate_is_unconditional(&ci_with(job, step));
+            assert!(
+                verdict.is_err_and(|why| why.contains(" carries `")),
+                "{job:?}{step:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_that_only_starts_like_a_condition_passes() {
+        let ci = ci_with("    if-unrelated: false\n", "        needsless: true\n");
+        assert_eq!(fidelity_gate_is_unconditional(&ci), Ok(()));
     }
 
     #[test]
