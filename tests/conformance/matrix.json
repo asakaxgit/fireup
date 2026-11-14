@@ -898,9 +898,10 @@
       "id": "datastore.cursors",
       "docTable": null,
       "label": "Datastore query cursors",
-      "status": "unimplemented",
-      "driver": "node-grpc",
-      "python": false
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false,
+      "note": "start_cursor and end_cursor are positions in the query's order with __key__ breaking ties; every batch returns an end_cursor (never empty), skipped_cursor and per-result cursors, and more_results says whether the limit or the end cursor cut the answer short. The cursor bytes are Fireup's own format; a cursor Fireup did not write is INVALID_ARGUMENT."
     },
     {
       "id": "datastore.nested-property-mask",

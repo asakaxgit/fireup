@@ -526,7 +526,7 @@ What to know before trusting a listener here:
 | RPC | Status | Notes |
 |---|---|---|
 | `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
-| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`), `__key__` filters with the same operators, `AND`, `OR`, order (by `__key__` too), limit, offset, `HAS_ANCESTOR`. GQL refused. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
+| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`), `__key__` filters with the same operators, `AND`, `OR`, order (by `__key__` too), limit, offset, start and end cursors, `HAS_ANCESTOR`. GQL refused. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
 | `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` and `property_mask` (below). |
 | `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. A read-only transaction may be committed when it carries no mutations, as Google's public [read-only transaction sample](https://cloud.google.com/datastore/docs/concepts/transactions) does; with mutations it is `INVALID_ARGUMENT`. (Firestore `Commit` still refuses a read-only transaction.) |
 | `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
@@ -535,7 +535,7 @@ What to know before trusting a listener here:
 
 Kinds share the Postgres/`MemoryStore` rows with Firestore: `Task/sample` is
 `…/documents/Task/sample`. Non-default namespaces, GQL, projection queries,
-cursors, nested property masks, and `HAS_ANCESTOR` inside an `OR` are refused.
+nested property masks, and `HAS_ANCESTOR` inside an `OR` are refused.
 
 Property filters compare one value against one value. `!=`, `IN` and `NOT_IN`
 are defined from `=`: a property of a different type is "not equal", and an
@@ -564,6 +564,21 @@ anything else is `INVALID_ARGUMENT`, and a key in a non-default namespace is
 `UNIMPLEMENTED`, as everywhere else. One caveat comes from how keys are
 stored: a key *name* made only of digits is stored as a document id that reads
 back as a numeric id, so it orders among the ids.
+
+A **cursor** is a position in the query's order, with the key breaking every
+tie, so a query with no `order` pages in key order. `start_cursor` starts the
+answer just after the entity the cursor was taken at, `end_cursor` stops it
+just after one, and `offset`/`limit` then apply within that range. Every batch
+returns an `end_cursor` — after the last entity returned, else after the last
+one skipped, else where the batch started — and never an empty one, because an
+empty cursor is how a client asks for the first page. Each result carries its
+own cursor, and `skipped_cursor` marks the end of the offset. `more_results` is
+`MORE_RESULTS_AFTER_LIMIT` when the limit left entities out,
+`MORE_RESULTS_AFTER_CURSOR` when the end cursor did, and `NO_MORE_RESULTS`
+otherwise. The cursor carries its entity's key and sort values rather than a
+pointer to the entity, so it still resumes after that entity is changed or
+deleted. Its bytes are Fireup's own format, not production's; a cursor Fireup
+did not write is `INVALID_ARGUMENT`.
 
 #### Datastore property transforms
 

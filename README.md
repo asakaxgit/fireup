@@ -3,7 +3,7 @@
 [![CI](https://github.com/asakaxgit/fireup/actions/workflows/ci.yml/badge.svg)](https://github.com/asakaxgit/fireup/actions/workflows/ci.yml)
 [![Coverage](https://github.com/asakaxgit/fireup/actions/workflows/coverage.yml/badge.svg)](https://github.com/asakaxgit/fireup/actions/workflows/coverage.yml)
 [![line coverage](https://img.shields.io/badge/line%20coverage-%E2%89%A575%25-success)](#ci-and-coverage)
-[![fidelity matrix](https://img.shields.io/badge/fidelity%20matrix-94%2F121%20served-informational)](docs/local/README.md#fidelity-matrix)
+[![fidelity matrix](https://img.shields.io/badge/fidelity%20matrix-95%2F121%20served-informational)](docs/local/README.md#fidelity-matrix)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
 
 Fireup takes a managed Firestore/Datastore export and gives you **both** halves

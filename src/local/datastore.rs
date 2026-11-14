@@ -31,6 +31,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use prost::Message;
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 use tracing::debug;
@@ -190,12 +191,6 @@ impl DatastoreApi {
         if !query.distinct_on.is_empty() {
             return Err(unimplemented("Datastore distinct_on", "not in Phase 3"));
         }
-        if !query.start_cursor.is_empty() || !query.end_cursor.is_empty() {
-            return Err(unimplemented(
-                "Datastore query cursors",
-                "use offset/limit for Phase 3",
-            ));
-        }
         if query.find_nearest.is_some() {
             return Err(unimplemented("Datastore find_nearest", "vector search"));
         }
@@ -293,45 +288,80 @@ impl DatastoreApi {
             });
         }
 
-        if !query.order.is_empty() {
-            candidates.sort_by(|left, right| {
-                let left = document_to_entity(left, &self.project_id, &self.database_id).ok();
-                let right = document_to_entity(right, &self.project_id, &self.database_id).ok();
-                match (left, right) {
-                    (Some(left), Some(right)) => compare_entities(
-                        &left,
-                        &right,
-                        &query.order,
-                        &self.project_id,
-                        &self.database_id,
-                    ),
-                    _ => Ordering::Equal,
-                }
-            });
-        }
+        let start = decode_cursor(&query.start_cursor, "start")?;
+        let end = decode_cursor(&query.end_cursor, "end")?;
 
-        let offset = query.offset.max(0) as usize;
-        if offset > candidates.len() {
-            candidates.clear();
-        } else {
-            candidates = candidates.split_off(offset);
-        }
+        let mut rows = candidates
+            .into_iter()
+            .map(|document| {
+                let entity = document_to_entity(&document, &self.project_id, &self.database_id)?;
+                Ok((document, entity))
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
+        let position = |entity: &Entity, cursor: &Entity| {
+            compare_positions(
+                entity,
+                cursor,
+                &query.order,
+                &self.project_id,
+                &self.database_id,
+            )
+        };
+        rows.sort_by(|(_, left), (_, right)| position(left, right));
 
-        if let Some(limit) = query.limit {
-            let limit = limit.max(0) as usize;
-            if candidates.len() > limit {
-                candidates.truncate(limit);
+        // Both cursors are the position just after an entity: a page starts
+        // after its start cursor and runs up to and including its end cursor.
+        if let Some(start) = start.as_ref() {
+            rows.retain(|(_, entity)| position(entity, start) == Ordering::Greater);
+        }
+        let mut more_results = MoreResultsType::NoMoreResults;
+        if let Some(end) = end.as_ref() {
+            let before_end =
+                rows.partition_point(|(_, entity)| position(entity, end) != Ordering::Greater);
+            if before_end < rows.len() {
+                rows.truncate(before_end);
+                more_results = MoreResultsType::MoreResultsAfterCursor;
             }
         }
 
-        if let Some(token) = transaction {
-            self.transactions.record_reads(token, &candidates, &[])?;
+        let offset = (query.offset.max(0) as usize).min(rows.len());
+        let skipped_cursor = match offset.checked_sub(1) {
+            Some(last) => encode_cursor(&rows[last].1, &query.order),
+            None => Vec::new(),
+        };
+        let mut rows = rows.split_off(offset);
+
+        if let Some(limit) = query.limit {
+            let limit = limit.max(0) as usize;
+            if rows.len() > limit {
+                rows.truncate(limit);
+                more_results = MoreResultsType::MoreResultsAfterLimit;
+            }
         }
 
-        let mut entity_results = Vec::with_capacity(candidates.len());
-        for document in candidates {
-            let entity = self.entity_from_document(&document).await?;
-            entity_results.push(EntityResult {
+        // Where the next page starts: after the last entity this batch
+        // returned, else after the last one it skipped, else where this one
+        // started. Never empty — an empty cursor is how a client asks for the
+        // first page, so returning one would silently restart the query.
+        let end_cursor = match rows.last() {
+            Some((_, entity)) => encode_cursor(entity, &query.order),
+            None if !skipped_cursor.is_empty() => skipped_cursor.clone(),
+            None if query.start_cursor.is_empty() => CURSOR_TAG.to_vec(),
+            None => query.start_cursor.clone(),
+        };
+
+        if let Some(token) = transaction {
+            let documents = rows
+                .iter()
+                .map(|(document, _)| document.clone())
+                .collect::<Vec<_>>();
+            self.transactions.record_reads(token, &documents, &[])?;
+        }
+
+        let entity_results = rows
+            .into_iter()
+            .map(|(document, entity)| EntityResult {
+                cursor: encode_cursor(&entity, &query.order),
                 entity: Some(entity),
                 version: document
                     .update_time
@@ -340,17 +370,16 @@ impl DatastoreApi {
                     .unwrap_or(0),
                 create_time: document.create_time.clone(),
                 update_time: document.update_time.clone(),
-                cursor: Vec::new(),
-            });
-        }
+            })
+            .collect();
 
         Ok(QueryResultBatch {
             entity_result_type: ResultType::Full as i32,
             entity_results,
-            skipped_cursor: Vec::new(),
-            more_results: MoreResultsType::NoMoreResults as i32,
-            end_cursor: Vec::new(),
-            skipped_results: query.offset.max(0),
+            skipped_cursor,
+            more_results: more_results as i32,
+            end_cursor,
+            skipped_results: offset as i32,
             snapshot_version: 0,
             read_time: Some(now_timestamp()),
         })
@@ -1330,6 +1359,76 @@ fn candidate_list(filter: &PropertyFilter, op: &str, max: Option<usize>) -> Resu
         }
     }
     Ok(())
+}
+
+/// What every Fireup Datastore cursor starts with. On its own it is the
+/// position before the first entity.
+///
+/// A cursor is opaque bytes to a client, so its format is Fireup's own:
+/// this tag, then a protobuf `Entity` holding the key and the sort-property
+/// values of the entity the cursor sits just after. Carrying the values,
+/// rather than only the key, keeps a cursor usable after its entity is
+/// changed or deleted: the position does not depend on reading it back.
+const CURSOR_TAG: &[u8] = b"fireup.ds.cursor.1";
+
+/// The cursor for the position just after `entity` in a query sorted by
+/// `order`.
+fn encode_cursor(entity: &Entity, order: &[PropertyOrder]) -> Vec<u8> {
+    let properties = order
+        .iter()
+        .filter_map(|term| term.property.as_ref())
+        .filter_map(|property| {
+            let value = entity.properties.get(&property.name)?;
+            Some((property.name.clone(), value.clone()))
+        })
+        .collect();
+    let position = Entity {
+        key: entity.key.clone(),
+        properties,
+    };
+    let mut cursor = CURSOR_TAG.to_vec();
+    position.encode(&mut cursor).expect("a Vec grows to fit");
+    cursor
+}
+
+/// The position a client-supplied cursor names, or `None` for no bound: an
+/// empty cursor, or a bare [`CURSOR_TAG`].
+///
+/// Anything Fireup did not write is `INVALID_ARGUMENT`, never "no bound" — a
+/// cursor that silently restarted the query is the bug this replaced.
+fn decode_cursor(cursor: &[u8], which: &str) -> Result<Option<Entity>, Status> {
+    if cursor.is_empty() {
+        return Ok(None);
+    }
+    let invalid = || Status::invalid_argument(format!("the {which}_cursor is not a Fireup cursor"));
+    let body = cursor.strip_prefix(CURSOR_TAG).ok_or_else(invalid)?;
+    if body.is_empty() {
+        return Ok(None);
+    }
+    let position = Entity::decode(body).map_err(|_| invalid())?;
+    match position.key {
+        Some(_) => Ok(Some(position)),
+        None => Err(invalid()),
+    }
+}
+
+/// Where `left` sits relative to `right` in a query sorted by `order`, with
+/// the key breaking every tie, so no two stored entities share a position.
+/// That total order is what lets a cursor resume between entities the sort
+/// alone calls equal.
+fn compare_positions(
+    left: &Entity,
+    right: &Entity,
+    order: &[PropertyOrder],
+    project_id: &str,
+    database_id: &str,
+) -> Ordering {
+    compare_entities(left, right, order, project_id, database_id).then_with(|| {
+        match (left.key.as_ref(), right.key.as_ref()) {
+            (Some(left), Some(right)) => compare_keys(left, right),
+            _ => Ordering::Equal,
+        }
+    })
 }
 
 fn compare_entities(

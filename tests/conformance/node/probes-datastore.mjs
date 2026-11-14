@@ -1,11 +1,12 @@
 /**
  * Probes for the `google.datastore.v1.Datastore` rows of the fidelity matrix,
  * and for the refusals the README names in prose right after that table
- * (namespaces, GQL, projection queries, cursors, nested property masks).
+ * (namespaces, GQL, projection queries, nested property masks), and for
+ * query cursors.
  *
  * Driven by `@google-cloud/datastore` — the official library — except where it
  * exposes no way to send the field under test, which is the case for
- * `ReserveIds`, GQL, cursors, and property masks.
+ * `ReserveIds`, GQL, a cursor the library did not receive, and property masks.
  */
 
 import { strict as assert } from 'node:assert'
@@ -437,16 +438,43 @@ export const datastoreProbes = [
 
   {
     id: 'datastore.cursors',
-    unimplemented: async ({ raw, projectId, freshKind, expectUnimplemented }) => {
-      const kind = freshKind('cursors')
-      await expectUnimplemented(
-        () =>
-          unary(raw.datastore, 'RunQuery', {
-            project_id: projectId,
-            partition_id: { project_id: projectId },
-            query: { kind: [{ name: kind }], start_cursor: Buffer.from('a-cursor') },
-          }),
-        { names: /cursor/i },
+    served: async ({ datastore, raw, projectId, freshKind }) => {
+      const kind = await seedTasks(datastore, freshKind('cursors'))
+
+      // Page by two through the four tasks. Only the first page was cut short
+      // by its limit; the second ends the answer.
+      const pages = []
+      let cursor
+      for (;;) {
+        let query = datastore.createQuery(kind).order('priority').limit(2)
+        if (cursor) query = query.start(cursor)
+        const [rows, info] = await datastore.runQuery(query)
+        assert.ok(info.endCursor, 'every batch carries an end cursor')
+        pages.push([names(rows, datastore), info.moreResults])
+        if (info.moreResults === 'NO_MORE_RESULTS') break
+        assert.ok(pages.length < 5, `paging does not advance: ${JSON.stringify(pages)}`)
+        cursor = info.endCursor
+      }
+      assert.deepEqual(pages, [
+        [['a', 'b'], 'MORE_RESULTS_AFTER_LIMIT'],
+        [['c', 'd'], 'NO_MORE_RESULTS'],
+      ])
+
+      // An end cursor stops the answer just after the entity it was taken at.
+      const [, firstPage] = await datastore.runQuery(datastore.createQuery(kind).order('priority').limit(2))
+      const [upTo, upToInfo] = await datastore.runQuery(
+        datastore.createQuery(kind).order('priority').end(firstPage.endCursor),
+      )
+      assert.deepEqual(names(upTo, datastore), ['a', 'b'])
+      assert.equal(upToInfo.moreResults, 'MORE_RESULTS_AFTER_CURSOR')
+
+      // A cursor Fireup did not write is refused, not read as "start over".
+      await expectCode(GRPC.INVALID_ARGUMENT, () =>
+        unary(raw.datastore, 'RunQuery', {
+          project_id: projectId,
+          partition_id: { project_id: projectId },
+          query: { kind: [{ name: kind }], start_cursor: Buffer.from('a-cursor') },
+        }),
       )
     },
   },

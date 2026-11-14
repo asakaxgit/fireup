@@ -364,6 +364,26 @@ await check('a query orders by __key__ descending', async () => {
   }
 }, { served: ['datastore.RunQuery'] })
 
+await check('a limited query reports an end cursor and more results after the limit', async () => {
+  const [, info] = await datastore.runQuery(datastore.createQuery(filterKind).order('priority').limit(2))
+  if (!info?.endCursor) {
+    throw new Error(`no endCursor: ${JSON.stringify(info)}`)
+  }
+  if (info.moreResults !== 'MORE_RESULTS_AFTER_LIMIT') {
+    throw new Error(`moreResults is ${info.moreResults}, wanted MORE_RESULTS_AFTER_LIMIT`)
+  }
+}, { served: ['datastore.cursors'] })
+
+await check('a query resumes from the end cursor of the previous page', async () => {
+  const page = datastore.createQuery(filterKind).order('priority').limit(2)
+  const [first, info] = await datastore.runQuery(page)
+  expectNames(first, ['a', 'b'], 'first page')
+  const [rest] = await datastore.runQuery(
+    datastore.createQuery(filterKind).order('priority').start(info.endCursor),
+  )
+  expectNames(rest, ['c'], 'second page')
+}, { served: ['datastore.cursors'] })
+
 await check('delete removes the entity', async () => {
   await datastore.delete(key)
   const [afterDelete] = await datastore.get(key)
