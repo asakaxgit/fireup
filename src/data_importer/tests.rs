@@ -1560,6 +1560,16 @@ mod connection_url_tests {
         assert!(error.to_string().contains("Unsupported PostgreSQL connection parameter"));
     }
 
+    /// Two spellings of one setting have no defined winner, so refuse them.
+    #[test]
+    fn test_rejects_both_spellings_of_one_parameter() {
+        for query in ["dbname=a&database=b", "user=a&username=b"] {
+            let url = format!("postgresql://u:p@localhost/db?{query}");
+            let error = parse_connection_url(&url, 5, 30).expect_err("must reject");
+            assert!(error.to_string().contains("are both set"), "{query}: {error}");
+        }
+    }
+
     /// The pool is built with NoTls, so a TLS request must fail loudly rather
     /// than connect in the clear.
     #[test]

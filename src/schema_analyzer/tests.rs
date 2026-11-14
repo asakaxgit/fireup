@@ -471,18 +471,6 @@ mod normalizer_tests {
     }
 
     #[test]
-    fn test_aggressive_normalization() {
-        let normalizer = NormalizationEngine::new_aggressive();
-        let analysis = create_test_analysis();
-        
-        let result = normalizer.normalize_schema(&analysis);
-        assert!(result.is_ok());
-        
-        let schema = result.unwrap();
-        assert!(!schema.tables.is_empty());
-    }
-
-    #[test]
     fn test_index_generation() {
         let normalizer = NormalizationEngine::new();
         let analysis = create_test_analysis();

@@ -98,7 +98,7 @@ cargo test --test integration_tests functional_tests::level4_tests
 cargo test --test integration_tests functional_tests:: -- --nocapture
 ```
 
-Postgres integration tests are separate; they require `FIREUP_TEST_POSTGRES_URL` (see `docs/INTEGRATION_TESTING.md`). Never point them at the Paperclip host database.
+Postgres integration tests are separate; they require `FIREUP_TEST_POSTGRES_URL` (see `docs/INTEGRATION_TESTING.md`). Never point them at a host application's database; list its role/database in `FIREUP_TEST_POSTGRES_DENY` to make the tests refuse it.
 
 ## Test Coverage
 

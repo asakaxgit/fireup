@@ -276,10 +276,10 @@ runs.
 **Postgres test database (November 2026):**
 - Integration tests require `FIREUP_TEST_POSTGRES_URL` or `TEST_DATABASE_URL` pointing at a **dedicated** fireup test database (preferred: Docker Compose on port **5433** via `docker-compose.yml`).
 - Tests **skip** when no URL is set; they do **not** fall back to host Postgres on 5432.
-- URLs using the Paperclip `paperclip` role or `paperclip` database are **rejected** (`tests/postgres_test_env.rs`).
+- URLs whose role or database is named in `FIREUP_TEST_POSTGRES_DENY` (comma-separated; set it per machine, e.g. in `~/.cargo/config.toml` `[env]`) are **rejected** (`tests/postgres_test_env.rs`).
 - Run `./scripts/run_integration_tests.sh` to start Compose Postgres and export the correct URL.
 - **No Docker socket access?** Run a throwaway cluster of your own — it touches neither the host
-  cluster nor the Paperclip role, since it has its own data directory, port, and superuser:
+  cluster nor its roles, since it has its own data directory, port, and superuser:
   ```bash
   export PATH=/usr/lib/postgresql/18/bin:$PATH
   PGDIR=$(mktemp -d); initdb -D "$PGDIR/data" -U fireup --auth=trust -E UTF8

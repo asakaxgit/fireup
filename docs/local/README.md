@@ -1158,8 +1158,9 @@ the same package exports, and reads the result back through the handwritten
 both halves.
 
 Never point `FIREUP_TEST_POSTGRES_URL` at a database or role you do not own; the
-shared guard in `tests/postgres_test_env.rs` refuses the host Paperclip role and
-database, and the tests skip rather than fall back when no URL is set.
+shared guard in `tests/postgres_test_env.rs` refuses any role or database named
+in `FIREUP_TEST_POSTGRES_DENY`, and the tests skip rather than fall back when no
+URL is set.
 
 The Rust tests can pass while the SDK test fails — the SDK picks its own RPCs
 (`.get()` goes to `BatchGetDocuments`, `.set()` goes to `Commit`, a query goes to
