@@ -1,6 +1,6 @@
 # Production-recorded fidelity oracle
 
-Board decision: SAK-300 (approve with constraints). Compliance rule:
+Board decision: approve with constraints (pull request #139). Compliance rule:
 [`.cursor/rules/firebase-gcp-compliance.mdc`](../../.cursor/rules/firebase-gcp-compliance.mdc).
 
 ## What it is
