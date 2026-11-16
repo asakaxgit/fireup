@@ -17,11 +17,21 @@ SDK-compatible means speaking the **published** API surface for official clients
 
 Where a contract is REST/JSON rather than protobuf there is no stub to generate; implement from the published reference and record *which* public sources were used in the ledger, since no pinned artefact stands as the evidence.
 
+## Recorded fidelity oracle (production sandbox)
+
+**Allowed:** running Fireup's fidelity scenarios through Google's open-source client SDKs against a dedicated sandbox project, to check that production does what a public doc states. Each recorded case cites the public doc and the sentence it asserts. Fixtures store verdicts on those assertions, never raw responses, tokens, or timings.
+
+**Forbidden:** recording a case with no public doc behind it; implementing behaviour because production showed it. When production diverges from the doc, or no doc covers the behaviour, mark it unsupported. Never use the Firebase Emulator Suite as an oracle. Record on demand or on a schedule only, never per PR; CI replays offline with no Google credentials.
+
+Board decision: approve with constraints (recorded fidelity oracle). Budget ceiling is $0 cash (Spark plan, no billing account). Credentials for the sandbox live only as Paperclip secrets for the recorder.
+
 ## No production key material
 
 Never generate, vendor, or ship signing keys, certificates, or API keys for a Google service, and never imitate production key material. Local token minting uses the unsigned form that open-source SDKs accept in emulator mode. Say so in the code, the CLI help, and the startup output: an unsigned token means anything that can reach the port can act as any principal.
 
 Local-only credential storage (e.g. passwords) must not be plaintext at rest, and must not be presented as a production-grade scheme if it is not one.
+
+This covers what Fireup builds, commits, and ships. Real credentials for the oracle sandbox are held only as Paperclip secrets for the recorder, and are never committed, logged, written to fixtures, or given to CI.
 
 ## License recordkeeping
 
@@ -37,5 +47,6 @@ Prefer Apache-2.0 / MIT public definitions. Generate stubs from public `.proto` 
 - [ ] Undocumented behaviors deferred / listed unsupported
 - [ ] No production key material added or imitated
 - [ ] Independent-implementation blurb preserved where relevant
+- [ ] Recorded-oracle cases cite a public doc; no raw production responses, tokens, or credentials committed
 
 Answer this checklist per phase in the table at the end of `docs/licenses/FIREBASE_GCP_LOCAL.md`, so the record is auditable after the PR is merged.
