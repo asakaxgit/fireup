@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "description": "Doc-cited cases for the production-recorded fidelity oracle. A case without a public doc URL and sentence is rejected by the recorder.",
+  "cases": [
+    {
+      "id": "firestore.create-then-get",
+      "surface": "firestore",
+      "docUrl": "https://firebase.google.com/docs/firestore/manage-data/add-data",
+      "docSentence": "Using set(), you can create or overwrite a single document.",
+      "scenario": "firestoreCreateThenGet",
+      "assertions": [
+        { "id": "writeOk", "kind": "boolean" },
+        { "id": "readExists", "kind": "boolean" },
+        { "id": "fieldMatches", "kind": "boolean" }
+      ]
+    },
+    {
+      "id": "firestore.get-missing",
+      "surface": "firestore",
+      "docUrl": "https://firebase.google.com/docs/firestore/query-data/get-data",
+      "docSentence": "Note: If there is no document at the location referenced by docRef, the resulting document will be empty, and calling exists on it will return false.",
+      "scenario": "firestoreGetMissing",
+      "assertions": [
+        { "id": "exists", "kind": "boolean" }
+      ]
+    },
+    {
+      "id": "datastore.insert-then-lookup",
+      "surface": "datastore",
+      "docUrl": "https://cloud.google.com/datastore/docs/concepts/entities",
+      "docSentence": "Datastore Mode supports two kinds of entity operations: inserting a new entity and updating an existing one.",
+      "scenario": "datastoreInsertThenLookup",
+      "assertions": [
+        { "id": "writeOk", "kind": "boolean" },
+        { "id": "lookupFound", "kind": "boolean" },
+        { "id": "propertyMatches", "kind": "boolean" }
+      ]
+    },
+    {
+      "id": "auth.signUp-then-signIn",
+      "surface": "auth",
+      "docUrl": "https://firebase.google.com/docs/reference/rest/auth#section-sign-in-email-password",
+      "docSentence": "You can sign in a user with an email and password by issuing an HTTP POST request to the Auth signInWithPassword endpoint.",
+      "scenario": "authSignUpThenSignIn",
+      "assertions": [
+        { "id": "signUpHttpStatus", "kind": "number" },
+        { "id": "signInHttpStatus", "kind": "number" },
+        { "id": "signInReturnedLocalId", "kind": "boolean" },
+        { "id": "signInReturnedIdToken", "kind": "boolean" }
+      ]
+    },
+    {
+      "id": "auth.signIn-wrong-password",
+      "surface": "auth",
+      "docUrl": "https://firebase.google.com/docs/reference/rest/auth#section-sign-in-email-password",
+      "docSentence": "Common error codes: INVALID_PASSWORD: The password is invalid or the user does not have a password.",
+      "scenario": "authSignInWrongPassword",
+      "assertions": [
+        { "id": "httpStatus", "kind": "number" },
+        { "id": "errorMessageContainsInvalidPassword", "kind": "boolean" }
+      ]
+    }
+  ]
+}

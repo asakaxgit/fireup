@@ -270,6 +270,7 @@ jobs:
             tests/local-smoke/package-lock.json
             tests/local-smoke-datastore/package-lock.json
             tests/conformance/node/package-lock.json
+            tests/recorded-oracle/package-lock.json
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -291,13 +292,14 @@ jobs:
           npm ci --no-audit --no-fund --prefix tests/local-smoke
           npm ci --no-audit --no-fund --prefix tests/local-smoke-datastore
           npm ci --no-audit --no-fund --prefix tests/conformance/node
+          npm ci --no-audit --no-fund --prefix tests/recorded-oracle
 
       # The comparison rule and the baseline's coverage of the suite runs; the
       # matrix-coverage rule with the smoke suites' row tags and
       # matrix-gaps.json; and the triage role's clustering rule, which reads the
       # same results files. All before the minutes-long part.
       - name: Gate rule
-        run: node --test tests/smoke-gate/compare.test.mjs tests/smoke-gate/matrix-coverage.test.mjs tests/smoke-gate/cluster.test.mjs
+        run: node --test tests/smoke-gate/compare.test.mjs tests/smoke-gate/matrix-coverage.test.mjs tests/smoke-gate/cluster.test.mjs tests/recorded-oracle/catalog.test.mjs tests/recorded-oracle/schema.test.mjs
 
       - name: Fidelity regression gate
         env:

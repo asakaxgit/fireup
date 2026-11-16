@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "caseId": "firestore.get-missing",
+  "surface": "firestore",
+  "docUrl": "https://firebase.google.com/docs/firestore/query-data/get-data",
+  "docSentence": "Note: If there is no document at the location referenced by docRef, the resulting document will be empty, and calling exists on it will return false.",
+  "recordedAt": "2026-11-16",
+  "sdkVersions": {
+    "@google-cloud/firestore": "^7.11.0",
+    "@google-cloud/datastore": "^9.2.1",
+    "firebase": "^11.0.0",
+    "firebase-admin": "^13.0.0"
+  },
+  "verdict": "pass",
+  "productionVerified": false,
+  "assertions": {
+    "exists": false
+  }
+}

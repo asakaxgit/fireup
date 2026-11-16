@@ -74,3 +74,9 @@ done
 
 echo
 node "$repo_root/tests/smoke-gate/gate.mjs" "$results_dir"
+
+# Doc-cited production-recorded oracle: offline replay only. Never talks to
+# Google; CI holds no sandbox credentials. See docs/local/RECORDED_ORACLE.md.
+echo
+echo "=== recorded-oracle replay"
+"$repo_root/scripts/recorded-oracle-replay.sh"

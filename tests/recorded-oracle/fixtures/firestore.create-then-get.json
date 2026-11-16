@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "caseId": "firestore.create-then-get",
+  "surface": "firestore",
+  "docUrl": "https://firebase.google.com/docs/firestore/manage-data/add-data",
+  "docSentence": "Using set(), you can create or overwrite a single document.",
+  "recordedAt": "2026-11-16",
+  "sdkVersions": {
+    "@google-cloud/firestore": "^7.11.0",
+    "@google-cloud/datastore": "^9.2.1",
+    "firebase": "^11.0.0",
+    "firebase-admin": "^13.0.0"
+  },
+  "verdict": "pass",
+  "productionVerified": false,
+  "assertions": {
+    "writeOk": true,
+    "readExists": true,
+    "fieldMatches": true
+  }
+}
