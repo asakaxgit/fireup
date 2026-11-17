@@ -1,0 +1,18 @@
+{
+  "name": "fireup-recorded-oracle",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Doc-cited fidelity oracle: record verdicts against a Spark sandbox; replay offline against fireup local.",
+  "scripts": {
+    "record": "node record.mjs",
+    "replay": "node replay.mjs",
+    "test": "node --test catalog.test.mjs schema.test.mjs"
+  },
+  "dependencies": {
+    "@google-cloud/datastore": "^9.2.1",
+    "@google-cloud/firestore": "^7.11.0",
+    "firebase": "^11.0.0",
+    "firebase-admin": "^13.0.0"
+  }
+}

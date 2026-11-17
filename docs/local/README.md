@@ -1190,7 +1190,9 @@ conformance runner (`tests/conformance/node/runner.mjs`, as `conformance/<store>
 against the in-memory **and** PostgreSQL stores, and compares what passed with
 [`tests/smoke-gate/baseline.json`](../../tests/smoke-gate/baseline.json): the
 names of the checks that pass on `main`, per suite run (`firestore/memory`,
-`auth/postgres`, …).
+`auth/postgres`, …). After the baseline comparison it also runs the
+**recorded fidelity oracle** offline replay
+(`scripts/recorded-oracle-replay.sh`) — see [`RECORDED_ORACLE.md`](RECORDED_ORACLE.md).
 
 - A check in the baseline that now fails, or no longer runs, fails the job. The
   log names each one as `REGRESSED <suite>: <check> (<reason>)`, and each is an
