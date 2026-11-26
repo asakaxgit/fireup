@@ -6,11 +6,13 @@
 # Refuses emulator host variables — the Firebase Emulator Suite is never an oracle.
 #
 # Required env:
-#   GOOGLE_APPLICATION_CREDENTIALS  path to the service-account JSON (Paperclip secret)
+#   GOOGLE_APPLICATION_CREDENTIALS  path to a service-account JSON (Paperclip secret)
 #   FIREUP_ORACLE_WEB_API_KEY       Firebase web API key (Paperclip secret)
 # Optional:
-#   FIREUP_ORACLE_FIRESTORE_PROJECT  default fireup-oracle-firestore
-#   FIREUP_ORACLE_DATASTORE_PROJECT  default fireup-oracle-datastore
+#   FIREUP_ORACLE_FIRESTORE_PROJECT       default fireup-oracle-firestore
+#   FIREUP_ORACLE_DATASTORE_PROJECT       default fireup-oracle
+#   FIREUP_ORACLE_FIRESTORE_CREDENTIALS   Firestore/Auth SA path (falls back to GOOGLE_APPLICATION_CREDENTIALS)
+#   FIREUP_ORACLE_DATASTORE_CREDENTIALS   Datastore SA path (falls back to GOOGLE_APPLICATION_CREDENTIALS)
 
 set -euo pipefail
 

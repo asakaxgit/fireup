@@ -43,7 +43,7 @@ const requireProductionTarget = () => {
     throw new Error('FIREUP_ORACLE_WEB_API_KEY is required for Auth cases (Paperclip secret).')
   }
   const firestoreProject = process.env.FIREUP_ORACLE_FIRESTORE_PROJECT || 'fireup-oracle-firestore'
-  const datastoreProject = process.env.FIREUP_ORACLE_DATASTORE_PROJECT || 'fireup-oracle-datastore'
+  const datastoreProject = process.env.FIREUP_ORACLE_DATASTORE_PROJECT || 'fireup-oracle'
   return {
     firestoreProject,
     datastoreProject,

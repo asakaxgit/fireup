@@ -15,15 +15,16 @@ const pkg = () => JSON.parse(readFileSync(join(here, 'package.json'), 'utf8'))
 
 const syntheticId = (prefix) => `${prefix}-${randomBytes(6).toString('hex')}`
 
-const readCredentials = () => {
-  const path = process.env.GOOGLE_APPLICATION_CREDENTIALS
+const readCredentials = (envName = 'GOOGLE_APPLICATION_CREDENTIALS') => {
+  const path = process.env[envName] || process.env.GOOGLE_APPLICATION_CREDENTIALS
   if (!path) return undefined
   return JSON.parse(readFileSync(path, 'utf8'))
 }
 
 const firestoreClient = async (projectId) => {
   const { Firestore } = await import('@google-cloud/firestore')
-  const credentials = readCredentials()
+  // Prefer the Firestore SA when the board bound separate project secrets.
+  const credentials = readCredentials('FIREUP_ORACLE_FIRESTORE_CREDENTIALS')
   return new Firestore({
     projectId,
     ...(credentials ? { credentials } : {}),
@@ -32,7 +33,7 @@ const firestoreClient = async (projectId) => {
 
 const datastoreClient = async (projectId) => {
   const { Datastore } = await import('@google-cloud/datastore')
-  const credentials = readCredentials()
+  const credentials = readCredentials('FIREUP_ORACLE_DATASTORE_CREDENTIALS')
   return new Datastore({
     projectId,
     ...(credentials ? { credentials } : {}),

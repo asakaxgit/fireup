@@ -29,7 +29,7 @@ The Firebase Emulator Suite is **never** an oracle.
 | Project id | Mode |
 |---|---|
 | `fireup-oracle-firestore` | Firestore Native + Auth (Spark, no billing) |
-| `fireup-oracle-datastore` | Datastore mode (Spark, no billing) |
+| `fireup-oracle` (env override; docs historically said `fireup-oracle-datastore`) | Datastore mode (Spark, no billing) |
 
 Service account roles: `roles/datastore.user` + `roles/firebaseauth.admin`.
 Web API key restricted to Identity Toolkit + Secure Token APIs.
@@ -38,8 +38,11 @@ Web API key restricted to Identity Toolkit + Secure Token APIs.
 
 ```bash
 # Secrets arrive via Paperclip — never paste into comments or the repo.
-export GOOGLE_APPLICATION_CREDENTIALS="$PAPERCLIP_ORACLE_SA_PATH"
+export GOOGLE_APPLICATION_CREDENTIALS="$PAPERCLIP_ORACLE_FIRESTORE_SA_PATH"
+export FIREUP_ORACLE_FIRESTORE_CREDENTIALS="$PAPERCLIP_ORACLE_FIRESTORE_SA_PATH"
+export FIREUP_ORACLE_DATASTORE_CREDENTIALS="$PAPERCLIP_ORACLE_DATASTORE_SA_PATH"
 export FIREUP_ORACLE_WEB_API_KEY="$PAPERCLIP_ORACLE_WEB_API_KEY"
+export FIREUP_ORACLE_DATASTORE_PROJECT=fireup-oracle
 scripts/recorded-oracle-record.sh
 ```
 
