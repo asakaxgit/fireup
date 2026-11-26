@@ -79,6 +79,7 @@ implementation is the only reason these are known; each has a follow-up issue.
 | What Fireup did | What the emulator does | Why it matters | Status |
 |---|---|---|---|
 | Accepted an `order_by` with a term *after* `__name__`, including a duplicate `__name__` | `INVALID_ARGUMENT: order by clause cannot contain more fields after the key` | A query that passes locally fails in production. The official Node SDK emits this shape for `.where(…, '!=', …).orderBy('__name__')` | **fixed** — same status, same message |
+| Accepted a **duplicate non-key** `order_by` field (`[v, v]`) | `INVALID_ARGUMENT: order by clause cannot contain duplicate fields v` | Same class of local-pass / production-fail as the key-terminal rule | **fixed** — same status, message names the field |
 | Served a **descending `__name__` scan**, with a probe in `matrix.json` *asserting* it works | `FAILED_PRECONDITION: Firestore does not support descending key scans` | A matrix row claims parity that does not exist — the worst kind of row to have | **fixed** — and the probe now asserts the refusal |
 | `accounts:batchCreate` answered `405 "INVALID_ARGUMENT : accounts:batchCreate takes POST, not POST"` | `200` | A self-contradictory refusal, from a catch-all arm that fired regardless of method. The matrix promises refusals that name the gap. **Fixed by PR #82** — now `501 OPERATION_NOT_ALLOWED : batch account import (create accounts one at a time) is not served by fireup local` | **fixed** |
 | `projects:createSessionCookie` answered `404 PROJECT_NOT_FOUND … not "fireup-local:createSessionCookie"` | `400 INVALID_ID_TOKEN` | The `{project}:customMethod` colon syntax was parsed into the project id, so the row refused with the wrong error. **Fixed by PR #82** — now `501 OPERATION_NOT_ALLOWED : session cookies is not served by fireup local` | **fixed** |
@@ -253,6 +254,7 @@ GCP somewhere; what matters is whether the difference is written down.
 | Production limit enforcement (e.g. transaction size) | no | no `[D]` — "may allow transactions that would be rejected as too large" | yes |
 | `__name__` is appended to every `orderBy`, in the last term's direction | served | yes `[M]` | yes |
 | An inequality filter appends its field to `orderBy` before `__name__` | served — bare `where(v,'>',0)` returns `v` order (was name order until #143) | yes `[M]` — same normalisation | yes — public StructuredQuery `orderBy` rules |
+| A duplicate non-key `order_by` field is refused | served — `INVALID_ARGUMENT` naming the field | yes `[M]` — same message shape | yes — production refuses duplicates |
 | A document without the ordered field is absent from the results | served | yes `[M]` | yes |
 | `ListDocuments` ordering and paging | served | yes `[M]` | yes |
 | Every write in a `Commit` applies or none does | served | yes `[M]` | yes |

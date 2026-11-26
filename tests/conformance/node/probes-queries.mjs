@@ -772,4 +772,49 @@ export const queryProbes = [
       assert.deepEqual(idSet(await docs.where('v', '!=', null).get()), ['a', 'b'])
     },
   },
+
+  {
+    id: 'semantics.no-duplicate-order-fields',
+    served: async ({ raw, projectId, freshCollection }) => {
+      const docs = freshCollection('duporder')
+      await Promise.all([docs.doc('a').set({ v: 1 }), docs.doc('b').set({ v: 2 })])
+
+      const asc = (field) => ({ field: { field_path: field }, direction: 'ASCENDING' })
+      const desc = (field) => ({ field: { field_path: field }, direction: 'DESCENDING' })
+      const run = (order_by) =>
+        serverStream(raw.firestore, 'RunQuery', {
+          parent: documentsRoot(projectId),
+          structured_query: { from: [{ collection_id: docs.id }], order_by },
+        })
+
+      for (const [order_by, field] of [
+        [[asc('v'), asc('v')], 'v'],
+        [[asc('v'), desc('v')], 'v'],
+        [[asc('v'), asc('v'), asc('__name__')], 'v'],
+        [[asc('address.city'), asc('address.city')], 'address.city'],
+      ]) {
+        const error = await expectCode(GRPC.INVALID_ARGUMENT, () => run(order_by))
+        assert.match(
+          error.message,
+          new RegExp(`duplicate fields ${field.replace('.', '\\.')}`),
+          `the refusal must name ${field}, got: ${error.message}`,
+        )
+      }
+
+      // Neighbours that must stay served: a single field, two different
+      // fields, and an inequality beside one matching order term (the
+      // appended inequality does not double the explicit term).
+      assert.deepEqual(
+        (await run([asc('v')])).filter((m) => m.document).length,
+        2,
+        'a single order field is ordinary',
+      )
+      assert.deepEqual(
+        (await run([asc('v'), asc('__name__')])).filter((m) => m.document).length,
+        2,
+        'field then key is the ordinary normalised shape',
+      )
+      assert.deepEqual(idSet(await docs.where('v', '>', 0).orderBy('v').get()), ['a', 'b'])
+    },
+  },
 ]

@@ -252,6 +252,11 @@ wrong. Fireup implements the published Firestore behaviour for each:
   on an inequality field *after* an explicit one, so
   `.where('v', '!=', null).orderBy('__name__')` builds it. Drop the explicit
   `orderBy('__name__')` — the SDK adds the key itself.
+- **A duplicate non-key `order_by` field** is `INVALID_ARGUMENT` — *order by
+  clause cannot contain duplicate fields \<field\>*. A lone `orderBy('v')`
+  beside a `v` inequality is still legal: the appended inequality term does not
+  count as a second occurrence of the explicit field. Duplicate `__name__` is
+  covered by the key-terminal rule above.
 - **A lone descending key scan** — an `order_by` of nothing but `__name__`
   descending — is `FAILED_PRECONDITION`: *Firestore does not support descending
   key scans*. A descending `__name__` *after* an explicit term is served, which
