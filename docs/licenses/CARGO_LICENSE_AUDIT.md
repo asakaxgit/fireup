@@ -196,14 +196,23 @@ both trees separately and after they meet.
 cannot check this itself — the setting is its own input — and narrowing it makes
 CI *greener*, so no run would ever report the regression.
 
-### Accepted vulnerabilities: none
+### Accepted advisories: one (unmaintained)
 
-`[advisories] ignore` is empty. Every advisory the RustSec database reports
-fails the build.
+`[advisories] ignore` holds a single deliberate entry. Every other advisory the
+RustSec database reports fails the build.
 
-It was not always empty. PR #77 accepted one entry with a review date of
-2027-02-06: `RUSTSEC-2026-0258`, `h2` 0.3.27 accepting and queueing unbounded
-empty DATA frames (low severity), reached as
+| Field | Value |
+|---|---|
+| Advisory | `RUSTSEC-2026-0543` — `chrono` is unmaintained (informational) |
+| Crate | `chrono` 0.4.45 (all versions affected; `patched = []`) |
+| Path | `fireup` (direct) and `fireup -> tokio-postgres (with-chrono-0_4) -> postgres-types -> chrono` |
+| Why not `cargo update` | No patched release; replacements are jiff / time |
+| Fireup exposure | Timestamp encode/decode in the local emulator and migrator — not crypto/TLS |
+| Reconsider by | 2027-02-27 |
+| Owning fix | Follow-up PR: migrate first-party code + `tokio-postgres` feature to jiff, then delete this entry in the same change |
+
+It was empty after PR #81. PR #77 had accepted `RUSTSEC-2026-0258` (`h2` 0.3.27
+unbounded empty DATA frames, low severity), reached as
 `fireup -> tonic 0.11 -> axum 0.6 -> hyper 0.14 -> h2 0.3.27`. The fix needed
 `h2 >= 0.4.16`, so hyper 1.x, so tonic >= 0.12 and prost 0.13 — and `Cargo.toml`
 pinned tonic 0.11 on purpose, to keep one prost version across the data plane and
@@ -213,9 +222,11 @@ the same change.
 
 That pairing was not a matter of remembering. cargo-deny has no expiry mechanism
 for `ignore` entries, so the review date was a commitment rather than a gate —
-but `-D advisory-not-detected` promotes "this ignored advisory no longer matches
-anything" from a warning to an error, so the migration could not land while the
-entry was still there. An accepted vulnerability here cannot outlive its fix.
+but `-D advisory-not-detected` / `unused-ignored-advisory = "deny"` promotes
+"this ignored advisory no longer matches anything" from a warning to an error,
+so the migration could not land while the entry was still there. An accepted
+advisory here cannot outlive its fix; the same rule applies to the chrono entry
+above once the jiff migration PR lands.
 
 ### `cargo audit` is not used
 

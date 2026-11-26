@@ -102,8 +102,9 @@ yanked = "deny"
 # enforcement now lives in the same file as the policy it enforces, and cannot
 # be dropped by editing a workflow.
 #
-# On the day it was added this changed nothing: `ignore` is empty below, so
-# there is no entry to go stale. It is here for the next entry.
+# On the day it was added this changed nothing: `ignore` was empty, so there
+# was no entry to go stale. It is here for every later entry — today that is
+# RUSTSEC-2026-0543 below.
 unused-ignored-advisory = "deny"
 # An advisory database older than a week is an error rather than a silent
 # fallback. Without this line, cargo-deny has no age limit at all: given
@@ -192,10 +193,10 @@ unmaintained = "all"
 # archived repository.
 unsound = "all"
 
-# No accepted advisories. Every advisory the database reports fails the build.
+# Accepted advisories. Everything else the database reports fails the build.
 #
-# There was one entry here: RUSTSEC-2026-0258 ("h2 unbounded empty DATA frames"),
-# reached through the tonic 0.11 pin as
+# There was one earlier entry here: RUSTSEC-2026-0258 ("h2 unbounded empty DATA
+# frames"), reached through the tonic 0.11 pin as
 # `fireup -> tonic 0.11 -> axum 0.6 -> hyper 0.14 -> h2 0.3.27`. The fix needed
 # h2 >= 0.4.16, so hyper 1.x, so a tonic/prost major bump; PR #81 did that
 # migration (tonic 0.13 / prost 0.13, h2 0.4.20) and removed the entry with it.
@@ -209,7 +210,7 @@ unsound = "all"
 # Dropping `serde_yaml` instead is the root fix, needs no entry here, and is
 # green in both trees.
 #
-# Adding an entry back is a deliberate act, not a way to get CI green. Anything
+# Adding an entry is a deliberate act, not a way to get CI green. Anything
 # listed here needs, in a comment above it: the dependency path, why it cannot be
 # fixed by `cargo update`, what makes the exposure acceptable for Fireup
 # specifically, a reconsider date, and a ticket that owns the real fix. Note that
@@ -217,8 +218,43 @@ unsound = "all"
 # all, so a reconsider date is a promise rather than a gate — what *is* machine
 # enforced is that `unused-ignored-advisory = "deny"` above fails the check as
 # soon as an entry here stops matching a real advisory, which is why this list
-# could not be left stale once the migration landed.
-ignore = []
+# could not be left stale once the h2 migration landed.
+ignore = [
+  # RUSTSEC-2026-0543 — chrono "chrono is unmaintained" (informational).
+  #
+  # Path: fireup (direct) and
+  # fireup -> tokio-postgres (with-chrono-0_4) -> postgres-types -> chrono 0.4.45.
+  #
+  # Not fixable by `cargo update`. The advisory marks every chrono version
+  # unmaintained (`patched = []`); the recommended replacements are jiff or
+  # time. tokio-postgres already exposes `with-jiff-0_2`, but Fireup's first-
+  # party code uses chrono types end-to-end (importer, LevelDB parser, local
+  # auth token timestamps, seed/store/value_json, error stamps), so swapping
+  # the feature flag alone leaves the direct dependency and the call sites.
+  # That migration is a follow-up PR of its own; the PR that lands jiff must
+  # delete this entry in the same change (enforced by unused-ignored-advisory).
+  #
+  # Accepted because: this is an unmaintained-crate advisory, not a CVE. Fireup
+  # uses chrono for timestamp encode/decode in the local emulator and the
+  # migrator — not for cryptography, TLS, or untrusted-input parsing beyond
+  # RFC3339 timestamps already bounded elsewhere. Leaving the gate red blocks
+  # unrelated work (including production-verified oracle fixtures) until the
+  # full jiff migration lands.
+  #
+  # Reconsider by 2027-02-27 (three months). If the jiff migration has not
+  # landed by then, the acceptance needs re-arguing in a new PR, not a silent
+  # renewal.
+  #
+  # Be clear about what is and is not enforced here. cargo-deny has no expiry
+  # feature for `ignore` entries, and an ignored advisory prints nothing at all,
+  # so the date below is a promise to ourselves, not a gate. What *is* machine
+  # enforced: any advisory other than this one fails the build, and
+  # `unused-ignored-advisory = "deny"` fails the build once this entry is
+  # obsolete. The CI job greps these reason strings into its log so the
+  # exception is at least visible on every run rather than buried in a config
+  # file.
+  { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 via fireup + tokio-postgres/postgres-types; unmaintained not CVE; local/migrator timestamps only. Real fix is jiff migration PR (delete this entry there). Reconsider by 2027-02-27." },
+]
 
 [licenses]
 # This list is the machine-enforced form of the decision already recorded in
