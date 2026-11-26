@@ -4,7 +4,7 @@
   "surface": "datastore",
   "docUrl": "https://cloud.google.com/datastore/docs/concepts/entities",
   "docSentence": "Datastore Mode supports two kinds of entity operations: inserting a new entity and updating an existing one.",
-  "recordedAt": "2026-11-16",
+  "recordedAt": "2026-11-26",
   "sdkVersions": {
     "@google-cloud/firestore": "^7.11.0",
     "@google-cloud/datastore": "^9.2.1",
@@ -12,7 +12,7 @@
     "firebase-admin": "^13.0.0"
   },
   "verdict": "pass",
-  "productionVerified": false,
+  "productionVerified": true,
   "assertions": {
     "writeOk": true,
     "lookupFound": true,

@@ -4,7 +4,7 @@
   "surface": "auth",
   "docUrl": "https://firebase.google.com/docs/reference/rest/auth#section-sign-in-email-password",
   "docSentence": "You can sign in a user with an email and password by issuing an HTTP POST request to the Auth signInWithPassword endpoint.",
-  "recordedAt": "2026-11-16",
+  "recordedAt": "2026-11-26",
   "sdkVersions": {
     "@google-cloud/firestore": "^7.11.0",
     "@google-cloud/datastore": "^9.2.1",
@@ -12,7 +12,7 @@
     "firebase-admin": "^13.0.0"
   },
   "verdict": "pass",
-  "productionVerified": false,
+  "productionVerified": true,
   "assertions": {
     "signUpHttpStatus": 200,
     "signInHttpStatus": 200,
