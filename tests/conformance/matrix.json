@@ -704,7 +704,7 @@
       "status": "served",
       "driver": "node-sdk",
       "python": false,
-      "note": "PR follow-on to #143. Refused with INVALID_ARGUMENT and production's message shape (`order by clause cannot contain duplicate fields <field>`). Same class as semantics.nothing-follows-the-key-in-an-order: a local pass that dies in production. Checked on the wire order only — an inequality that would be appended does not make a single explicit term a duplicate. Duplicate `__name__` stays under the key-terminal rule."
+      "note": "#144. Refused with INVALID_ARGUMENT and production's message shape (`order by clause cannot contain duplicate fields <field>`). Same class as semantics.nothing-follows-the-key-in-an-order: a local pass that dies in production. Checked on the wire order only — an inequality that would be appended does not make a single explicit term a duplicate. Duplicate `__name__` stays under the key-terminal rule."
     },
     {
       "id": "transaction.atomic-commit",
