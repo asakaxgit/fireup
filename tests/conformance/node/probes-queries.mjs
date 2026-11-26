@@ -676,6 +676,43 @@ export const queryProbes = [
   },
 
   {
+    id: 'semantics.inequality-appends-to-order',
+    served: async ({ freshCollection }) => {
+      // Name order and v order deliberately disagree so a silent __name__-only
+      // sort fails this row (SAK-226).
+      const docs = freshCollection('ineqorder')
+      await Promise.all([
+        docs.doc('a').set({ v: 3, w: 0 }),
+        docs.doc('b').set({ v: 1, w: 0 }),
+        docs.doc('c').set({ v: 2, w: 0 }),
+      ])
+
+      // No explicit orderBy: the SDK and the server both normalise to
+      // orderBy('v').then(__name__). Do not pin with orderBy('__name__') —
+      // that shape is refused beside an inequality.
+      assert.deepEqual(
+        ids(await docs.where('v', '>', 0).get()),
+        ['b', 'c', 'a'],
+        'an unordered inequality must sort by the filtered field, not by name',
+      )
+
+      // Explicit order on a non-inequality field: the inequality field is
+      // appended after it. With w tied, result order is still v ascending.
+      assert.deepEqual(
+        ids(await docs.where('v', '>', 0).orderBy('w').get()),
+        ['b', 'c', 'a'],
+        'appended inequality order still decides ties on an earlier explicit term',
+      )
+
+      assert.deepEqual(
+        ids(await docs.get()),
+        ['a', 'b', 'c'],
+        'without a filter the default order remains __name__',
+      )
+    },
+  },
+
+  {
     id: 'semantics.nothing-follows-the-key-in-an-order',
     served: async ({ raw, projectId, freshCollection }) => {
       const docs = freshCollection('nameterminal')

@@ -232,9 +232,18 @@ wrong. Fireup implements the published Firestore behaviour for each:
 - **`== NaN` never matches.** `IS_NAN` is the only way to select it. In sort
   order, `NaN` comes before every other number.
 - **Integers and doubles compare numerically**, so `31` and `31.0` are one value.
+- **An inequality filter appends its field to `orderBy`** before `__name__`, in
+  the direction of the last explicit term (ascending when there is none). A
+  bare `where('v', '>', 0)` therefore returns documents in `v` order, not name
+  order — the public StructuredQuery normalisation rule, not a Fireup
+  convenience. Missing inequality fields that are already named in `orderBy`
+  are not duplicated; several unordered inequality fields are appended in
+  lexicographical field-path order.
 - **`__name__` is appended to every `orderBy`** in the direction of the last
   explicit term, so results have a total order instead of depending on the
-  order documents came out of the store.
+  order documents came out of the store. Cursors are positions in this
+  *effective* order (explicit terms, then appended inequality fields, then
+  `__name__`).
 - **An `order_by` term after `__name__`** is `INVALID_ARGUMENT` — *order by
   clause cannot contain more fields after the key*. The key is the tie-breaker
   that makes the order total, so nothing after it can change a result, and

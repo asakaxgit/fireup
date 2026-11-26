@@ -256,6 +256,15 @@ pub enum Path {
     Field(FieldPath),
 }
 
+/// Lexicographic key used when appending unordered inequality fields to
+/// `orderBy`, matching the public StructuredQuery normalisation rule.
+fn path_order_key(path: &Path) -> String {
+    match path {
+        Path::Name => DOCUMENT_NAME_FIELD.to_string(),
+        Path::Field(field) => field.segments().join("."),
+    }
+}
+
 impl Path {
     /// Parse a `FieldReference`.
     fn parse(reference: &Option<FieldReference>) -> Result<Self, Status> {
@@ -1009,14 +1018,50 @@ impl Query {
             ));
         }
 
-        // Firestore appends `__name__` in the direction of the last explicit
-        // order (ascending when there is none), so that every query has a
-        // total order and equal documents do not come back in a random order.
+        // Standard-edition Firestore normalises `orderBy` before running the
+        // query (public StructuredQuery reference): every inequality-filtered
+        // field not already ordered is appended in lexicographical field-path
+        // order, then `__name__` if missing. Appended terms take the direction
+        // of the last *explicit* order (ascending when there is none).
+        //
+        // Using that effective order for sorting — not only for the
+        // nothing-after-the-key refusal above — is what makes
+        // `where('v', '>', 0)` with an empty `order_by` return documents in
+        // `v` order rather than name order. Cursors are positions in this
+        // same effective order (a document-snapshot cursor from the SDK
+        // already carries one value per normalised term).
+        let last_descending = order.last().is_some_and(|key| key.descending);
+        if let Some(filter) = filter.as_ref() {
+            let mut inequality = Vec::new();
+            filter.inequality_paths(&mut inequality);
+            let mut pending: Vec<Path> = Vec::new();
+            for path in inequality {
+                if matches!(path, Path::Name) {
+                    continue;
+                }
+                if order.iter().any(|key| key.path == path) {
+                    continue;
+                }
+                if pending.iter().any(|seen| seen == &path) {
+                    continue;
+                }
+                pending.push(path);
+            }
+            pending.sort_by(|left, right| {
+                path_order_key(left).cmp(&path_order_key(right))
+            });
+            for path in pending {
+                order.push(SortKey {
+                    path,
+                    descending: last_descending,
+                });
+            }
+        }
+
         if !order.iter().any(|key| key.path == Path::Name) {
-            let descending = order.last().is_some_and(|key| key.descending);
             order.push(SortKey {
                 path: Path::Name,
-                descending,
+                descending: last_descending,
             });
         }
 
@@ -1455,6 +1500,54 @@ mod tests {
         // age descending, then name descending — the direction Firestore gives
         // the implicit `__name__` tiebreak.
         assert_eq!(ids(&found), ["carol", "bob", "alice"]);
+    }
+
+    /// An inequality-filtered query is ordered by the filtered field even when
+    /// the client sent no `order_by` (SAK-226). Name order and `v` order are
+    /// deliberately different so a silent `__name__`-only sort would fail.
+    #[test]
+    fn an_inequality_orders_by_the_filtered_field_when_order_by_is_empty() {
+        let docs = vec![
+            document("a", vec![("v", integer_value(3)), ("w", integer_value(0))]),
+            document("b", vec![("v", integer_value(1)), ("w", integer_value(0))]),
+            document("c", vec![("v", integer_value(2)), ("w", integer_value(0))]),
+        ];
+
+        let by_inequality = query(|q| {
+            q.r#where = field_filter("v", ProtoFieldOperator::GreaterThan, integer_value(0));
+        })
+        .evaluate(docs.clone());
+        assert_eq!(
+            ids(&by_inequality),
+            ["b", "c", "a"],
+            "v > 0 with an empty order_by must sort by v, not by __name__"
+        );
+
+        // Explicit order on a non-inequality field: the inequality field is
+        // appended after it (public StructuredQuery normalisation). With `w`
+        // tied, the result order is still `v` ascending.
+        let with_other_order = query(|q| {
+            q.r#where = field_filter("v", ProtoFieldOperator::GreaterThan, integer_value(0));
+            q.order_by = vec![Order {
+                field: Some(FieldReference {
+                    field_path: "w".to_string(),
+                }),
+                direction: Direction::Ascending as i32,
+            }];
+        })
+        .evaluate(docs.clone());
+        assert_eq!(
+            ids(&with_other_order),
+            ["b", "c", "a"],
+            "v > 0 order_by w (tied) still sorts by the appended inequality field"
+        );
+
+        let unfiltered = query(|_| {}).evaluate(docs);
+        assert_eq!(
+            ids(&unfiltered),
+            ["a", "b", "c"],
+            "without a filter the default order remains __name__"
+        );
     }
 
     #[test]
