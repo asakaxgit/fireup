@@ -343,7 +343,7 @@ Four checks, and what each one is for:
 
 | Check | Policy |
 |---|---|
-| **advisories** | RustSec vulnerabilities and yanked crates. Nothing is accepted: `[advisories] ignore` in `deny.toml` is empty, so every advisory fails the build. The one exception the repo ever carried, `RUSTSEC-2026-0258` in `h2 0.3.27`, was removed by the tonic 0.13 / prost 0.13 migration that fixed it. |
+| **advisories** | RustSec vulnerabilities and yanked crates. Every advisory fails the build unless it is listed in `[advisories] ignore` with a written reason. Today that list holds one deliberate exception: `RUSTSEC-2026-0543` (`chrono` unmaintained), accepted until a follow-up PR migrates first-party code and `tokio-postgres` to jiff and deletes the entry. The previous exception, `RUSTSEC-2026-0258` in `h2 0.3.27`, was removed by the tonic 0.13 / prost 0.13 migration that fixed it. |
 | **licences** | Permissive only — the enforced form of the audit in [`docs/licenses/CARGO_LICENSE_AUDIT.md`](docs/licenses/CARGO_LICENSE_AUDIT.md). A dependency carrying a copyleft-only licence fails the build. |
 | **bans** | Wildcard version requirements fail. Duplicate major versions only warn: the tree has eleven of them from transitive pins, none of Fireup's doing. |
 | **sources** | crates.io only. A git or unknown-registry dependency fails. |
