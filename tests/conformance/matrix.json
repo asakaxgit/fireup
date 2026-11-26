@@ -686,7 +686,7 @@
       "status": "served",
       "driver": "node-sdk",
       "python": false,
-      "note": "SAK-226 / SAK-453 P0. Public StructuredQuery orderBy normalisation: unordered inequality fields are appended (lexicographically), then __name__. A bare where(v,'>',0) must return v-order, not name-order. Written from the public REST StructuredQuery reference; checked with the open-source Node client."
+      "note": "#143. Public StructuredQuery orderBy normalisation: unordered inequality fields are appended (lexicographically), then __name__. A bare where(v,'>',0) must return v-order, not name-order. Written from the public REST StructuredQuery reference; checked with the open-source Node client."
     },
     {
       "id": "semantics.nothing-follows-the-key-in-an-order",

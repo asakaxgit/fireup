@@ -252,7 +252,7 @@ GCP somewhere; what matters is whether the difference is written down.
 | Composite index enforcement | no — a query that works here can still need an index in production | no `[D]` — "does not track compound indexes and instead will execute any valid query" | **yes** — a query without its index is rejected |
 | Production limit enforcement (e.g. transaction size) | no | no `[D]` — "may allow transactions that would be rejected as too large" | yes |
 | `__name__` is appended to every `orderBy`, in the last term's direction | served | yes `[M]` | yes |
-| An inequality filter appends its field to `orderBy` before `__name__` | served — bare `where(v,'>',0)` returns `v` order (was name order until SAK-226) | yes `[M]` — same normalisation | yes — public StructuredQuery `orderBy` rules |
+| An inequality filter appends its field to `orderBy` before `__name__` | served — bare `where(v,'>',0)` returns `v` order (was name order until #143) | yes `[M]` — same normalisation | yes — public StructuredQuery `orderBy` rules |
 | A document without the ordered field is absent from the results | served | yes `[M]` | yes |
 | `ListDocuments` ordering and paging | served | yes `[M]` | yes |
 | Every write in a `Commit` applies or none does | served | yes `[M]` | yes |

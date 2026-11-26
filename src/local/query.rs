@@ -1503,7 +1503,7 @@ mod tests {
     }
 
     /// An inequality-filtered query is ordered by the filtered field even when
-    /// the client sent no `order_by` (SAK-226). Name order and `v` order are
+    /// the client sent no `order_by` (#143). Name order and `v` order are
     /// deliberately different so a silent `__name__`-only sort would fail.
     #[test]
     fn an_inequality_orders_by_the_filtered_field_when_order_by_is_empty() {

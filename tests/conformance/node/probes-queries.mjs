@@ -679,7 +679,7 @@ export const queryProbes = [
     id: 'semantics.inequality-appends-to-order',
     served: async ({ freshCollection }) => {
       // Name order and v order deliberately disagree so a silent __name__-only
-      // sort fails this row (SAK-226).
+      // sort fails this row (#143).
       const docs = freshCollection('ineqorder')
       await Promise.all([
         docs.doc('a').set({ v: 3, w: 0 }),
