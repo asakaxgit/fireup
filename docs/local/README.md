@@ -540,7 +540,7 @@ What to know before trusting a listener here:
 | RPC | Status | Notes |
 |---|---|---|
 | `Lookup` | served | Keys map onto Firestore document names; optional property mask (top-level only). |
-| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`), `__key__` filters with the same operators, `AND`, `OR`, order (by `__key__` too), limit, offset, start and end cursors, `HAS_ANCESTOR`, keys-only / property projections / `distinct_on`, and kindless ancestor queries (ancestor + all descendant kinds). GQL refused. Nested projection paths stay `UNIMPLEMENTED`. Unbounded kindless (no ancestor) stays `UNIMPLEMENTED`. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
+| `RunQuery` | served | Kind queries with property filters (`=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`), `__key__` filters with the same operators, `AND`, `OR`, order (by `__key__` too), limit, offset, start and end cursors, `HAS_ANCESTOR`, keys-only / property projections / `distinct_on`, kindless ancestor queries (ancestor + all descendant kinds), and named namespaces via `PartitionId.namespace_id`. GQL refused. Nested projection paths stay `UNIMPLEMENTED`. Unbounded kindless (no ancestor) stays `UNIMPLEMENTED`. Property filters are pushed into the store — see [the Datastore pushdown](#the-datastore-surface-pushes-down-too). |
 | `Commit` | served | `insert` / `update` / `upsert` / `delete`; incomplete keys allocate numeric ids; transactional and non-transactional; `property_transforms` and `property_mask` (below). |
 | `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. A read-only transaction may be committed when it carries no mutations, as Google's public [read-only transaction sample](https://cloud.google.com/datastore/docs/concepts/transactions) does; with mutations it is `INVALID_ARGUMENT`. (Firestore `Commit` still refuses a read-only transaction.) |
 | `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
@@ -548,11 +548,14 @@ What to know before trusting a listener here:
 | `RunAggregationQuery` | `UNIMPLEMENTED` | |
 
 Kinds share the Postgres/`MemoryStore` rows with Firestore: `Task/sample` is
-`…/documents/Task/sample`. Non-default namespaces, GQL, nested property masks,
-and `HAS_ANCESTOR` inside an `OR` are refused. A kindless query with
-`HAS_ANCESTOR` returns the ancestor entity (when present) and every descendant
-of any kind; property-value filters and non-`__key__` orders on a kindless
-query are `INVALID_ARGUMENT`. Fully unbounded kindless stays refused.
+`…/documents/Task/sample`. A named Datastore namespace is stored under a
+Fireup-private `__ns__/{namespace_id}/` prefix so default-namespace names stay
+byte-identical; queries are partition-scoped and do not cross namespaces. GQL,
+nested property masks, and `HAS_ANCESTOR` inside an `OR` are refused. A
+kindless query with `HAS_ANCESTOR` returns the ancestor entity (when present)
+and every descendant of any kind; property-value filters and non-`__key__`
+orders on a kindless query are `INVALID_ARGUMENT`. Fully unbounded kindless
+stays refused.
 Projection queries (including keys-only and `distinct_on` / `groupBy`) are
 served for top-level property names; an entity missing a projected property is
 absent from the results.

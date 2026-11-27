@@ -892,9 +892,10 @@
       "id": "datastore.namespaces",
       "docTable": null,
       "label": "Datastore non-default namespaces",
-      "status": "unimplemented",
+      "status": "served",
       "driver": "node-sdk",
-      "python": false
+      "python": false,
+      "note": "#149. Named PartitionId.namespace_id maps to a Fireup-private `__ns__/{id}/` prefix under the documents root so default-namespace names stay byte-identical. Queries are partition-scoped; reserved `__.*__` namespace ids are INVALID_ARGUMENT. Public PartitionId + multitenancy docs."
     },
     {
       "id": "datastore.gql",

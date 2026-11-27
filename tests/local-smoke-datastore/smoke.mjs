@@ -367,6 +367,34 @@ await check('a kindless ancestor query returns the ancestor and its descendants'
   expectNames(rows, ['child', 'parent'], 'kindless ancestor query')
 }, { served: ['datastore.kindless-ancestor-queries', 'datastore.RunQuery'] })
 
+// --- Namespaces ----------------------------------------------------------------
+//
+// Moved from backlog.mjs once served.
+
+await check('an entity in a named namespace saves and reads back', async () => {
+  const ns = `smoke_ns_${Date.now().toString(36)}`
+  const nsKind = `SmokeNs_${Date.now().toString(36)}`
+  const nsKey = datastore.key({ namespace: ns, path: [nsKind, 'ns-entity'] })
+  await datastore.save({ key: nsKey, data: { title: 'namespaced' } })
+  const [fetched] = await datastore.get(nsKey)
+  if (fetched?.title !== 'namespaced') {
+    throw new Error(`namespaced get returned ${JSON.stringify(fetched)}`)
+  }
+}, { served: ['datastore.namespaces', 'datastore.Commit', 'datastore.Lookup'] })
+
+await check('a query in a named namespace sees only that namespace', async () => {
+  const ns = `smoke_nsq_${Date.now().toString(36)}`
+  const nsKind = `SmokeNsq_${Date.now().toString(36)}`
+  const nsKey = datastore.key({ namespace: ns, path: [nsKind, 'ns-entity'] })
+  const defaultKey = datastore.key([nsKind, 'default-entity'])
+  await datastore.save([
+    { key: nsKey, data: { title: 'namespaced' } },
+    { key: defaultKey, data: { title: 'default' } },
+  ])
+  const [rows] = await datastore.runQuery(datastore.createQuery(ns, nsKind))
+  expectNames(rows, ['ns-entity'], 'namespaced query')
+}, { served: ['datastore.namespaces', 'datastore.RunQuery'] })
+
 await check('a != filter excludes the matching entity', async () => {
   const query = datastore.createQuery(filterKind).filter(new PropertyFilter('priority', '!=', 2))
   const [rows] = await datastore.runQuery(query)

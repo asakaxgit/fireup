@@ -480,18 +480,35 @@ impl Store for PostgresStore {
 
     async fn scan_kind(&self, documents_root: &str, kind: &str) -> StoreResult<Vec<Document>> {
         let prefix = format!("{documents_root}/");
+        // Default-namespace scans must not see `__ns__/{id}/…` rows; a
+        // namespaced scan root already includes that prefix.
+        let skip_namespaces = !documents_root.contains("/__ns__/");
+        let ns_prefix = format!("{documents_root}/__ns__/");
         let client = self.client().await?;
-        let rows = client
-            .query(
-                &format!(
-                    "SELECT {DOCUMENT_COLUMNS} FROM {DOCUMENTS_TABLE}
-                      WHERE collection_id = $1 AND starts_with(name, $2)"
-                ),
-                &[&kind, &prefix],
-            )
-            .await
-            .with_context(|| format!("failed to scan kind {kind} under {documents_root}"))
-            .map_err(StoreError::Backend)?;
+        let rows = if skip_namespaces {
+            client
+                .query(
+                    &format!(
+                        "SELECT {DOCUMENT_COLUMNS} FROM {DOCUMENTS_TABLE}
+                          WHERE collection_id = $1 AND starts_with(name, $2)
+                            AND NOT starts_with(name, $3)"
+                    ),
+                    &[&kind, &prefix, &ns_prefix],
+                )
+                .await
+        } else {
+            client
+                .query(
+                    &format!(
+                        "SELECT {DOCUMENT_COLUMNS} FROM {DOCUMENTS_TABLE}
+                          WHERE collection_id = $1 AND starts_with(name, $2)"
+                    ),
+                    &[&kind, &prefix],
+                )
+                .await
+        }
+        .with_context(|| format!("failed to scan kind {kind} under {documents_root}"))
+        .map_err(StoreError::Backend)?;
 
         rows_to_documents(&format!("{documents_root}/{kind}"), &rows)
     }
@@ -504,11 +521,18 @@ impl Store for PostgresStore {
     ) -> StoreResult<Vec<Document>> {
         // Same filter, wider row selection: a kind spans every collection with
         // this id under the root rather than one. That makes it the read where
-        // narrowing matters most.
+        // narrowing matters most. Default-namespace roots also exclude the
+        // `__ns__/` parking lot so tenant rows do not leak into the default.
+        let prefix = format!("{documents_root}/");
+        let sql = if documents_root.contains("/__ns__/") {
+            "collection_id = $1 AND starts_with(name, $2)"
+        } else {
+            "collection_id = $1 AND starts_with(name, $2) AND NOT starts_with(name, $2 || '__ns__/')"
+        };
         self.scan_filtered(
-            "collection_id = $1 AND starts_with(name, $2)",
+            sql,
             kind,
-            &format!("{documents_root}/"),
+            &prefix,
             prefilter,
             &format!("{documents_root}/{kind}"),
         )

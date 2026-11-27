@@ -735,6 +735,10 @@ impl Store for MemoryStore {
 
     async fn scan_kind(&self, documents_root: &str, kind: &str) -> StoreResult<Vec<Document>> {
         let prefix = format!("{documents_root}/");
+        // Named Datastore namespaces live under `__ns__/{id}/…`. A default-
+        // namespace kind scan must not pull them in; a namespaced scan root
+        // already includes that prefix so the skip does not apply.
+        let skip_namespaces = !documents_root.contains("/__ns__/");
         let documents = self.documents.read().expect("document store lock poisoned");
 
         let mut found: Vec<Document> = documents
@@ -744,6 +748,9 @@ impl Store for MemoryStore {
                 // Collection id is the second-to-last path segment after the
                 // documents root — the same rule `parse_document_name` uses.
                 let rest = name.strip_prefix(&prefix)?;
+                if skip_namespaces && rest.starts_with("__ns__/") {
+                    return None;
+                }
                 let segments: Vec<&str> = rest.split('/').collect();
                 if segments.len() >= 2
                     && segments.len() % 2 == 0

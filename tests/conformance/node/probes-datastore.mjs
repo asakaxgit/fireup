@@ -383,16 +383,36 @@ export const datastoreProbes = [
 
   {
     id: 'datastore.namespaces',
-    unimplemented: async ({ datastore, freshKind, expectUnimplemented }) => {
+    served: async ({ datastore, freshKind }) => {
       const kind = freshKind('namespace')
-      // Two namespaces can hold the same key path, so answering in the default
-      // namespace would be a wrong answer rather than a missing feature.
-      const key = datastore.key({ namespace: 'other', path: [kind, 'one'] })
+      const namespace = `ns_${Date.now().toString(36)}`
+      const key = datastore.key({ namespace, path: [kind, 'one'] })
+      const defaultKey = datastore.key([kind, 'one'])
 
-      await expectUnimplemented(() => datastore.save({ key, data: { n: 1 } }), {
-        names: /namespace/i,
-      })
-      await expectUnimplemented(() => datastore.get(key), { names: /namespace/i })
+      await datastore.save([
+        { key, data: { where: 'ns' } },
+        { key: defaultKey, data: { where: 'default' } },
+      ])
+
+      const [fromNs] = await datastore.get(key)
+      assert.equal(fromNs?.where, 'ns')
+      const [fromDefault] = await datastore.get(defaultKey)
+      assert.equal(fromDefault?.where, 'default')
+
+      const [nsRows] = await datastore.runQuery(datastore.createQuery(namespace, kind))
+      assert.deepEqual(
+        nsRows.map((row) => row.where),
+        ['ns'],
+      )
+      const [defaultRows] = await datastore.runQuery(datastore.createQuery(kind))
+      assert.ok(
+        defaultRows.some((row) => row.where === 'default'),
+        `default query missed the default entity: ${JSON.stringify(defaultRows)}`,
+      )
+      assert.ok(
+        defaultRows.every((row) => row.where !== 'ns'),
+        `default query leaked the namespaced entity: ${JSON.stringify(defaultRows)}`,
+      )
     },
   },
 
