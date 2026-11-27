@@ -82,31 +82,7 @@ await check('an AND of two equality filters matches both', async () => {
   expectNames(rows, ['a', 'c'], 'AND filter')
 })
 
-// --- Aggregations --------------------------------------------------------
-
-await check('a count() aggregation counts the matching entities', async () => {
-  const query = datastore
-    .createAggregationQuery(datastore.createQuery(kind).filter(new PropertyFilter('owner', '=', 'ada')))
-    .count('total')
-  const [[result]] = await datastore.runAggregationQuery(query)
-  if (result?.total !== 2) {
-    throw new Error(`count returned ${JSON.stringify(result)}, wanted total=2`)
-  }
-})
-
-await check('sum() and average() aggregate a numeric property', async () => {
-  const query = datastore
-    .createAggregationQuery(datastore.createQuery(kind))
-    .sum('priority', 'sum')
-    .average('priority', 'avg')
-  const [[result]] = await datastore.runAggregationQuery(query)
-  if (result?.sum !== 6 || result?.avg !== 2) {
-    throw new Error(`sum/average returned ${JSON.stringify(result)}, wanted sum=6 avg=2`)
-  }
-})
-
-// Namespaces and kindless ancestor checks moved to smoke.mjs once served.
-
+// Aggregations / namespaces / kindless ancestor checks moved to smoke.mjs once served.
 
 // --- Writes and reads ----------------------------------------------------
 

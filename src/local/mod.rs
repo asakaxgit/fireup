@@ -24,11 +24,11 @@
 //!   transforms](transforms). Aggregation queries are not served; those RPCs
 //!   answer `UNIMPLEMENTED` with a message saying so, and
 //!   `docs/local/README.md` has the full fidelity matrix.
-//! * **Datastore** — Lookup/RunQuery/Commit/BeginTransaction/AllocateIds on the
-//!   same store Firestore uses (kinds map to collections). `Commit` serves
-//!   `property_transforms`, resolved against the fields the named properties map
-//!   to. GQL, aggregations, namespaces, and `property_mask` on a mutation answer
-//!   `UNIMPLEMENTED`.
+//! * **Datastore** — Lookup/RunQuery/RunAggregationQuery/Commit/BeginTransaction/
+//!   AllocateIds on the same store Firestore uses (kinds map to collections).
+//!   `Commit` serves `property_transforms` and `property_mask`; named namespaces
+//!   and `count`/`sum`/`avg` aggregations are served. GQL aggregations and
+//!   nested aggregation property paths answer `UNIMPLEMENTED`.
 //! * **Auth** — email/password and anonymous sign-in, emulator-style ID tokens,
 //!   token refresh, and admin account CRUD. See [`auth`] for what is and is not
 //!   served.

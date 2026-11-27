@@ -15,7 +15,7 @@
 //! | `Rollback`           | served |
 //! | `AllocateIds`        | served |
 //! | `ReserveIds`         | served (acknowledged; ids are not reused) |
-//! | `RunAggregationQuery`| `UNIMPLEMENTED` |
+//! | `RunAggregationQuery`| served (`count` / `sum` / `avg` over a nested `Query`; GQL aggregations refused) |
 //!
 //! `RunQuery`'s property filters are translated into the same compiled
 //! [`Predicate`](crate::local::query::Predicate) the Firestore surface
@@ -60,11 +60,15 @@ use crate::protos::google::datastore::v1::query_result_batch::MoreResultsType;
 use crate::protos::google::datastore::v1::read_options::ConsistencyType;
 use crate::protos::google::datastore::v1::transaction_options::Mode as TxMode;
 use crate::protos::google::datastore::v1::value::ValueType as DsValueType;
+use crate::protos::google::datastore::v1::aggregation_query::aggregation::Operator as AggOp;
+use crate::protos::google::datastore::v1::aggregation_query::Aggregation as DsAggregation;
+use crate::protos::google::datastore::v1::run_aggregation_query_request::QueryType as AggQueryType;
 use crate::protos::google::datastore::v1::{
-    filter::FilterType, AllocateIdsRequest, AllocateIdsResponse, BeginTransactionRequest,
-    BeginTransactionResponse, CommitRequest, CommitResponse, Entity, EntityResult, Filter,
-    Key, LookupRequest, LookupResponse, Mutation, MutationResult, PropertyFilter, PropertyMask,
-    PropertyOrder, PropertyReference, Query, QueryResultBatch, ReadOptions, ReserveIdsRequest,
+    filter::FilterType, AggregationQuery, AggregationResult, AggregationResultBatch,
+    AllocateIdsRequest, AllocateIdsResponse, BeginTransactionRequest, BeginTransactionResponse,
+    CommitRequest, CommitResponse, Entity, EntityResult, Filter, Key, LookupRequest,
+    LookupResponse, Mutation, MutationResult, PropertyFilter, PropertyMask, PropertyOrder,
+    PropertyReference, Query, QueryResultBatch, ReadOptions, ReserveIdsRequest,
     ReserveIdsResponse, RollbackRequest, RollbackResponse, RunAggregationQueryRequest,
     RunAggregationQueryResponse, RunQueryRequest, RunQueryResponse, Value as DsValue,
 };
@@ -482,6 +486,67 @@ impl DatastoreApi {
         })
     }
 
+    /// Run a structured aggregation over a nested Datastore `Query`.
+    ///
+    /// Public contract:
+    /// <https://cloud.google.com/datastore/docs/aggregation-queries> and the
+    /// vendored `AggregationQuery` message. Nested projection is cleared so
+    /// `sum`/`avg` still see the property they aggregate; filters, limit,
+    /// offset, and cursors on the nested query still apply.
+    async fn run_aggregation(
+        &self,
+        aggregation_query: &AggregationQuery,
+        namespace_id: &str,
+        transaction: Option<&[u8]>,
+    ) -> Result<AggregationResultBatch, Status> {
+        let nested = match aggregation_query.query_type.as_ref() {
+            Some(crate::protos::google::datastore::v1::aggregation_query::QueryType::NestedQuery(
+                query,
+            )) => query,
+            None => {
+                return Err(Status::invalid_argument(
+                    "AggregationQuery requires a nested_query",
+                ));
+            }
+        };
+
+        let aggregations = &aggregation_query.aggregations;
+        if aggregations.is_empty() || aggregations.len() > 5 {
+            return Err(Status::invalid_argument(
+                "AggregationQuery requires between 1 and 5 aggregations",
+            ));
+        }
+
+        // Full entities: a keys-only or projected nested query would strip the
+        // property `sum`/`avg` need. Filters / limit / cursors still run.
+        let mut nested = nested.clone();
+        nested.projection.clear();
+
+        let batch = self
+            .run_structured_query(&nested, None, namespace_id, transaction)
+            .await?;
+        let entities: Vec<Entity> = batch
+            .entity_results
+            .into_iter()
+            .filter_map(|result| result.entity)
+            .collect();
+
+        let aliases = resolve_aggregation_aliases(aggregations)?;
+        let mut aggregate_properties = std::collections::HashMap::new();
+        for (alias, aggregation) in aliases.iter().zip(aggregations.iter()) {
+            let value = evaluate_aggregation(aggregation, &entities)?;
+            aggregate_properties.insert(alias.clone(), value);
+        }
+
+        Ok(AggregationResultBatch {
+            aggregation_results: vec![AggregationResult {
+                aggregate_properties,
+            }],
+            more_results: MoreResultsType::NoMoreResults as i32,
+            read_time: Some(now_timestamp()),
+        })
+    }
+
     /// The store mutation that writes `entity`, masked by `property_mask` if the
     /// request carried one.
     ///
@@ -734,12 +799,55 @@ impl Datastore for DatastoreApi {
 
     async fn run_aggregation_query(
         &self,
-        _request: Request<RunAggregationQueryRequest>,
+        request: Request<RunAggregationQueryRequest>,
     ) -> Result<Response<RunAggregationQueryResponse>, Status> {
-        Err(unimplemented(
-            "RunAggregationQuery",
-            "aggregations land after Phase 3",
-        ))
+        let request = request.into_inner();
+        debug!("Datastore.RunAggregationQuery");
+        self.check_scope(&request.project_id, &request.database_id)?;
+
+        if request.explain_options.is_some() {
+            return Err(unimplemented("Datastore explain_options", "not in Phase 3"));
+        }
+
+        let (existing_tx, new_tx) = self.take_read_transaction(&request.read_options)?;
+        let transaction = match (&existing_tx, &new_tx) {
+            (_, Some(token)) => Some(token.as_slice()),
+            (Some(token), None) => Some(*token),
+            (None, None) => None,
+        };
+
+        let aggregation_query = match request.query_type {
+            Some(AggQueryType::AggregationQuery(query)) => query,
+            Some(AggQueryType::GqlQuery(_)) => {
+                return Err(unimplemented(
+                    "Datastore GQL aggregations",
+                    "pass a structured AggregationQuery; GQL is not served yet",
+                ));
+            }
+            None => {
+                return Err(Status::invalid_argument(
+                    "RunAggregationQuery requires an aggregation_query",
+                ));
+            }
+        };
+
+        let namespace_id = request
+            .partition_id
+            .as_ref()
+            .map(|partition| partition.namespace_id.as_str())
+            .unwrap_or("");
+        validate_namespace_id(namespace_id)?;
+
+        let batch = self
+            .run_aggregation(&aggregation_query, namespace_id, transaction)
+            .await?;
+
+        Ok(Response::new(RunAggregationQueryResponse {
+            batch: Some(batch),
+            query: None,
+            transaction: new_tx.unwrap_or_default(),
+            explain_metrics: None,
+        }))
     }
 
     async fn begin_transaction(
@@ -888,6 +996,161 @@ impl Datastore for DatastoreApi {
             let _ = key_to_document_name(key, &self.project_id, &self.database_id)?;
         }
         Ok(Response::new(ReserveIdsResponse {}))
+    }
+}
+
+fn ds_integer_value(n: i64) -> DsValue {
+    DsValue {
+        value_type: Some(DsValueType::IntegerValue(n)),
+        ..Default::default()
+    }
+}
+
+fn ds_double_value(n: f64) -> DsValue {
+    DsValue {
+        value_type: Some(DsValueType::DoubleValue(n)),
+        ..Default::default()
+    }
+}
+
+fn ds_null_value() -> DsValue {
+    DsValue {
+        value_type: Some(DsValueType::NullValue(0)),
+        ..Default::default()
+    }
+}
+
+/// Resolve aggregation aliases: explicit `alias` wins; otherwise `property_N`
+/// in encounter order, matching the vendored `AggregationQuery` comment.
+fn resolve_aggregation_aliases(aggregations: &[DsAggregation]) -> Result<Vec<String>, Status> {
+    let mut aliases = Vec::with_capacity(aggregations.len());
+    let mut auto = 0usize;
+    for aggregation in aggregations {
+        let alias = if aggregation.alias.is_empty() {
+            auto += 1;
+            format!("property_{auto}")
+        } else {
+            aggregation.alias.clone()
+        };
+        if aliases.iter().any(|existing| existing == &alias) {
+            return Err(Status::invalid_argument(format!(
+                "duplicate aggregation alias {alias:?}"
+            )));
+        }
+        aliases.push(alias);
+    }
+    Ok(aliases)
+}
+
+fn aggregation_property_name(property: Option<&PropertyReference>) -> Result<&str, Status> {
+    let name = property
+        .map(|property| property.name.as_str())
+        .unwrap_or("")
+        .trim();
+    if name.is_empty() {
+        return Err(Status::invalid_argument(
+            "sum/avg aggregations require a property name",
+        ));
+    }
+    if name.contains('.') {
+        return Err(unimplemented(
+            "nested aggregation property paths",
+            "aggregate a top-level property",
+        ));
+    }
+    Ok(name)
+}
+
+/// Numeric values eligible for `sum`/`avg` — integers and doubles only.
+/// Non-numeric values including `NULL` are skipped (public aggregation docs).
+fn numeric_parts(value: &DsValue) -> Option<(f64, bool)> {
+    match value.value_type.as_ref() {
+        Some(DsValueType::IntegerValue(n)) => Some((*n as f64, true)),
+        Some(DsValueType::DoubleValue(n)) => Some((*n, false)),
+        _ => None,
+    }
+}
+
+fn evaluate_aggregation(
+    aggregation: &DsAggregation,
+    entities: &[Entity],
+) -> Result<DsValue, Status> {
+    match aggregation.operator.as_ref() {
+        Some(AggOp::Count(count)) => {
+            let mut total = entities.len() as i64;
+            if let Some(up_to) = count.up_to {
+                if up_to < 0 {
+                    return Err(Status::invalid_argument(
+                        "count up_to must be non-negative",
+                    ));
+                }
+                total = total.min(up_to);
+            }
+            Ok(ds_integer_value(total))
+        }
+        Some(AggOp::Sum(sum)) => {
+            let name = aggregation_property_name(sum.property.as_ref())?;
+            let mut total = 0.0_f64;
+            let mut all_integers = true;
+            let mut saw_numeric = false;
+            let mut saw_nan = false;
+            for entity in entities {
+                let Some(value) = entity.properties.get(name) else {
+                    continue;
+                };
+                let Some((number, is_integer)) = numeric_parts(value) else {
+                    continue;
+                };
+                saw_numeric = true;
+                if number.is_nan() {
+                    saw_nan = true;
+                }
+                all_integers &= is_integer;
+                total += number;
+            }
+            if !saw_numeric {
+                return Ok(ds_integer_value(0));
+            }
+            if saw_nan {
+                return Ok(ds_double_value(f64::NAN));
+            }
+            if all_integers && total >= i64::MIN as f64 && total <= i64::MAX as f64 {
+                let as_int = total as i64;
+                if as_int as f64 == total {
+                    return Ok(ds_integer_value(as_int));
+                }
+            }
+            Ok(ds_double_value(total))
+        }
+        Some(AggOp::Avg(avg)) => {
+            let name = aggregation_property_name(avg.property.as_ref())?;
+            let mut total = 0.0_f64;
+            let mut count = 0_i64;
+            let mut saw_nan = false;
+            for entity in entities {
+                let Some(value) = entity.properties.get(name) else {
+                    continue;
+                };
+                let Some((number, _)) = numeric_parts(value) else {
+                    continue;
+                };
+                if number.is_nan() {
+                    saw_nan = true;
+                }
+                total += number;
+                count += 1;
+            }
+            if count == 0 {
+                return Ok(ds_null_value());
+            }
+            if saw_nan {
+                return Ok(ds_double_value(f64::NAN));
+            }
+            Ok(ds_double_value(total / count as f64))
+        }
+        None => Err(Status::invalid_argument(
+            "each Aggregation requires an operator (count, sum, or avg)",
+        )),
     }
 }
 

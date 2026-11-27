@@ -369,15 +369,18 @@ fn every_matrix_entry_is_claimed_by_a_conformance_probe() {
 
 const COMPARISON_DOC: &str = "docs/local/COMPARISON.md";
 
-/// Section headings in the comparison whose second column is Fireup's verdict.
-const COMPARISON_TABLES: [&str; 7] = [
-    "## Firestore RPCs",
-    "## Queries",
-    "## Field transforms",
-    "## Where the local implementations diverge from production",
-    "## Datastore",
-    "### Datastore property masks",
-    "## Firebase Auth / Identity Toolkit",
+/// Section headings in the comparison whose second column is Fireup's verdict,
+/// paired with the matrix `docTable` that owns the same labels. Firestore and
+/// Datastore both have a `RunAggregationQuery` row; without the table key the
+/// later matrix entry would silently overwrite the earlier one.
+const COMPARISON_TABLES: [(&str, Option<&str>); 7] = [
+    ("## Firestore RPCs", Some("firestore-rpcs")),
+    ("## Queries", Some("queries")),
+    ("## Field transforms", Some("field-transforms")),
+    ("## Where the local implementations diverge from production", None),
+    ("## Datastore", Some("datastore-rpcs")),
+    ("### Datastore property masks", Some("datastore-property-mask")),
+    ("## Firebase Auth / Identity Toolkit", Some("auth-endpoints")),
 ];
 
 /// Below this many cross-checked rows, assume the comparison drifted away from
@@ -397,19 +400,47 @@ fn the_comparison_doc_agrees_with_matrix_json_about_fireup() {
     let comparison = read(&repo_root().join(COMPARISON_DOC));
     let matrix = matrix();
 
-    let by_label: BTreeMap<String, &serde_json::Value> = matrix["features"]
-        .as_array()
-        .unwrap()
+    // Key by (docTable, label) so Firestore and Datastore rows that share a
+    // label (e.g. RunAggregationQuery) do not overwrite each other. Also keep a
+    // label-only map for comparison sections that have no docTable of their
+    // own, but only when the label is unique across the matrix.
+    let features = matrix["features"].as_array().unwrap();
+    let by_table_label: BTreeMap<(String, String), &serde_json::Value> = features
         .iter()
-        .map(|feature| (normalize_label(feature["label"].as_str().unwrap()), feature))
+        .map(|feature| {
+            (
+                (
+                    feature["docTable"].as_str().unwrap_or("").to_string(),
+                    normalize_label(feature["label"].as_str().unwrap()),
+                ),
+                feature,
+            )
+        })
+        .collect();
+    let mut label_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for feature in features {
+        *label_counts
+            .entry(normalize_label(feature["label"].as_str().unwrap()))
+            .or_insert(0) += 1;
+    }
+    let by_unique_label: BTreeMap<String, &serde_json::Value> = features
+        .iter()
+        .filter_map(|feature| {
+            let label = normalize_label(feature["label"].as_str().unwrap());
+            (*label_counts.get(&label)? == 1).then_some((label, feature))
+        })
         .collect();
 
     let mut cross_checked = 0usize;
-    for heading in COMPARISON_TABLES {
+    for (heading, doc_table) in COMPARISON_TABLES {
         // Column 1 is Fireup: the tables are
         // | subject | fireup | Firebase emulator | GCP |.
         for (label, verdict) in table_rows_in(COMPARISON_DOC, &comparison, heading, Some(1)) {
-            let Some(feature) = by_label.get(&label) else {
+            let feature = match doc_table {
+                Some(table) => by_table_label.get(&(table.to_string(), label.clone())),
+                None => by_unique_label.get(&label),
+            };
+            let Some(feature) = feature else {
                 continue; // a product-level row with no matrix entry, by design
             };
             let verdict = comparison_verdict(verdict.as_deref().unwrap());

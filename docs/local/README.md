@@ -545,17 +545,19 @@ What to know before trusting a listener here:
 | `BeginTransaction` / `Rollback` | served | Same optimistic-concurrency model as Firestore. A read-only transaction may be committed when it carries no mutations, as Google's public [read-only transaction sample](https://cloud.google.com/datastore/docs/concepts/transactions) does; with mutations it is `INVALID_ARGUMENT`. (Firestore `Commit` still refuses a read-only transaction.) |
 | `AllocateIds` | served | Completes incomplete keys with monotonic numeric ids. |
 | `ReserveIds` | served | Acknowledged; local allocations already avoid colliding with completed keys. |
-| `RunAggregationQuery` | `UNIMPLEMENTED` | |
+| `RunAggregationQuery` | served | `count()` / `sum()` / `avg()` over a nested structured `Query`. GQL aggregations refused. Nested aggregation property paths stay `UNIMPLEMENTED`. |
 
 Kinds share the Postgres/`MemoryStore` rows with Firestore: `Task/sample` is
 `…/documents/Task/sample`. A named Datastore namespace is stored under a
 Fireup-private `__ns__/{namespace_id}/` prefix so default-namespace names stay
-byte-identical; queries are partition-scoped and do not cross namespaces. GQL,
-nested property masks, and `HAS_ANCESTOR` inside an `OR` are refused. A
-kindless query with `HAS_ANCESTOR` returns the ancestor entity (when present)
-and every descendant of any kind; property-value filters and non-`__key__`
-orders on a kindless query are `INVALID_ARGUMENT`. Fully unbounded kindless
-stays refused.
+byte-identical; queries are partition-scoped and do not cross namespaces.
+`RunAggregationQuery` serves `count` / `sum` / `avg` over a nested structured
+query (filters, limit, offset, and cursors apply; nested projection is cleared
+so `sum`/`avg` still see the property). GQL aggregations, nested property
+masks, and `HAS_ANCESTOR` inside an `OR` are refused. A kindless query with
+`HAS_ANCESTOR` returns the ancestor entity (when present) and every descendant
+of any kind; property-value filters and non-`__key__` orders on a kindless
+query are `INVALID_ARGUMENT`. Fully unbounded kindless stays refused.
 Projection queries (including keys-only and `distinct_on` / `groupBy`) are
 served for top-level property names; an entity missing a projected property is
 absent from the results.

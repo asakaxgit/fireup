@@ -367,6 +367,34 @@ await check('a kindless ancestor query returns the ancestor and its descendants'
   expectNames(rows, ['child', 'parent'], 'kindless ancestor query')
 }, { served: ['datastore.kindless-ancestor-queries', 'datastore.RunQuery'] })
 
+// --- Aggregations --------------------------------------------------------------
+//
+// Moved from backlog.mjs once served.
+// Public docs: https://cloud.google.com/datastore/docs/aggregation-queries
+
+await check('a count() aggregation counts the matching entities', async () => {
+  const query = datastore
+    .createAggregationQuery(
+      datastore.createQuery(filterKind).filter(new PropertyFilter('owner', '=', 'ada')),
+    )
+    .count('total')
+  const [[result]] = await datastore.runAggregationQuery(query)
+  if (result?.total !== 2) {
+    throw new Error(`count returned ${JSON.stringify(result)}, wanted total=2`)
+  }
+}, { served: ['datastore.RunAggregationQuery'] })
+
+await check('sum() and average() aggregate a numeric property', async () => {
+  const query = datastore
+    .createAggregationQuery(datastore.createQuery(filterKind))
+    .sum('priority', 'sum')
+    .average('priority', 'avg')
+  const [[result]] = await datastore.runAggregationQuery(query)
+  if (result?.sum !== 6 || result?.avg !== 2) {
+    throw new Error(`sum/average returned ${JSON.stringify(result)}, wanted sum=6 avg=2`)
+  }
+}, { served: ['datastore.RunAggregationQuery'] })
+
 // --- Namespaces ----------------------------------------------------------------
 //
 // Moved from backlog.mjs once served.

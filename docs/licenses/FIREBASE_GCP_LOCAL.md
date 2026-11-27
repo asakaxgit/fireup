@@ -2,7 +2,7 @@
 
 > First-party Fireup code is licensed under **Apache-2.0** (see root `LICENSE`). The Fireup name, mark and visual identity are carved out — see [`TRADEMARKS.md`](../../TRADEMARKS.md); the asset masters themselves are no longer in this repository (#114). Dependency-tree audit: [`CARGO_LICENSE_AUDIT.md`](CARGO_LICENSE_AUDIT.md).
 
-**Status:** current as of #145 — `RunQuery` serves Datastore projection / keys-only / `distinct_on` from the vendored `query.proto` and Google's public projection queries page; nested projection paths stay `UNIMPLEMENTED`. Prior: #144 duplicate non-key `order_by`; #143 effective-order normalisation. No new Google/Firebase artefact, proto, or dependency. Prior: recorded fidelity oracle implementation — recorder/replay under `tests/recorded-oracle/`, offline CI replay wired into the fidelity gate; reuses the already-rowed official client SDKs (no new Google artefact). Prior: #139 — board approved a production-recorded fidelity oracle under constraints and amended `.cursor/rules/firebase-gcp-compliance.mdc` (no new Google/Firebase artefact in that PR). Prior: #114 — `brand/` and `site/` moved out to the private `saks-industries/fireup-cloud`, and the trademark carve-out that lived in `brand/LICENSE` is now root [`TRADEMARKS.md`](../../TRADEMARKS.md); no Google/Firebase artefact, proto, dependency or npm package changed. Prior: PR #81 — the gRPC stack moved from `tonic` 0.11 / `prost` 0.12 to `tonic` 0.13 / `prost` 0.13, which replaces the old HTTP/2 transport chain (`axum` 0.6 → `hyper` 0.14 → `h2` 0.3.27) with `axum` 0.8 → `hyper` 1.12 → `h2` 0.4.20 and so clears `RUSTSEC-2026-0258`; the accepted-vulnerability entry was deleted from `deny.toml` in the same change, leaving `[advisories] ignore` empty. These are version bumps inside the existing transitive gRPC transport, not new third-party components, and every replacement crate is MIT and/or Apache-2.0 — machine-checked by `cargo deny --locked check ... licenses` (`licenses ok`) against the permissive-only allow list, not asserted by hand. No Google/Firebase proto or generated stub changed; the same two service protos are compiled, by a newer `tonic-build`. Prior: PR #80 — the comparison's emulator column replaced with **measured** conformance results (the first entry covering the *running* of third-party software). Prior: PR #77 — `deny.toml` turns the permissive-only dependency policy into a CI gate instead of a periodic manual audit, and records the one accepted vulnerability (`RUSTSEC-2026-0258` in `h2`, via the pinned `tonic` 0.11); see [`CARGO_LICENSE_AUDIT.md#how-this-is-enforced`](CARGO_LICENSE_AUDIT.md#how-this-is-enforced); PR #75 — `Cargo.lock` committed and `--locked` restored in CI, which turns every "see `Cargo.toml`" pin in this ledger from a semver range into one exact version per commit; PR #72 README badges, coverage, and the comparison document (the first entry covering claims about third-party software); PR #70 Datastore `property_mask` on a mutation (masked entity writes, paired with the PR #63 property transforms); Phase 2.1 (#67) Firestore `Listen` / realtime listeners; PR #60 managed-export fidelity regression fixtures; PR #61 Phase L.1 out-of-band email flows (no mail transport); PR #58 Firestore field transforms; PR #56 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; PR #54 seeding restores Datastore value types; Phase 4 (#53) glue docs and the end-to-end demo; Phase 3 (#52) Datastore and Phase L (#48) Auth
+**Status:** current as of Datastore `RunAggregationQuery` (`count`/`sum`/`avg`) from the vendored `aggregation_result.proto` / `AggregationQuery` and Google's public aggregation-queries page; GQL aggregations and nested aggregation property paths stay `UNIMPLEMENTED`. Prior: #149 named namespaces; #148 kindless ancestor; #145 projection / keys-only / `distinct_on`. No new Google/Firebase artefact, proto, or dependency. Prior: recorded fidelity oracle implementation — recorder/replay under `tests/recorded-oracle/`, offline CI replay wired into the fidelity gate; reuses the already-rowed official client SDKs (no new Google artefact). Prior: #139 — board approved a production-recorded fidelity oracle under constraints and amended `.cursor/rules/firebase-gcp-compliance.mdc` (no new Google/Firebase artefact in that PR). Prior: #114 — `brand/` and `site/` moved out to the private `saks-industries/fireup-cloud`, and the trademark carve-out that lived in `brand/LICENSE` is now root [`TRADEMARKS.md`](../../TRADEMARKS.md); no Google/Firebase artefact, proto, dependency or npm package changed. Prior: PR #81 — the gRPC stack moved from `tonic` 0.11 / `prost` 0.12 to `tonic` 0.13 / `prost` 0.13, which replaces the old HTTP/2 transport chain (`axum` 0.6 → `hyper` 0.14 → `h2` 0.3.27) with `axum` 0.8 → `hyper` 1.12 → `h2` 0.4.20 and so clears `RUSTSEC-2026-0258`; the accepted-vulnerability entry was deleted from `deny.toml` in the same change, leaving `[advisories] ignore` empty. These are version bumps inside the existing transitive gRPC transport, not new third-party components, and every replacement crate is MIT and/or Apache-2.0 — machine-checked by `cargo deny --locked check ... licenses` (`licenses ok`) against the permissive-only allow list, not asserted by hand. No Google/Firebase proto or generated stub changed; the same two service protos are compiled, by a newer `tonic-build`. Prior: PR #80 — the comparison's emulator column replaced with **measured** conformance results (the first entry covering the *running* of third-party software). Prior: PR #77 — `deny.toml` turns the permissive-only dependency policy into a CI gate instead of a periodic manual audit, and records the one accepted vulnerability (`RUSTSEC-2026-0258` in `h2`, via the pinned `tonic` 0.11); see [`CARGO_LICENSE_AUDIT.md#how-this-is-enforced`](CARGO_LICENSE_AUDIT.md#how-this-is-enforced); PR #75 — `Cargo.lock` committed and `--locked` restored in CI, which turns every "see `Cargo.toml`" pin in this ledger from a semver range into one exact version per commit; PR #72 README badges, coverage, and the comparison document (the first entry covering claims about third-party software); PR #70 Datastore `property_mask` on a mutation (masked entity writes, paired with the PR #63 property transforms); Phase 2.1 (#67) Firestore `Listen` / realtime listeners; PR #60 managed-export fidelity regression fixtures; PR #61 Phase L.1 out-of-band email flows (no mail transport); PR #58 Firestore field transforms; PR #56 first-party Apache-2.0 + brand trademark carve-out with the dependency audit recorded; PR #54 seeding restores Datastore value types; Phase 4 (#53) glue docs and the end-to-end demo; Phase 3 (#52) Datastore and Phase L (#48) Auth
 **Rule:** `.cursor/rules/firebase-gcp-compliance.mdc` (always apply)
 
 Independent implementation over **public** Google API contracts. Not affiliated with Google. Do not reverse-engineer proprietary Firebase/Google emulator binaries.
@@ -840,6 +840,27 @@ decompiled or unpacked.
 | Independent-implementation blurb preserved where relevant | Yes — unchanged on `src/local/datastore.rs` |
 | No production key material | n/a — nothing added |
 
+### Datastore RunAggregationQuery (count / sum / avg)
+
+No new dependency, proto, or artefact — `aggregation_result.proto` and
+`AggregationQuery` were already vendored. `RunAggregationQuery` serves
+`count()` / `sum()` / `avg()` over a nested structured `Query` from Google's
+public
+[aggregation queries](https://cloud.google.com/datastore/docs/aggregation-queries)
+page. GQL aggregations and nested aggregation property paths stay
+`UNIMPLEMENTED`. Checked with the already-rowed `@google-cloud/datastore`
+client. No emulator binary was decompiled or unpacked. PR number filled in
+when the change opens.
+
+| Checklist item | this PR |
+|---|---|
+| No RE of proprietary binaries | Yes — public docs + vendored protos + open-source client as a client |
+| New deps/protos logged in this ledger | Yes — none added |
+| For a REST/JSON surface: public sources named | n/a (gRPC); the public aggregation-queries page is named above |
+| Undocumented behaviours deferred / listed unsupported | Yes — GQL aggregations / nested aggregation paths / Firestore aggregations unchanged |
+| Independent-implementation blurb preserved where relevant | Yes — unchanged on `src/local/datastore.rs` |
+| No production key material | n/a — nothing added |
+
 ### #149 — Datastore named namespaces
 
 No new dependency, proto, or artefact. Non-empty `PartitionId.namespace_id`
@@ -858,6 +879,29 @@ emulator binary was decompiled or unpacked.
 | New deps/protos logged in this ledger | Yes — none added |
 | For a REST/JSON surface: public sources named | n/a (gRPC); the public multitenancy page is named above |
 | Undocumented behaviours deferred / listed unsupported | Yes — GQL / aggregations unchanged; seed/export still skip namespaces |
+| Independent-implementation blurb preserved where relevant | Yes — unchanged on `src/local/datastore.rs` |
+| No production key material | n/a — nothing added |
+
+### PR-pending — Datastore `RunAggregationQuery` (count / sum / avg)
+
+No new dependency, proto, or artefact. `RunAggregationQuery` serves structured
+`AggregationQuery` aggregations (`count`, including optional `up_to`; `sum`;
+`avg`) over a nested `Query`, from the vendored `query.proto` /
+`aggregation_result.proto` and Google's public
+[aggregation queries](https://cloud.google.com/datastore/docs/aggregation-queries)
+page. Nested projection on the nested query is cleared so `sum`/`avg` still see
+the property; filters, limit, offset, and cursors still apply. GQL aggregations
+and nested aggregation property paths stay `UNIMPLEMENTED`. Firestore
+`RunAggregationQuery` stays refused. Checked with the already-rowed
+`@google-cloud/datastore` client. No emulator binary was decompiled or unpacked.
+(Ledger heading updated to the PR number when the PR opens.)
+
+| Checklist item | Datastore aggregations |
+|---|---|
+| No RE of proprietary binaries | Yes — public docs + vendored protos + open-source client as a client |
+| New deps/protos logged in this ledger | Yes — none added |
+| For a REST/JSON surface: public sources named | n/a (gRPC); the public aggregation-queries page is named above |
+| Undocumented behaviours deferred / listed unsupported | Yes — GQL aggregations and nested property paths refused; Firestore aggregations unchanged |
 | Independent-implementation blurb preserved where relevant | Yes — unchanged on `src/local/datastore.rs` |
 | No production key material | n/a — nothing added |
 

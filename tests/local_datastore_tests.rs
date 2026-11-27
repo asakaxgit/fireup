@@ -18,13 +18,16 @@ use fireup::protos::google::datastore::v1::property_filter::Operator as Property
 use fireup::protos::google::datastore::v1::property_order::Direction;
 use fireup::protos::google::datastore::v1::property_transform::{ServerValue, TransformType};
 use fireup::protos::google::datastore::v1::query_result_batch::MoreResultsType;
+use fireup::protos::google::datastore::v1::aggregation_query::aggregation::Operator as AggOp;
+use fireup::protos::google::datastore::v1::aggregation_query::Aggregation as DsAggregation;
+use fireup::protos::google::datastore::v1::run_aggregation_query_request::QueryType as AggQueryType;
 use fireup::protos::google::datastore::v1::run_query_request::QueryType;
 use fireup::protos::google::datastore::v1::value::ValueType;
 use fireup::protos::google::datastore::v1::{
-    filter::FilterType, AllocateIdsRequest, ArrayValue, BeginTransactionRequest, CommitRequest,
-    CompositeFilter, Entity, Filter, Key, KindExpression, LookupRequest, Mutation, PartitionId,
-    PropertyFilter, PropertyMask, PropertyOrder, PropertyReference, PropertyTransform, Query,
-    QueryResultBatch, RollbackRequest, RunAggregationQueryRequest, RunQueryRequest, Value,
+    filter::FilterType, AggregationQuery, AllocateIdsRequest, ArrayValue, BeginTransactionRequest,
+    CommitRequest, CompositeFilter, Entity, Filter, Key, KindExpression, LookupRequest, Mutation,
+    PartitionId, PropertyFilter, PropertyMask, PropertyOrder, PropertyReference, PropertyTransform,
+    Query, QueryResultBatch, RollbackRequest, RunAggregationQueryRequest, RunQueryRequest, Value,
 };
 use tonic::transport::Channel;
 use tonic::Code;
@@ -351,17 +354,139 @@ async fn insert_with_incomplete_key_allocates_an_id() {
 }
 
 #[tokio::test]
-async fn aggregation_queries_are_unimplemented() {
+async fn a_count_sum_and_avg_aggregation_covers_the_matching_entities() {
     let (server, mut client) = start().await;
+    let kind = "AggTask";
 
-    let status = client
+    for (name, priority, owner) in [
+        ("a", 1_i64, "ada"),
+        ("b", 2, "ada"),
+        ("c", 3, "bob"),
+    ] {
+        client
+            .commit(commit_one(Mutation {
+                operation: Some(Operation::Upsert(entity(
+                    named_key(kind, name),
+                    HashMap::from([
+                        ("priority".to_string(), integer_value(priority)),
+                        ("owner".to_string(), string_value(owner)),
+                    ]),
+                ))),
+                ..Default::default()
+            }))
+            .await
+            .expect("seed");
+    }
+
+    let filtered = Query {
+        kind: vec![KindExpression {
+            name: kind.to_string(),
+        }],
+        filter: Some(Filter {
+            filter_type: Some(FilterType::PropertyFilter(PropertyFilter {
+                property: Some(PropertyReference {
+                    name: "owner".to_string(),
+                }),
+                op: PropertyOp::Equal as i32,
+                value: Some(string_value("ada")),
+            })),
+        }),
+        ..Default::default()
+    };
+
+    let count_response = client
         .run_aggregation_query(RunAggregationQueryRequest {
             project_id: PROJECT.to_string(),
+            query_type: Some(AggQueryType::AggregationQuery(AggregationQuery {
+                query_type: Some(
+                    fireup::protos::google::datastore::v1::aggregation_query::QueryType::NestedQuery(
+                        filtered,
+                    ),
+                ),
+                aggregations: vec![DsAggregation {
+                    alias: "total".to_string(),
+                    operator: Some(AggOp::Count(Default::default())),
+                }],
+            })),
             ..Default::default()
         })
         .await
-        .expect_err("aggregations are not Phase 3");
-    assert_eq!(status.code(), Code::Unimplemented);
+        .expect("count aggregation")
+        .into_inner();
+    let count = count_response
+        .batch
+        .as_ref()
+        .and_then(|batch| batch.aggregation_results.first())
+        .and_then(|result| result.aggregate_properties.get("total"))
+        .and_then(|value| match value.value_type.as_ref() {
+            Some(ValueType::IntegerValue(n)) => Some(*n),
+            _ => None,
+        });
+    assert_eq!(count, Some(2));
+
+    let all = Query {
+        kind: vec![KindExpression {
+            name: kind.to_string(),
+        }],
+        ..Default::default()
+    };
+    let sum_avg = client
+        .run_aggregation_query(RunAggregationQueryRequest {
+            project_id: PROJECT.to_string(),
+            query_type: Some(AggQueryType::AggregationQuery(AggregationQuery {
+                query_type: Some(
+                    fireup::protos::google::datastore::v1::aggregation_query::QueryType::NestedQuery(
+                        all,
+                    ),
+                ),
+                aggregations: vec![
+                    DsAggregation {
+                        alias: "sum".to_string(),
+                        operator: Some(AggOp::Sum(
+                            fireup::protos::google::datastore::v1::aggregation_query::aggregation::Sum {
+                                property: Some(PropertyReference {
+                                    name: "priority".to_string(),
+                                }),
+                            },
+                        )),
+                    },
+                    DsAggregation {
+                        alias: "avg".to_string(),
+                        operator: Some(AggOp::Avg(
+                            fireup::protos::google::datastore::v1::aggregation_query::aggregation::Avg {
+                                property: Some(PropertyReference {
+                                    name: "priority".to_string(),
+                                }),
+                            },
+                        )),
+                    },
+                ],
+            })),
+            ..Default::default()
+        })
+        .await
+        .expect("sum/avg aggregation")
+        .into_inner();
+    let props = sum_avg
+        .batch
+        .as_ref()
+        .and_then(|batch| batch.aggregation_results.first())
+        .map(|result| &result.aggregate_properties)
+        .expect("aggregation result");
+    assert_eq!(
+        props.get("sum").and_then(|value| match value.value_type.as_ref() {
+            Some(ValueType::IntegerValue(n)) => Some(*n),
+            _ => None,
+        }),
+        Some(6)
+    );
+    assert_eq!(
+        props.get("avg").and_then(|value| match value.value_type.as_ref() {
+            Some(ValueType::DoubleValue(n)) => Some(*n),
+            _ => None,
+        }),
+        Some(2.0)
+    );
 
     server.shutdown().await.expect("clean shutdown");
 }

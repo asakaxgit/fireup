@@ -427,7 +427,7 @@
       "id": "datastore.RunAggregationQuery",
       "docTable": "datastore-rpcs",
       "label": "RunAggregationQuery",
-      "status": "unimplemented",
+      "status": "served",
       "driver": "node-sdk",
       "python": false
     },
