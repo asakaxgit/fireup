@@ -2047,3 +2047,99 @@ async fn a_foreign_cursor_is_an_invalid_argument() {
 
     server.shutdown().await.expect("clean shutdown");
 }
+
+/// A kindless ancestor query returns the ancestor and every descendant of any
+/// kind. Fully unbounded kindless (no ancestor) stays `UNIMPLEMENTED`.
+#[tokio::test]
+async fn a_kindless_ancestor_query_returns_the_subtree() {
+    let (server, mut client) = start().await;
+
+    let parent = named_key("TaskList", "default");
+    let child = Key {
+        partition_id: None,
+        path: vec![
+            PathElement {
+                kind: "TaskList".to_string(),
+                id_type: Some(IdType::Name("default".to_string())),
+            },
+            PathElement {
+                kind: "Task".to_string(),
+                id_type: Some(IdType::Name("child".to_string())),
+            },
+        ],
+    };
+    let unrelated = named_key("TaskList", "other");
+
+    for (key, role) in [
+        (parent.clone(), "parent"),
+        (child.clone(), "child"),
+        (unrelated.clone(), "unrelated"),
+    ] {
+        client
+            .commit(commit_one(Mutation {
+                operation: Some(Operation::Upsert(entity(
+                    key,
+                    [("role".to_string(), string_value(role))]
+                        .into_iter()
+                        .collect(),
+                ))),
+                ..Default::default()
+            }))
+            .await
+            .expect("upsert");
+    }
+
+    let batch = client
+        .run_query(RunQueryRequest {
+            project_id: PROJECT.to_string(),
+            query_type: Some(QueryType::Query(Query {
+                kind: vec![],
+                filter: Some(Filter {
+                    filter_type: Some(FilterType::PropertyFilter(PropertyFilter {
+                        property: Some(PropertyReference {
+                            name: "__key__".to_string(),
+                        }),
+                        op: PropertyOp::HasAncestor as i32,
+                        value: Some(Value {
+                            value_type: Some(ValueType::KeyValue(parent.clone())),
+                            ..Default::default()
+                        }),
+                    })),
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+        .await
+        .expect("kindless ancestor RunQuery")
+        .into_inner()
+        .batch
+        .expect("batch");
+
+    let mut names: Vec<String> = batch
+        .entity_results
+        .into_iter()
+        .filter_map(|result| result.entity?.key?.path.pop()?.id_type)
+        .map(|id| match id {
+            IdType::Name(name) => name,
+            IdType::Id(id) => id.to_string(),
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, ["child", "default"]);
+
+    let refused = client
+        .run_query(RunQueryRequest {
+            project_id: PROJECT.to_string(),
+            query_type: Some(QueryType::Query(Query {
+                kind: vec![],
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+        .await
+        .expect_err("unbounded kindless");
+    assert_eq!(refused.code(), Code::Unimplemented, "{refused:?}");
+
+    server.shutdown().await.expect("clean shutdown");
+}

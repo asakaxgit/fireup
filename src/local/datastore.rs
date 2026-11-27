@@ -9,7 +9,7 @@
 //! | RPC                  | Status |
 //! |----------------------|--------|
 //! | `Lookup`             | served |
-//! | `RunQuery`           | served (kind queries; `=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`, `AND`, `OR`; projection / keys-only / `distinct_on`; GQL refused) |
+//! | `RunQuery`           | served (kind queries; kindless ancestor queries; `=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`, `AND`, `OR`; projection / keys-only / `distinct_on`; GQL refused) |
 //! | `Commit`             | served (incl. `property_transforms`) |
 //! | `BeginTransaction`   | served |
 //! | `Rollback`           | served |
@@ -151,6 +151,31 @@ impl DatastoreApi {
         self.transactions.begin_mode(read_only)
     }
 
+    /// Every document under `ancestor_name`, including the ancestor itself when
+    /// it exists. Walks collection ids via [`Store::child_segments`] and each
+    /// collection via [`Store::scan_collection`], so a missing intermediate
+    /// parent still surfaces written descendants (Datastore keys carry the
+    /// full path; the parent entity need not be stored).
+    async fn scan_ancestor_subtree(&self, ancestor_name: &str) -> Result<Vec<Document>, Status> {
+        let mut out = Vec::new();
+        if let Some(document) = self.store.get(ancestor_name).await? {
+            out.push(document);
+        }
+        let mut queue = vec![ancestor_name.to_string()];
+        while let Some(parent) = queue.pop() {
+            let collections = self.store.child_segments(&parent).await?;
+            for collection_id in collections {
+                let documents = self.store.scan_collection(&parent, &collection_id).await?;
+                for document in documents {
+                    queue.push(document.name.clone());
+                    out.push(document);
+                }
+            }
+        }
+        out.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+        Ok(out)
+    }
+
     fn take_read_transaction<'a>(
         &'a self,
         read_options: &'a Option<ReadOptions>,
@@ -220,6 +245,24 @@ impl DatastoreApi {
         // read is. See `datastore_filter` for why the translated predicate is
         // then also what filters in process when the translation is exact.
         let property_filter = strip_ancestor_filter(query.filter.as_ref())?;
+        // A kindless query may filter and order on `__key__` only — Google's
+        // public kindless-queries page. Refuse property predicates and orders
+        // rather than answer wrong.
+        if kind.is_none() {
+            kindless_rejects_property_predicates(property_filter.as_ref())?;
+            for order in &query.order {
+                let name = order
+                    .property
+                    .as_ref()
+                    .map(|property| property.name.as_str())
+                    .unwrap_or("");
+                if name != "__key__" {
+                    return Err(Status::invalid_argument(
+                        "a kindless query cannot order by property values; only __key__ order is allowed",
+                    ));
+                }
+            }
+        }
         let translated = datastore_filter::translate(
             property_filter.as_ref(),
             &self.project_id,
@@ -249,18 +292,18 @@ impl DatastoreApi {
                     .scan_kind_filtered(&self.root(), kind, prefilter)
                     .await?
             }
-            (None, Some(_ancestor)) => {
-                // No kind: every direct child collection under the ancestor.
-                // Phase 3 refuses the unbounded form rather than scan the world.
-                return Err(unimplemented(
-                    "kindless Datastore queries",
-                    "name a kind; kindless scans are not served yet",
-                ));
+            (None, Some(ancestor)) => {
+                // Ancestor-bounded kindless: the ancestor entity (if present)
+                // plus every descendant of any kind. Public kindless_queries
+                // page; unbounded kindless (no ancestor) stays refused below.
+                let ancestor_name =
+                    key_to_document_name(ancestor, &self.project_id, &self.database_id)?;
+                self.scan_ancestor_subtree(&ancestor_name).await?
             }
             (None, None) => {
                 return Err(unimplemented(
-                    "kindless Datastore queries",
-                    "name a kind; kindless scans are not served yet",
+                    "unbounded kindless Datastore queries",
+                    "add a HAS_ANCESTOR filter; a full-database kindless scan is not served",
                 ));
             }
         };
@@ -846,6 +889,38 @@ impl Datastore for DatastoreApi {
             let _ = key_to_document_name(key, &self.project_id, &self.database_id)?;
         }
         Ok(Response::new(ReserveIdsResponse {}))
+    }
+}
+
+/// Kindless queries may only filter on `__key__` (and `HAS_ANCESTOR`, which
+/// `strip_ancestor_filter` already removed). Property-value filters are
+/// refused per Google's public kindless-queries page.
+fn kindless_rejects_property_predicates(filter: Option<&Filter>) -> Result<(), Status> {
+    let Some(filter) = filter else {
+        return Ok(());
+    };
+    match filter.filter_type.as_ref() {
+        Some(FilterType::PropertyFilter(property)) => {
+            let name = property
+                .property
+                .as_ref()
+                .map(|reference| reference.name.as_str())
+                .unwrap_or("");
+            if name == "__key__" {
+                Ok(())
+            } else {
+                Err(Status::invalid_argument(
+                    "a kindless query cannot filter on property values; only __key__ filters and HAS_ANCESTOR are allowed",
+                ))
+            }
+        }
+        Some(FilterType::CompositeFilter(composite)) => {
+            for child in &composite.filters {
+                kindless_rejects_property_predicates(Some(child))?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 

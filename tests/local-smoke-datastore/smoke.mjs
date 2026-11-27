@@ -350,6 +350,23 @@ await check('groupBy returns one entity per distinct value', async () => {
   }
 }, { served: ['datastore.projection-queries', 'datastore.RunQuery'] })
 
+// --- Kindless ancestor -----------------------------------------------------
+//
+// Moved from backlog.mjs once served. Own kind so filter-fixture entities do
+// not join the subtree.
+
+await check('a kindless ancestor query returns the ancestor and its descendants', async () => {
+  const parentKind = `SmokeKindless_${Date.now().toString(36)}`
+  const parent = datastore.key([parentKind, 'parent'])
+  const child = datastore.key([parentKind, 'parent', `${parentKind}Child`, 'child'])
+  await datastore.save([
+    { key: parent, data: { role: 'parent' } },
+    { key: child, data: { role: 'child' } },
+  ])
+  const [rows] = await datastore.runQuery(datastore.createQuery().hasAncestor(parent))
+  expectNames(rows, ['child', 'parent'], 'kindless ancestor query')
+}, { served: ['datastore.kindless-ancestor-queries', 'datastore.RunQuery'] })
+
 await check('a != filter excludes the matching entity', async () => {
   const query = datastore.createQuery(filterKind).filter(new PropertyFilter('priority', '!=', 2))
   const [rows] = await datastore.runQuery(query)

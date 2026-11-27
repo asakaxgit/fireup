@@ -471,6 +471,21 @@ export const datastoreProbes = [
   },
 
   {
+    id: 'datastore.kindless-ancestor-queries',
+    served: async ({ datastore, freshKind }) => {
+      const kind = freshKind('kindless')
+      const parent = datastore.key([kind, 'parent'])
+      const child = datastore.key([kind, 'parent', `${kind}Child`, 'child'])
+      await datastore.save([
+        { key: parent, data: { role: 'parent' } },
+        { key: child, data: { role: 'child' } },
+      ])
+      const [rows] = await datastore.runQuery(datastore.createQuery().hasAncestor(parent))
+      assert.deepEqual([...names(rows, datastore)].sort(), ['child', 'parent'])
+    },
+  },
+
+  {
     id: 'datastore.cursors',
     served: async ({ datastore, raw, projectId, freshKind }) => {
       const kind = await seedTasks(datastore, freshKind('cursors'))
