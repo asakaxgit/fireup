@@ -908,9 +908,10 @@
       "id": "datastore.projection-queries",
       "docTable": null,
       "label": "Datastore projection queries",
-      "status": "unimplemented",
+      "status": "served",
       "driver": "node-sdk",
-      "python": false
+      "python": false,
+      "note": "#145. Keys-only (`select('__key__')`), property projections, and `distinct_on` / `groupBy` from the vendored query.proto and Google's public projection queries page. Nested projection paths stay UNIMPLEMENTED. Entities missing a projected property are absent."
     },
     {
       "id": "datastore.cursors",

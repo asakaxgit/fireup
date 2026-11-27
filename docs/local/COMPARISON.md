@@ -301,8 +301,9 @@ wrong — see the correction below the table.
 
 Fireup's extra property: Datastore kinds and Firestore collections are **the
 same rows**, so an entity written through the Datastore API is readable through
-the Firestore API and as a SQL row. Non-default namespaces, GQL, projection
-queries, and cursors are refused.
+the Firestore API and as a SQL row. Keys-only / property projections /
+`distinct_on` and cursors are served. Non-default namespaces and GQL are
+refused.
 
 **Correction, from measuring instead of reading.** The emulator the Firebase CLI
 downloads *does* emulate Datastore. In its default mode every Datastore RPC
