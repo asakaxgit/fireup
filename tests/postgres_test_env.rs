@@ -76,9 +76,26 @@ pub fn integration_postgres_tests_enabled() -> bool {
     resolve_integration_postgres_url().is_some()
 }
 
+/// True when the process is running under CI (GitHub Actions or a generic
+/// `CI=1` runner). Local developers keep the soft skip; CI must not.
+pub fn running_in_ci() -> bool {
+    std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some()
+}
+
+/// Soft-skip when no dedicated URL is set **locally**. Under CI, panics instead:
+/// a silent skip would let the Memory and Postgres paths diverge without a red
+/// check. The auto CI job that runs these suites sets `FIREUP_TEST_POSTGRES_URL`.
 pub fn skip_postgres_integration_test(test_name: &str) -> bool {
     if integration_postgres_tests_enabled() {
         return false;
+    }
+    if running_in_ci() {
+        panic!(
+            "refusing to skip {test_name} under CI: set FIREUP_TEST_POSTGRES_URL \
+             (or TEST_DATABASE_URL) to a dedicated fireup test database, and keep \
+             it clear of the names in {DENY_ENV}. Silent skips hide Memory vs \
+             Postgres divergence."
+        );
     }
     println!(
         "Skipping {test_name}: set FIREUP_TEST_POSTGRES_URL or TEST_DATABASE_URL to a dedicated fireup test database (Docker compose on port 5433 is preferred), and keep it clear of the names in {DENY_ENV}."

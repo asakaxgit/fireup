@@ -5,11 +5,10 @@ name: CI
 #
 # Scope is chosen so that red means "the code is broken", never "a service did
 # not come up": the `test` job runs with nothing but a Rust toolchain — no
-# PostgreSQL, no Node, no Docker, no network. The suites that need those live in
-# `local_firestore.yml` (the official-SDK conformance layer) and
-# `integration_tests.yml`, which stay manual for now — except the official-SDK
-# smoke suites, which the `fidelity` job at the bottom runs on every pull request
-# as a regression gate.
+# PostgreSQL, no Node, no Docker, no network. Suites that need a database live
+# in the `postgres-store` job (pushdown differentials + durable store tests),
+# the `fidelity` job (official-SDK smoke gate), and the still-manual
+# `local_firestore.yml` / `integration_tests.yml` workflows.
 #
 # The `deny` job is the one exception to "no network": it fetches the RustSec
 # advisory database, which is the whole point of it. It is a separate job rather
@@ -211,6 +210,62 @@ jobs:
             -D advisory-not-detected \
             advisories licenses bans sources
 
+  # Postgres store parity: differential pushdown suites plus the durable
+  # Firestore/Auth store tests. Kept out of `test` so that job stays free of
+  # external services. `FIREUP_TEST_POSTGRES_URL` is required — the shared
+  # guard in `tests/postgres_test_env.rs` panics under CI when it is missing,
+  # so a forgotten env block cannot turn these into silent skips.
+  #
+  # Neither the job nor the step may carry an `if:` / `continue-on-error:` that
+  # switches them off, and the job takes no `needs:`: a skipped job would hide
+  # a Memory vs Postgres divergence. `workflow_yaml_tests` fails if any of the
+  # four `--test` targets leave this file.
+  postgres-store:
+    name: postgres store and pushdown suites
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: fireup_pushdown
+          POSTGRES_USER: fireup
+          POSTGRES_PASSWORD: fireup_ci_password
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          cargo --version && rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-ci-postgres-${{ hashFiles('Cargo.lock') }}
+
+      - name: Postgres pushdown and store suites
+        env:
+          FIREUP_TEST_POSTGRES_URL: postgresql://fireup:fireup_ci_password@localhost:5432/fireup_pushdown
+        run: |
+          cargo test --locked --test local_query_pushdown_tests
+          cargo test --locked --test local_datastore_pushdown_tests
+          cargo test --locked --test local_postgres_store_tests
+          cargo test --locked --test local_auth_postgres_tests
+
   # The fidelity regression gate: every official-SDK smoke suite (Firestore,
   # Auth, Datastore) and the Node conformance runner, against both stores,
   # compared with
@@ -221,10 +276,10 @@ jobs:
   # tests/smoke-gate/matrix-gaps.json, and names the row. Updating the baseline
   # is a reviewed diff — see "Fidelity regression gate" in docs/local/README.md.
   #
-  # The exception to this file's "no external services" rule, kept to its own
-  # job so the `test` job stays that way. It needs the Google client libraries
-  # from npm and a PostgreSQL service container, because a durable store that
-  # disagrees with the in-memory one is exactly the regression to catch.
+  # Another exception to this file's "no external services" rule for `test`,
+  # kept to its own job. It needs the Google client libraries from npm and a
+  # PostgreSQL service container, because a durable store that disagrees with
+  # the in-memory one is exactly the regression to catch.
   #
   # This job is a required status check on `main`, by its `name:` below — so
   # renaming it unbinds the requirement. And neither the job nor the gate step

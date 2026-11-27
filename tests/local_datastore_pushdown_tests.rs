@@ -51,7 +51,9 @@
 //! answer. See the "What is deliberately not shared" section of
 //! `src/local/datastore_filter.rs`.
 //!
-//! Needs a database and is skipped when `FIREUP_TEST_POSTGRES_URL` is unset:
+//! Needs a database. Locally it is skipped when `FIREUP_TEST_POSTGRES_URL` is
+//! unset; under CI it fails instead (see `tests/postgres_test_env.rs`). Auto CI
+//! runs it from the `postgres-store` job in `.github/workflows/ci.yml`.
 //!
 //! ```sh
 //! FIREUP_TEST_POSTGRES_URL='postgresql://fireup@127.0.0.1:55432/fireup_test' \

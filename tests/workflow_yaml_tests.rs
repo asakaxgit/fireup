@@ -318,3 +318,34 @@ fn ci_still_names_the_public_repo_hygiene_target() {
          Restore the step in the `test` job."
     );
 }
+
+/// Targets that prove Memory and Postgres agree on the durable store path.
+///
+/// Each only runs in CI because a step names it. Dropping one from `ci.yml`
+/// would leave the differential / store suites as local-only soft skips again.
+const POSTGRES_STORE_CI_TARGETS: &[&str] = &[
+    "local_query_pushdown_tests",
+    "local_datastore_pushdown_tests",
+    "local_postgres_store_tests",
+    "local_auth_postgres_tests",
+];
+
+#[test]
+fn ci_runs_the_postgres_store_and_pushdown_suites() {
+    let ci = read(&workflows_dir().join("ci.yml"));
+    assert!(
+        ci.contains("FIREUP_TEST_POSTGRES_URL:"),
+        "ci.yml no longer sets `FIREUP_TEST_POSTGRES_URL`, so the Postgres \
+         store / pushdown suites cannot run (and under CI they refuse to skip). \
+         Restore the env on the `postgres-store` job step."
+    );
+    for target in POSTGRES_STORE_CI_TARGETS {
+        let needle = format!("--test {target}");
+        assert!(
+            ci.contains(&needle),
+            "ci.yml no longer names `{needle}`, so nothing fails a pull request \
+             when Memory and Postgres diverge on that suite. Restore it in the \
+             `postgres-store` job."
+        );
+    }
+}
