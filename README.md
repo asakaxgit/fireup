@@ -23,13 +23,125 @@ a Firestore client talks to `fireup local`; the reporting, the constraints, and
 the migration itself happen in SQL — same data, same connection string, no
 second copy to keep in sync.
 
+## Quickstart — switch your app onto Fireup
+
+You do **not** change Firestore client code. Official SDKs already honour the
+documented emulator host variables; Fireup listens on those same contracts.
+Default port is `4589` so it can sit beside Google's Firebase emulators
+(`8080`/`4000`) and floci-gcp (`4588`) without a port fight.
+
+### 1. Start Fireup
+
+**Easiest — Docker Compose** (needs Docker only):
+
 ```bash
-docker compose up -d postgres
-scripts/demo-export-to-sql.sh     # export → SQL tables → live API → SQL again
+git clone https://github.com/asakaxgit/fireup.git
+cd fireup
+docker compose up -d postgres fireup-local
+curl -fsS http://127.0.0.1:4589/health
 ```
 
-That script is the whole workflow end to end. The narrated version, including
-where the fidelity gaps are, is **[docs/local/END_TO_END.md](docs/local/END_TO_END.md)**.
+`GET /health` asks the store, so a `200` means the API *and* PostgreSQL are
+reachable.
+
+**Without Docker for the API** (still needs Postgres if you want durable data):
+
+```bash
+cargo build --release
+# In-memory (empty until you write or seed):
+./target/release/fireup local
+# Or durable on the Compose Postgres:
+docker compose up -d postgres
+./target/release/fireup local \
+  --postgres-url postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev \
+  --project-id my-project
+```
+
+Match `--project-id` to the project id your SDK uses. The Compose service
+defaults to `fireup-local` (`FIREUP_LOCAL_PROJECT_ID`).
+
+### 2. Point your existing Firestore / Auth / Datastore clients
+
+Unset any host that still aims at Google's emulators or production, then:
+
+```bash
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:4589
+export DATASTORE_EMULATOR_HOST=127.0.0.1:4589
+export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:4589
+```
+
+That is the whole switch. Node (`@google-cloud/firestore`, `firebase-admin`),
+Python, Go, Java, and the Firebase client SDKs all honour those variables and
+talk plaintext to Fireup instead of the cloud. No Fireup-specific shim.
+
+If you previously used Google's Firebase Emulator Suite, replace
+`localhost:8080` (Firestore) / `localhost:9099` (Auth) — or whatever you had in
+`firebase.json` — with `127.0.0.1:4589` for every service Fireup serves on that
+one port.
+
+### 3. Smoke-test that the switch worked
+
+**Health and discovery** (no SDK required):
+
+```bash
+curl -fsS http://127.0.0.1:4589/health
+curl -fsS http://127.0.0.1:4589/
+```
+
+**From your app** — same code path you use today, with the env vars above:
+
+```js
+import { Firestore } from '@google-cloud/firestore'
+
+const db = new Firestore({ projectId: 'fireup-local' }) // match --project-id
+await db.doc('demo/hello').set({ ok: true, at: new Date() })
+const snap = await db.doc('demo/hello').get()
+console.log(snap.data())
+```
+
+**Repo-bundled official-SDK smokes** (build Fireup, start a temporary server,
+drive Google's clients):
+
+```bash
+scripts/smoke-local-firestore.sh
+scripts/smoke-local-datastore.sh
+scripts/smoke-local-auth.sh
+```
+
+What is served vs refused is the
+[fidelity matrix](docs/local/README.md#fidelity-matrix). An unsupported call is
+an explicit `UNIMPLEMENTED` (or a named Auth error), never a silent wrong
+answer.
+
+### 4. Optional — load a managed export, then hit it from the SDK
+
+```bash
+docker compose up -d postgres
+cargo run -- local seed \
+  --backup-file /path/to/export \
+  --postgres-url postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev \
+  --project-id my-project
+
+cargo run -- local \
+  --postgres-url postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev \
+  --project-id my-project
+```
+
+Or run the full narrated path (export → SQL tables → live API → SQL again):
+
+```bash
+docker compose up -d postgres
+scripts/demo-export-to-sql.sh
+```
+
+Details and fidelity gaps:
+**[docs/local/END_TO_END.md](docs/local/END_TO_END.md)**. Flags, Auth surface,
+and storage layout: **[docs/local/README.md](docs/local/README.md)**.
+
+> **Local only.** Auth tokens are unsigned; anything that can reach the port can
+> act as any principal. Do not publish `4589` beyond a development machine. See
+> the independent-implementation note under
+> [What Fireup is, and is not](#what-fireup-is-and-is-not).
 
 ## What Fireup is, and is not
 
@@ -41,18 +153,13 @@ go wide: no GCS, Pub/Sub, Cloud Run, KMS, or the rest of the cloud surface.
 If you need that breadth, a full local-cloud suite such as **floci-gcp** is the
 right tool for it. The two **complement** each other rather than compete: a
 local-cloud suite is not a migration tool, and Fireup is not an emulator suite.
-Fireup's default port is `4589` specifically so it can run beside floci-gcp
-(`4588`) and Google's Firebase emulators (`8080`/`4000`) without an argument
-about ports.
 
 **[docs/local/COMPARISON.md](docs/local/COMPARISON.md)** is the feature matrix —
 Fireup, the Firebase Emulator Suite, and the production service — including the
 places where Fireup serves less and the places where it is more faithful. Most
 of the emulator column is **measured**: the conformance suite was pointed at the
 emulator Google ships and the raw per-row answers are committed in
-[`docs/local/measurements/`](docs/local/measurements/README.md). Every cell says
-which kind of evidence it is and which emulator version it is true of — four
-Fireup bugs and two corrections to our own document came out of measuring it.
+[`docs/local/measurements/`](docs/local/measurements/README.md).
 
 > **Independent implementation.** `fireup local` implements **public** Google API
 > contracts from public documentation and the public
@@ -92,108 +199,44 @@ Fireup bugs and two corrections to our own document came out of measuring it.
 - Every unsupported feature is an explicit error, never a wrong answer — see the
   [fidelity matrix](docs/local/README.md#fidelity-matrix)
 
-## Quick Start
+## Migrator CLI
 
-### Prerequisites
-
-- Rust 1.70+ 
-- Docker and Docker Compose
-- Git
-
-### Development Setup
-
-1. Clone the repository:
 ```bash
-git clone <repository-url>
-cd fireup
+# Validate a backup / export tree
+fireup validate --backup-file /path/to/export
+
+# Analyse schema and generate DDL
+fireup analyze --backup-file /path/to/export --output schema.sql
+
+# Import into PostgreSQL
+# (5433 is the host port docker compose publishes; see docker-compose.yml)
+fireup import --backup-file /path/to/export \
+  --postgres-url postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev
 ```
 
-2. Copy environment configuration:
-```bash
-cp .env.example .env
-```
+From a source checkout, prefix with `cargo run --` (or use
+`./target/release/fireup` after `cargo build --release`).
 
-3. Start PostgreSQL backend:
-```bash
-docker-compose up -d postgres
-```
+## PostgreSQL client connection
 
-4. Build the project:
-```bash
-cargo build
-```
-
-5. Run the CLI:
-```bash
-cargo run -- --help
-```
-
-### Available Commands
-
-- `fireup validate` - Validate backup file integrity
-- `fireup analyze` - Analyze schema from backup file and generate DDL
-- `fireup import` - Import Firestore backup data to PostgreSQL
-- `fireup local` - Serve the Firestore/Datastore/Auth APIs on one local port
-- `fireup local seed` - Load an export into the local data plane's store
-
-### Example Usage
+Once data is imported (or written through `fireup local`), connect with any
+standard client:
 
 ```bash
-# Validate a backup file
-cargo run -- validate --backup-file /path/to/backup.leveldb
-
-# Analyze schema and generate DDL
-cargo run -- analyze --backup-file /path/to/backup.leveldb --output schema.sql
-
-# Import data to PostgreSQL
-# (5433 is the host port docker-compose publishes; see docker-compose.yml)
-cargo run -- import --backup-file /path/to/backup.leveldb --postgres-url postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev
-```
-
-### Serving the same data to Firestore SDKs
-
-```bash
-# Load the export into the local data plane's store, in the same database.
-cargo run -- local seed --backup-file /path/to/export \
-  --postgres-url postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev \
-  --project-id my-project
-
-# Serve it. One port: gRPC and HTTP/1.1.
-cargo run -- local \
-  --postgres-url postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev \
-  --project-id my-project
-```
-
-Then point any official SDK at it with the documented environment variables —
-no code change, no Fireup-specific shim:
-
-```bash
-export FIRESTORE_EMULATOR_HOST=127.0.0.1:4589
-export DATASTORE_EMULATOR_HOST=127.0.0.1:4589
-export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:4589
-curl http://127.0.0.1:4589/health
-```
-
-Flags, the auth surface, storage layout, and the full fidelity matrix are in
-**[docs/local/README.md](docs/local/README.md)**.
-
-## PostgreSQL Client Connection
-
-Once data is imported, you can connect to PostgreSQL using any standard client:
-
-### Using psql
-
-```bash
-# Connect to the development database
 psql -h localhost -p 5433 -U fireup -d fireup_dev
-
-# List imported tables — they land in fireup_data, not public, because
-# init.sql sets the database search path
 \dt fireup_data.*
-
-# Query imported data: one table per collection in the export
 SELECT * FROM fireup_data.cities LIMIT 10;
 ```
+
+Connection string:
+
+```
+postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev
+```
+
+Tables from `fireup import` land in `fireup_data` (see `init.sql`). Document
+plane rows live in `fireup_local_documents` — see
+[docs/local/END_TO_END.md](docs/local/END_TO_END.md#step-6--sql-on-the-same-database).
 
 `fireup_data.import_summary` used to be suggested here. The container never
 created it, nothing ever wrote the `fireup_data.import_audit` table it read,
@@ -213,15 +256,70 @@ not queryable from SQL.
 
 2. Navigate to `fireup_dev` → `Schemas` → `fireup_data` to see imported tables
 
-### Connection String Format
+## Troubleshooting
 
+1. **PostgreSQL connection refused**
+   - Ensure Docker is running: `docker compose ps`
+   - Check port availability: `netstat -an | grep 5433` (or `lsof -i :5433`)
+
+2. **SDK still hits production or Google's emulator**
+   - Confirm the three `*_EMULATOR_HOST` variables in the **same** process that
+     starts your app (shell, IDE run config, container env).
+   - Confirm `projectId` matches `--project-id` / `FIREUP_LOCAL_PROJECT_ID`.
+
+3. **Permission denied errors**
+   - Verify PostgreSQL user permissions in `init.sql`
+   - Check Docker volume permissions
+
+4. **Out of memory during import**
+   - Reduce batch size via CLI flags (see `fireup import --help`)
+   - Increase Docker memory limits in `docker-compose.yml`
+
+5. **An SDK read returns a map where you expected a timestamp, blob, geo point,
+   or document reference**
+   - `fireup local seed` restores those four from the export parser's
+     `__fireup_type__` tags, so a map means the tag was not one Fireup knows —
+     check the stored row and re-seed with a current build. See
+     [docs/local/END_TO_END.md](docs/local/END_TO_END.md#what-seeding-does-with-datastore-value-types).
+
+6. **An SDK call fails with `UNIMPLEMENTED`**
+   - Expected for gaps: check the
+     [fidelity matrix](docs/local/README.md#fidelity-matrix) before treating it
+     as a bug.
+
+## Documentation
+
+| Document | What is in it |
+|---|---|
+| [docs/local/END_TO_END.md](docs/local/END_TO_END.md) | The end-to-end workflow: export → SQL tables → live API → SQL, and its fidelity gaps |
+| [docs/local/README.md](docs/local/README.md) | `fireup local`: flags, fidelity matrix, auth surface, storage layout, tests |
+| [PROJECT_STATUS.md](PROJECT_STATUS.md) | What is proven, what is not, and the residual risks |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Running the migrator against the local PostgreSQL container: compose defaults, the `.env` renames that break it, where rows land, live and inert configuration |
+| [docs/INTEGRATION_TESTING.md](docs/INTEGRATION_TESTING.md) | The integration test suite |
+| [docs/licenses/FIREBASE_GCP_LOCAL.md](docs/licenses/FIREBASE_GCP_LOCAL.md) | Licence and attribution ledger for everything Google/Firebase-related |
+| [docs/licenses/CARGO_LICENSE_AUDIT.md](docs/licenses/CARGO_LICENSE_AUDIT.md) | `cargo license` audit that cleared Apache-2.0 for the dependency tree |
+| [tests/fixtures/README.md](tests/fixtures/README.md) | The managed-export fixtures and their binary format |
+
+## For contributors
+
+### Prerequisites
+
+- Rust 1.70+
+- Docker and Docker Compose
+- Git
+
+### Development setup
+
+```bash
+git clone https://github.com/asakaxgit/fireup.git
+cd fireup
+cp .env.example .env
+docker compose up -d postgres
+cargo build
+cargo run -- --help
 ```
-postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev
-```
 
-## Development
-
-### Project Structure
+### Project structure
 
 ```
 src/
@@ -230,17 +328,8 @@ src/
 ├── types.rs             # Core data structures
 ├── monitoring.rs        # Logging and monitoring
 ├── leveldb_parser/      # LevelDB parsing functionality
-│   ├── parser.rs        # Main parsing logic
-│   └── validator.rs     # Backup validation
 ├── schema_analyzer/     # Schema analysis and normalization
-│   ├── analyzer.rs      # Document structure analysis
-│   ├── normalizer.rs    # Database normalization
-│   ├── ddl_generator.rs # DDL generation
-│   └── ...
 ├── data_importer/       # PostgreSQL import functionality
-│   ├── importer.rs      # Main import logic
-│   ├── transformer.rs   # Data transformation
-│   └── ...
 ├── protos/              # Stubs generated from the public googleapis protos
 └── local/               # The local data plane (`fireup local`)
     ├── mod.rs           # Server wiring and protocol multiplexing
@@ -257,7 +346,7 @@ docs/local/              # Local data plane documentation
 proto/google/            # Vendored public googleapis .proto files (Apache-2.0)
 ```
 
-### Environment Variables
+### Environment variables
 
 Copy `.env.example` to `.env`. It configures the Docker Compose services, not
 the binary:
@@ -279,23 +368,17 @@ when the URL omits them. `DATABASE_URL`, `RUST_LOG` and the `FIREUP_*`
 variables are read by nothing; see
 [DEPLOYMENT.md §3](DEPLOYMENT.md#3-the-knobs-that-exist).
 
-### Running Tests
+### Running tests
 
 ```bash
-# Run all tests
 cargo test
-
-# Run with output
 cargo test -- --nocapture
-
-# Run specific test module
 cargo test leveldb_parser
 
 # The local data plane, over real gRPC and real HTTP/1.1
 cargo test --test local_firestore_tests --test local_datastore_tests --test local_auth_tests
 
-# The same surface driven by Google's official client SDKs, which is the layer
-# that catches what tests written from our own reading of the spec cannot
+# Official client SDKs against a live server
 scripts/smoke-local-firestore.sh
 scripts/smoke-local-datastore.sh
 scripts/smoke-local-auth.sh
@@ -314,7 +397,7 @@ those two plus two numbers:
 | **CI** | [`ci.yml`](.github/workflows/ci.yml) — two jobs. `test`: build plus every suite that needs nothing but a Rust toolchain — unit tests, the local data plane over real gRPC/HTTP, export parsing, the CLI and library surface, and the docs-vs-matrix checks. Red there means the code is broken, not that a service failed to start. `deny`: the supply-chain gate below. The badge is red if either fails. |
 | **Coverage** | [`coverage.yml`](.github/workflows/coverage.yml) — runs `scripts/coverage.sh` and **fails under 75% line coverage**. The full HTML report is attached to each run as the `coverage-report` artifact, and the summary table is printed in the run's summary. |
 | **line coverage** | The enforced floor, not a live reading. A number nobody checks drifts; a floor that fails the build does not. The real figure for a commit is in that run's summary. |
-| **fidelity matrix** | How many of the 119 documented `fireup local` behaviours are served, from [`tests/conformance/matrix.json`](tests/conformance/matrix.json). `cargo test --test fidelity_matrix_tests` fails if the badge and the matrix disagree, so it cannot go stale. |
+| **fidelity matrix** | How many of the documented `fireup local` behaviours are served, from [`tests/conformance/matrix.json`](tests/conformance/matrix.json). `cargo test --test fidelity_matrix_tests` fails if the badge and the matrix disagree, so it cannot go stale. |
 
 ```bash
 scripts/coverage.sh          # the same thing CI runs; report in target/coverage/
@@ -362,21 +445,13 @@ The two older workflows — [`local_firestore.yml`](.github/workflows/local_fire
 from adding a badge: `integration_tests.yml` gates on `cargo fmt --check` and
 `cargo clippy -D warnings`, both of which currently fail on `main`.
 
-### Docker Commands
+### Docker commands
 
 ```bash
-# Start PostgreSQL
-docker-compose up -d postgres
-
-# View logs
-docker-compose logs -f postgres
-
-# Stop services
-docker-compose down
-
-# Reset database (removes all data)
-docker-compose down -v
-docker-compose up -d postgres
+docker compose up -d postgres
+docker compose logs -f postgres
+docker compose down
+docker compose down -v && docker compose up -d postgres   # reset data
 ```
 
 ### Logging
@@ -386,48 +461,6 @@ The application uses structured logging with the `tracing` crate:
 - Set `RUST_LOG=debug` for verbose output
 - Set `RUST_LOG=fireup=info` for application-specific logs
 - Logs include structured fields for filtering and analysis
-
-## Troubleshooting
-
-### Common Issues
-
-1. **PostgreSQL connection refused**
-   - Ensure Docker container is running: `docker-compose ps`
-   - Check port availability: `netstat -an | grep 5433`
-
-2. **Permission denied errors**
-   - Verify PostgreSQL user permissions in `init.sql`
-   - Check Docker volume permissions
-
-3. **Out of memory during import**
-   - Reduce `FIREUP_MAX_BATCH_SIZE` in environment
-   - Increase Docker memory limits in `docker-compose.yml`
-
-4. **An SDK read returns a map where you expected a timestamp, blob, geo point,
-   or document reference**
-   - `fireup local seed` restores those four from the export parser's
-     `__fireup_type__` tags, so a map means the tag was not one Fireup knows —
-     check the stored row and re-seed with a current build. See
-     [docs/local/END_TO_END.md](docs/local/END_TO_END.md#what-seeding-does-with-datastore-value-types).
-
-5. **An SDK call fails with `UNIMPLEMENTED`**
-   - Also expected: an unsupported feature is an explicit error rather than a
-     wrong answer, and the message names the gap. Check the
-     [fidelity matrix](docs/local/README.md#fidelity-matrix) before treating it
-     as a bug.
-
-## Documentation
-
-| Document | What is in it |
-|---|---|
-| [docs/local/END_TO_END.md](docs/local/END_TO_END.md) | The end-to-end workflow: export → SQL tables → live API → SQL, and its fidelity gaps |
-| [docs/local/README.md](docs/local/README.md) | `fireup local`: flags, fidelity matrix, auth surface, storage layout, tests |
-| [PROJECT_STATUS.md](PROJECT_STATUS.md) | What is proven, what is not, and the residual risks |
-| [DEPLOYMENT.md](DEPLOYMENT.md) | Running the migrator against the local PostgreSQL container: compose defaults, the `.env` renames that break it, where rows land, live and inert configuration |
-| [docs/INTEGRATION_TESTING.md](docs/INTEGRATION_TESTING.md) | The integration test suite |
-| [docs/licenses/FIREBASE_GCP_LOCAL.md](docs/licenses/FIREBASE_GCP_LOCAL.md) | Licence and attribution ledger for everything Google/Firebase-related |
-| [docs/licenses/CARGO_LICENSE_AUDIT.md](docs/licenses/CARGO_LICENSE_AUDIT.md) | `cargo license` audit that cleared Apache-2.0 for the dependency tree |
-| [tests/fixtures/README.md](tests/fixtures/README.md) | The managed-export fixtures and their binary format |
 
 ## License
 
