@@ -70,9 +70,10 @@ export DATASTORE_EMULATOR_HOST=127.0.0.1:4589
 export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:4589
 ```
 
-That is the whole switch. Node (`@google-cloud/firestore`, `firebase-admin`),
-Python, Go, Java, and the Firebase client SDKs all honour those variables and
-talk plaintext to Fireup instead of the cloud. No Fireup-specific shim.
+That is the whole switch. Node (`@google-cloud/firestore`,
+`firebase-admin/firestore`), Python, Go, Java, and the Firebase client SDKs all
+honour those variables and talk plaintext to Fireup instead of the cloud. No
+Fireup-specific shim.
 
 If you previously used Google's Firebase Emulator Suite, replace
 `localhost:8080` (Firestore) / `localhost:9099` (Auth) — or whatever you had in
@@ -88,16 +89,43 @@ curl -fsS http://127.0.0.1:4589/health
 curl -fsS http://127.0.0.1:4589/
 ```
 
-**From your app** — same code path you use today, with the env vars above:
+**From your app** — same code path you use today, with the env vars above.
+Both of the Node Firestore clients honour `FIRESTORE_EMULATOR_HOST` and need
+no Fireup-specific shim (match `projectId` to `--project-id`):
+
+`@google-cloud/firestore`:
 
 ```js
 import { Firestore } from '@google-cloud/firestore'
 
-const db = new Firestore({ projectId: 'fireup-local' }) // match --project-id
+const db = new Firestore({ projectId: 'fireup-local' })
 await db.doc('demo/hello').set({ ok: true, at: new Date() })
 const snap = await db.doc('demo/hello').get()
 console.log(snap.data())
 ```
+
+`firebase-admin/firestore` (set the env var *before* `initializeApp` — the
+Admin SDK reads it at init, per Google's
+[Connect your app to the Cloud Firestore Emulator](https://firebase.google.com/docs/emulator-suite/connect_firestore)
+page):
+
+```js
+import { initializeApp } from 'firebase-admin/app'
+import { getFirestore } from 'firebase-admin/firestore'
+
+// Prefer exporting FIRESTORE_EMULATOR_HOST in the shell (step 2). If you must
+// set it in process, do it before initializeApp:
+// process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:4589'
+
+initializeApp({ projectId: 'fireup-local' })
+const db = getFirestore()
+await db.doc('demo/hello').set({ ok: true, at: new Date() })
+const snap = await db.doc('demo/hello').get()
+console.log(snap.data())
+```
+
+A thin Fireup wrapper around the Admin SDK is intentionally out of scope for
+this Quickstart; use the official clients above until one ships.
 
 **Repo-bundled official-SDK smokes** (build Fireup, start a temporary server,
 drive Google's clients):
