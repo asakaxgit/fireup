@@ -840,7 +840,7 @@ decompiled or unpacked.
 | Independent-implementation blurb preserved where relevant | Yes — unchanged on `src/local/datastore.rs` |
 | No production key material | n/a — nothing added |
 
-### Datastore named namespaces (PR pending)
+### #149 — Datastore named namespaces
 
 No new dependency, proto, or artefact. Non-empty `PartitionId.namespace_id`
 maps onto a Fireup-private `__ns__/{namespace_id}/` prefix under the documents
@@ -850,10 +850,9 @@ request partition's namespace; reserved `__.*__` namespace ids are
 and Google's public
 [multitenancy](https://cloud.google.com/datastore/docs/concepts/multitenancy)
 page. Checked with the already-rowed `@google-cloud/datastore` client. No
-emulator binary was decompiled or unpacked. PR number filled in when the pull
-request opens.
+emulator binary was decompiled or unpacked.
 
-| Checklist item | Namespaces |
+| Checklist item | #149 |
 |---|---|
 | No RE of proprietary binaries | Yes — public docs + vendored protos + open-source client as a client |
 | New deps/protos logged in this ledger | Yes — none added |
