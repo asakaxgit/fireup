@@ -881,29 +881,6 @@ emulator binary was decompiled or unpacked.
 | Independent-implementation blurb preserved where relevant | Yes — unchanged on `src/local/datastore.rs` |
 | No production key material | n/a — nothing added |
 
-### PR-pending — Datastore `RunAggregationQuery` (count / sum / avg)
-
-No new dependency, proto, or artefact. `RunAggregationQuery` serves structured
-`AggregationQuery` aggregations (`count`, including optional `up_to`; `sum`;
-`avg`) over a nested `Query`, from the vendored `query.proto` /
-`aggregation_result.proto` and Google's public
-[aggregation queries](https://cloud.google.com/datastore/docs/aggregation-queries)
-page. Nested projection on the nested query is cleared so `sum`/`avg` still see
-the property; filters, limit, offset, and cursors still apply. GQL aggregations
-and nested aggregation property paths stay `UNIMPLEMENTED`. Firestore
-`RunAggregationQuery` stays refused. Checked with the already-rowed
-`@google-cloud/datastore` client. No emulator binary was decompiled or unpacked.
-(Ledger heading updated to the PR number when the PR opens.)
-
-| Checklist item | Datastore aggregations |
-|---|---|
-| No RE of proprietary binaries | Yes — public docs + vendored protos + open-source client as a client |
-| New deps/protos logged in this ledger | Yes — none added |
-| For a REST/JSON surface: public sources named | n/a (gRPC); the public aggregation-queries page is named above |
-| Undocumented behaviours deferred / listed unsupported | Yes — GQL aggregations and nested property paths refused; Firestore aggregations unchanged |
-| Independent-implementation blurb preserved where relevant | Yes — unchanged on `src/local/datastore.rs` |
-| No production key material | n/a — nothing added |
-
 ### #148 — Kindless ancestor queries
 
 No new dependency, proto, or artefact. Ancestor-bounded kindless `RunQuery`

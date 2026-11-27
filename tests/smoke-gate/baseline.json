@@ -288,6 +288,7 @@
       "a != filter excludes the matching entity",
       "a NOT_IN filter excludes the listed values",
       "a __key__ equality filter returns that entity",
+      "a count() aggregation counts the matching entities",
       "a keys-only query returns keys without properties",
       "a kindless ancestor query returns the ancestor and its descendants",
       "a limited query reports an end cursor and more results after the limit",
@@ -312,12 +313,14 @@
       "property transforms report and store their results",
       "save an entity",
       "seed the filter fixture",
+      "sum() and average() aggregate a numeric property",
       "the maximum transform stays refused with UNIMPLEMENTED"
     ],
     "datastore/postgres": [
       "a != filter excludes the matching entity",
       "a NOT_IN filter excludes the listed values",
       "a __key__ equality filter returns that entity",
+      "a count() aggregation counts the matching entities",
       "a keys-only query returns keys without properties",
       "a kindless ancestor query returns the ancestor and its descendants",
       "a limited query reports an end cursor and more results after the limit",
@@ -342,6 +345,7 @@
       "property transforms report and store their results",
       "save an entity",
       "seed the filter fixture",
+      "sum() and average() aggregate a numeric property",
       "the maximum transform stays refused with UNIMPLEMENTED"
     ],
     "firestore/memory": [
