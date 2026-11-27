@@ -914,6 +914,15 @@
       "note": "#145. Keys-only (`select('__key__')`), property projections, and `distinct_on` / `groupBy` from the vendored query.proto and Google's public projection queries page. Nested projection paths stay UNIMPLEMENTED. Entities missing a projected property are absent."
     },
     {
+      "id": "datastore.kindless-ancestor-queries",
+      "docTable": null,
+      "label": "Datastore kindless ancestor queries",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false,
+      "note": "#148. Ancestor-bounded kindless `RunQuery` (no kind, `HAS_ANCESTOR`) returns the ancestor and every descendant of any kind, from Google's public kindless_queries page. Property-value filters and non-`__key__` orders are INVALID_ARGUMENT. Fully unbounded kindless (no ancestor) stays UNIMPLEMENTED."
+    },
+    {
       "id": "datastore.cursors",
       "docTable": null,
       "label": "Datastore query cursors",

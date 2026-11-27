@@ -122,16 +122,7 @@ await check('a query in a named namespace sees only that namespace', async () =>
   expectNames(rows, ['ns-entity'], 'namespaced query')
 })
 
-await check('a kindless ancestor query returns the ancestor and its descendants', async () => {
-  const parent = key('parent')
-  const child = datastore.key([kind, 'parent', `${kind}Child`, 'child'])
-  await datastore.save([
-    { key: parent, data: { role: 'parent' } },
-    { key: child, data: { role: 'child' } },
-  ])
-  const [rows] = await datastore.runQuery(datastore.createQuery().hasAncestor(parent))
-  expectNames(rows, ['child', 'parent'], 'kindless ancestor query')
-})
+// Kindless ancestor query moved to smoke.mjs once served.
 
 // --- Writes and reads ----------------------------------------------------
 
