@@ -9,7 +9,7 @@
 //! | RPC                  | Status |
 //! |----------------------|--------|
 //! | `Lookup`             | served |
-//! | `RunQuery`           | served (kind queries; `=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`, `AND`, `OR`; GQL refused) |
+//! | `RunQuery`           | served (kind queries; `=`, `<`, `<=`, `>`, `>=`, `!=`, `IN`, `NOT_IN`, `AND`, `OR`; projection / keys-only / `distinct_on`; GQL refused) |
 //! | `Commit`             | served (incl. `property_transforms`) |
 //! | `BeginTransaction`   | served |
 //! | `Rollback`           | served |
@@ -182,15 +182,6 @@ impl DatastoreApi {
         partition_ancestor: Option<&Key>,
         transaction: Option<&[u8]>,
     ) -> Result<QueryResultBatch, Status> {
-        if !query.projection.is_empty() {
-            return Err(unimplemented(
-                "Datastore projection queries",
-                "projections land with a later query pass",
-            ));
-        }
-        if !query.distinct_on.is_empty() {
-            return Err(unimplemented("Datastore distinct_on", "not in Phase 3"));
-        }
         if query.find_nearest.is_some() {
             return Err(unimplemented("Datastore find_nearest", "vector search"));
         }
@@ -199,6 +190,8 @@ impl DatastoreApi {
                 "a Datastore query may name at most one kind",
             ));
         }
+
+        let projection = compile_projection(query)?;
 
         let kind = query
             .kind
@@ -298,16 +291,62 @@ impl DatastoreApi {
                 Ok((document, entity))
             })
             .collect::<Result<Vec<_>, Status>>()?;
+
+        // A projection is an index lookup: an entity without a projected
+        // property has no index entry for it and does not match. Keys-only
+        // projects nothing, so every entity stays.
+        if let Some(plan) = projection.as_ref() {
+            if !plan.properties.is_empty() {
+                rows.retain(|(_, entity)| {
+                    plan.properties
+                        .iter()
+                        .all(|name| entity.properties.contains_key(name))
+                });
+            }
+        }
+
+        // When `distinct_on` is set without an order, sort by those properties
+        // ascending so "first of each group" is stable and matches the public
+        // grouping rule (distinct_on is a prefix of order_by).
+        let order_for_sort: Vec<PropertyOrder> = if query.order.is_empty() {
+            if let Some(plan) = projection.as_ref() {
+                plan.distinct_on
+                    .iter()
+                    .map(|name| PropertyOrder {
+                        property: Some(PropertyReference {
+                            name: name.clone(),
+                        }),
+                        direction: Direction::Ascending as i32,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            query.order.clone()
+        };
+
         let position = |entity: &Entity, cursor: &Entity| {
             compare_positions(
                 entity,
                 cursor,
-                &query.order,
+                &order_for_sort,
                 &self.project_id,
                 &self.database_id,
             )
         };
         rows.sort_by(|(_, left), (_, right)| position(left, right));
+
+        if let Some(plan) = projection.as_ref() {
+            if !plan.distinct_on.is_empty() {
+                apply_distinct_on(
+                    &mut rows,
+                    &plan.distinct_on,
+                    &self.project_id,
+                    &self.database_id,
+                );
+            }
+        }
 
         // Both cursors are the position just after an entity: a page starts
         // after its start cursor and runs up to and including its end cursor.
@@ -326,7 +365,7 @@ impl DatastoreApi {
 
         let offset = (query.offset.max(0) as usize).min(rows.len());
         let skipped_cursor = match offset.checked_sub(1) {
-            Some(last) => encode_cursor(&rows[last].1, &query.order),
+            Some(last) => encode_cursor(&rows[last].1, &order_for_sort),
             None => Vec::new(),
         };
         let mut rows = rows.split_off(offset);
@@ -344,7 +383,7 @@ impl DatastoreApi {
         // started. Never empty — an empty cursor is how a client asks for the
         // first page, so returning one would silently restart the query.
         let end_cursor = match rows.last() {
-            Some((_, entity)) => encode_cursor(entity, &query.order),
+            Some((_, entity)) => encode_cursor(entity, &order_for_sort),
             None if !skipped_cursor.is_empty() => skipped_cursor.clone(),
             None if query.start_cursor.is_empty() => CURSOR_TAG.to_vec(),
             None => query.start_cursor.clone(),
@@ -358,23 +397,36 @@ impl DatastoreApi {
             self.transactions.record_reads(token, &documents, &[])?;
         }
 
+        let result_type = projection
+            .as_ref()
+            .map(|plan| plan.result_type)
+            .unwrap_or(ResultType::Full);
+
         let entity_results = rows
             .into_iter()
-            .map(|(document, entity)| EntityResult {
-                cursor: encode_cursor(&entity, &query.order),
-                entity: Some(entity),
-                version: document
-                    .update_time
-                    .as_ref()
-                    .map(|ts| ts.seconds)
-                    .unwrap_or(0),
-                create_time: document.create_time,
-                update_time: document.update_time,
+            .map(|(document, mut entity)| {
+                // Cursor position is in the sort order over the *full* entity;
+                // projection strips properties after the position is recorded.
+                let cursor = encode_cursor(&entity, &order_for_sort);
+                if let Some(plan) = projection.as_ref() {
+                    project_entity(&mut entity, plan);
+                }
+                EntityResult {
+                    cursor,
+                    entity: Some(entity),
+                    version: document
+                        .update_time
+                        .as_ref()
+                        .map(|ts| ts.seconds)
+                        .unwrap_or(0),
+                    create_time: document.create_time,
+                    update_time: document.update_time,
+                }
             })
             .collect();
 
         Ok(QueryResultBatch {
-            entity_result_type: ResultType::Full as i32,
+            entity_result_type: result_type as i32,
             entity_results,
             skipped_cursor,
             more_results: more_results as i32,
@@ -1095,6 +1147,171 @@ fn operator_matches<T>(
 
 /// The pseudo-property a filter or an order names to mean the entity's key.
 const KEY_PROPERTY: &str = "__key__";
+
+/// What a projection asks `RunQuery` to return.
+///
+/// Compiled from the vendored `Query.projection` / `distinct_on` and the public
+/// [projection / grouping](https://cloud.google.com/datastore/docs/concepts/queries#projection_queries)
+/// rules. Keys-only is the projection of only `__key__`.
+struct ProjectionPlan {
+    /// Non-key property names to keep on each result entity.
+    properties: Vec<String>,
+    /// Properties whose first-seen value combination survives after sorting.
+    distinct_on: Vec<String>,
+    result_type: ResultType,
+}
+
+/// Compile the wire projection / `distinct_on`, or `None` for a full-entity query.
+fn compile_projection(query: &Query) -> Result<Option<ProjectionPlan>, Status> {
+    if query.projection.is_empty() && query.distinct_on.is_empty() {
+        return Ok(None);
+    }
+    if query.projection.is_empty() {
+        return Err(Status::invalid_argument(
+            "a Datastore distinct_on query needs a projection",
+        ));
+    }
+
+    let mut properties = Vec::new();
+    let mut projects_key = false;
+    for entry in &query.projection {
+        let name = entry
+            .property
+            .as_ref()
+            .map(|property| property.name.as_str())
+            .unwrap_or("");
+        if name.is_empty() {
+            return Err(Status::invalid_argument(
+                "a projection property needs a name",
+            ));
+        }
+        if name.contains('.') {
+            return Err(unimplemented(
+                "nested Datastore projection paths",
+                "project a top-level property name",
+            ));
+        }
+        if name == KEY_PROPERTY {
+            projects_key = true;
+            continue;
+        }
+        if properties.iter().any(|seen| seen == name) {
+            continue;
+        }
+        properties.push(name.to_string());
+    }
+
+    let mut distinct_on = Vec::new();
+    for reference in &query.distinct_on {
+        let name = reference.name.as_str();
+        if name.is_empty() {
+            return Err(Status::invalid_argument(
+                "a distinct_on property needs a name",
+            ));
+        }
+        if name.contains('.') {
+            return Err(unimplemented(
+                "nested Datastore distinct_on paths",
+                "group by a top-level property name",
+            ));
+        }
+        if name == KEY_PROPERTY {
+            // The key is always distinct per entity; grouping on it alone is a
+            // no-op. Still legal to name beside projected properties.
+            continue;
+        }
+        if !properties.iter().any(|seen| seen == name) {
+            return Err(Status::invalid_argument(format!(
+                "distinct_on property {name} must also be in the projection"
+            )));
+        }
+        if distinct_on.iter().any(|seen| seen == name) {
+            continue;
+        }
+        distinct_on.push(name.to_string());
+    }
+
+    // Public queries page: distinct_on properties must appear before any
+    // non-distinct_on property in order_by when order_by is present.
+    if !distinct_on.is_empty() && !query.order.is_empty() {
+        let order_names: Vec<&str> = query
+            .order
+            .iter()
+            .filter_map(|term| term.property.as_ref().map(|property| property.name.as_str()))
+            .collect();
+        if order_names.len() < distinct_on.len()
+            || distinct_on
+                .iter()
+                .zip(order_names.iter())
+                .any(|(want, got)| want != got)
+        {
+            return Err(Status::invalid_argument(
+                "distinct_on properties must appear before any other property in order_by",
+            ));
+        }
+    }
+
+    let keys_only = projects_key && properties.is_empty();
+    let result_type = if keys_only {
+        ResultType::KeyOnly
+    } else {
+        ResultType::Projection
+    };
+
+    Ok(Some(ProjectionPlan {
+        properties,
+        distinct_on,
+        result_type,
+    }))
+}
+
+/// Keep the first entity of each distinct combination of `distinct_on` values.
+///
+/// Callers must have sorted `rows` so that entities sharing those values are
+/// adjacent and the first of each group is the one the public grouping rule
+/// wants. Compared through the same value order as sort/`compare_ds_values`.
+fn apply_distinct_on(
+    rows: &mut Vec<(Document, Entity)>,
+    distinct_on: &[String],
+    project_id: &str,
+    database_id: &str,
+) {
+    let mut kept = Vec::with_capacity(rows.len());
+    let mut previous: Option<Vec<Option<DsValue>>> = None;
+    for row in rows.drain(..) {
+        let signature: Vec<Option<DsValue>> = distinct_on
+            .iter()
+            .map(|name| row.1.properties.get(name).cloned())
+            .collect();
+        let same = previous.as_ref().is_some_and(|prev| {
+            prev.iter().zip(signature.iter()).all(|(left, right)| {
+                match (left, right) {
+                    (None, None) => true,
+                    (Some(left), Some(right)) => {
+                        compare_ds_values(left, right, project_id, database_id) == Ordering::Equal
+                    }
+                    _ => false,
+                }
+            })
+        });
+        if !same {
+            previous = Some(signature);
+            kept.push(row);
+        }
+    }
+    *rows = kept;
+}
+
+/// Strip every property the projection did not name. Keys-only clears all.
+fn project_entity(entity: &mut Entity, plan: &ProjectionPlan) {
+    if plan.properties.is_empty() {
+        entity.properties.clear();
+        return;
+    }
+    entity
+        .properties
+        .retain(|name, _| plan.properties.iter().any(|keep| keep == name));
+}
 
 fn is_key_filter(filter: &PropertyFilter) -> bool {
     filter

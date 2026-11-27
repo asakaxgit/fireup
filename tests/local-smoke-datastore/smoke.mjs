@@ -318,6 +318,38 @@ await check('seed the filter fixture', async () => {
   ])
 }, { served: ['datastore.Commit'] })
 
+// --- Projections -----------------------------------------------------------
+//
+// Moved from backlog.mjs once served. Same fixture as the filter checks above.
+
+await check('a keys-only query returns keys without properties', async () => {
+  const [rows] = await datastore.runQuery(datastore.createQuery(filterKind).select('__key__'))
+  expectNames(rows, ['a', 'b', 'c'], 'keys-only query')
+  if (rows.some((row) => row.priority !== undefined)) {
+    throw new Error(`keys-only rows carried properties: ${JSON.stringify(rows)}`)
+  }
+}, { served: ['datastore.projection-queries', 'datastore.RunQuery'] })
+
+await check('a projection query returns only the selected properties', async () => {
+  const [rows] = await datastore.runQuery(
+    datastore.createQuery(filterKind).select('priority').order('priority'),
+  )
+  const got = rows.map((row) => ({ priority: row.priority, owner: row.owner }))
+  const want = [1, 2, 3].map((priority) => ({ priority, owner: undefined }))
+  if (JSON.stringify(got) !== JSON.stringify(want)) {
+    throw new Error(`projection returned ${JSON.stringify(rows)}`)
+  }
+}, { served: ['datastore.projection-queries', 'datastore.RunQuery'] })
+
+await check('groupBy returns one entity per distinct value', async () => {
+  const query = datastore.createQuery(filterKind).select('owner').groupBy('owner').order('owner')
+  const [rows] = await datastore.runQuery(query)
+  const owners = rows.map((row) => row.owner)
+  if (JSON.stringify(owners) !== JSON.stringify(['ada', 'bob'])) {
+    throw new Error(`groupBy returned owners ${JSON.stringify(owners)}`)
+  }
+}, { served: ['datastore.projection-queries', 'datastore.RunQuery'] })
+
 await check('a != filter excludes the matching entity', async () => {
   const query = datastore.createQuery(filterKind).filter(new PropertyFilter('priority', '!=', 2))
   const [rows] = await datastore.runQuery(query)

@@ -73,34 +73,6 @@ await check('seed the backlog fixture', async () => {
   await datastore.save(fixture.map(({ name, data }) => ({ key: key(name), data })))
 })
 
-// --- Projections ---------------------------------------------------------
-
-await check('a keys-only query returns keys without properties', async () => {
-  const [rows] = await datastore.runQuery(datastore.createQuery(kind).select('__key__'))
-  expectNames(rows, ['a', 'b', 'c'], 'keys-only query')
-  if (rows.some((row) => row.priority !== undefined)) {
-    throw new Error(`keys-only rows carried properties: ${JSON.stringify(rows)}`)
-  }
-})
-
-await check('a projection query returns only the selected properties', async () => {
-  const [rows] = await datastore.runQuery(datastore.createQuery(kind).select('priority').order('priority'))
-  const got = rows.map((row) => ({ priority: row.priority, owner: row.owner }))
-  const want = [1, 2, 3].map((priority) => ({ priority, owner: undefined }))
-  if (JSON.stringify(got) !== JSON.stringify(want)) {
-    throw new Error(`projection returned ${JSON.stringify(rows)}`)
-  }
-})
-
-await check('groupBy returns one entity per distinct value', async () => {
-  const query = datastore.createQuery(kind).select('owner').groupBy('owner').order('owner')
-  const [rows] = await datastore.runQuery(query)
-  const owners = rows.map((row) => row.owner)
-  if (JSON.stringify(owners) !== JSON.stringify(['ada', 'bob'])) {
-    throw new Error(`groupBy returned owners ${JSON.stringify(owners)}`)
-  }
-})
-
 // --- Filters -------------------------------------------------------------
 
 await check('an AND of two equality filters matches both', async () => {

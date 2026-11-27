@@ -1,8 +1,8 @@
 /**
  * Probes for the `google.datastore.v1.Datastore` rows of the fidelity matrix,
  * and for the refusals the README names in prose right after that table
- * (namespaces, GQL, projection queries, nested property masks), and for
- * query cursors.
+ * (namespaces, GQL, nested property masks), and for query cursors and
+ * projection / keys-only / `groupBy`.
  *
  * Driven by `@google-cloud/datastore` — the official library — except where it
  * exposes no way to send the field under test, which is the case for
@@ -428,11 +428,45 @@ export const datastoreProbes = [
 
   {
     id: 'datastore.projection-queries',
-    unimplemented: async ({ datastore, freshKind, expectUnimplemented }) => {
+    served: async ({ datastore, freshKind }) => {
       const kind = await seedTasks(datastore, freshKind('projection'))
-      const query = datastore.createQuery(kind).select(['priority'])
 
-      await expectUnimplemented(() => datastore.runQuery(query), { names: /projection/i })
+      // Keys-only: select('__key__') returns every key and no properties.
+      const [keysOnly] = await datastore.runQuery(
+        datastore.createQuery(kind).select('__key__'),
+      )
+      assert.deepEqual([...names(keysOnly, datastore)].sort(), ['a', 'b', 'c', 'd'])
+      assert.ok(
+        keysOnly.every((row) => row.priority === undefined),
+        `keys-only rows carried properties: ${JSON.stringify(keysOnly)}`,
+      )
+
+      // Projection keeps only the named properties.
+      const [projected] = await datastore.runQuery(
+        datastore.createQuery(kind).select('priority').order('priority'),
+      )
+      assert.deepEqual(
+        projected.map((row) => ({ priority: row.priority, done: row.done })),
+        [
+          { priority: 1, done: undefined },
+          { priority: 2, done: undefined },
+          { priority: 3, done: undefined },
+          { priority: 4, done: undefined },
+        ],
+      )
+
+      // groupBy / distinct_on keeps the first of each distinct projected value.
+      const [grouped] = await datastore.runQuery(
+        datastore
+          .createQuery(kind)
+          .select('done')
+          .groupBy('done')
+          .order('done'),
+      )
+      assert.deepEqual(
+        grouped.map((row) => row.done).sort(),
+        [false, true],
+      )
     },
   },
 
