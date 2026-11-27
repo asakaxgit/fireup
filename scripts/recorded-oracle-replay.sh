@@ -5,15 +5,20 @@
 # same doc-cited scenarios, and compares assertion maps to fixtures/.
 #
 # Usage: scripts/recorded-oracle-replay.sh [port]
+#
+# Omitting the port picks a free loopback port so parallel gate runs cannot
+# collide with a smoke suite on a shared host.
 
 set -euo pipefail
 
 export PATH="$HOME/.cargo/bin:$PATH"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/pick-free-port.sh
+source "$repo_root/scripts/lib/pick-free-port.sh"
 oracle_dir="$repo_root/tests/recorded-oracle"
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
-port="${1:-4591}"
+port="$(fireup_resolve_port "${1:-}")"
 log="$(mktemp -t fireup-recorded-oracle.XXXXXX.log)"
 
 server_pid=""
@@ -46,13 +51,10 @@ for _ in $(seq 1 50); do
   " 2>/dev/null; then
     break
   fi
-  if ! kill -0 "$server_pid" 2>/dev/null; then
-    echo "fireup local exited before accepting connections:" >&2
-    cat "$log" >&2
-    exit 1
-  fi
+  fireup_fail_if_server_died "$server_pid" "$log" "$port"
   sleep 0.1
 done
+fireup_fail_if_server_died "$server_pid" "$log" "$port"
 
 echo "==> replaying recorded-oracle fixtures"
 status=0

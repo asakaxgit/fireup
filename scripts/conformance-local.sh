@@ -40,7 +40,9 @@ python_dir="$repo_root/tests/conformance/python"
 # Honour CARGO_TARGET_DIR, or the binary we start is not the one we built —
 # which is also what makes this work from a git worktree.
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
-port="${1:-4589}"
+# shellcheck source=lib/pick-free-port.sh
+source "$repo_root/scripts/lib/pick-free-port.sh"
+port="$(fireup_resolve_port "${1:-}")"
 log="$(mktemp -t fireup-conformance.XXXXXX.log)"
 
 server_pid=""
@@ -82,13 +84,10 @@ for _ in $(seq 1 100); do
   " 2>/dev/null; then
     break
   fi
-  if ! kill -0 "$server_pid" 2>/dev/null; then
-    echo "fireup local exited before accepting connections:" >&2
-    cat "$log" >&2
-    exit 1
-  fi
+  fireup_fail_if_server_died "$server_pid" "$log" "$port"
   sleep 0.1
 done
+fireup_fail_if_server_died "$server_pid" "$log" "$port"
 
 export FIRESTORE_EMULATOR_HOST="127.0.0.1:$port"
 export DATASTORE_EMULATOR_HOST="127.0.0.1:$port"

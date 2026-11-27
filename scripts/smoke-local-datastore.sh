@@ -5,6 +5,9 @@
 #
 # Usage: scripts/smoke-local-datastore.sh [port]
 #
+# Omitting the port picks a free loopback port so parallel gate runs on a
+# shared host cannot cross-talk. An explicit port keeps the old behaviour.
+#
 # Set FIREUP_SMOKE_POSTGRES_URL to run against the PostgreSQL store.
 # Set FIREUP_SMOKE_ENTRY to run another file in tests/local-smoke-datastore —
 # `backlog.mjs`, the triage role's input (docs/local/TRIAGE.md) — against the
@@ -15,12 +18,14 @@ set -euo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/pick-free-port.sh
+source "$repo_root/scripts/lib/pick-free-port.sh"
 smoke_dir="$repo_root/tests/local-smoke-datastore"
 # Honour CARGO_TARGET_DIR, or the binary we start is not the one we built —
 # which is every run from a git worktree, where the default target directory is
 # not $repo_root/target.
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
-port="${1:-4589}"
+port="$(fireup_resolve_port "${1:-}")"
 log="$(mktemp -t fireup-local-datastore-smoke.XXXXXX.log)"
 
 server_pid=""
@@ -61,13 +66,10 @@ for _ in $(seq 1 50); do
   " 2>/dev/null; then
     break
   fi
-  if ! kill -0 "$server_pid" 2>/dev/null; then
-    echo "fireup local exited before accepting connections:" >&2
-    cat "$log" >&2
-    exit 1
-  fi
+  fireup_fail_if_server_died "$server_pid" "$log" "$port"
   sleep 0.1
 done
+fireup_fail_if_server_died "$server_pid" "$log" "$port"
 
 echo "==> running the Datastore SDK smoke test"
 # Bounded for the reason given in `smoke-local-firestore.sh`: a client that hangs
