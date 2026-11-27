@@ -1184,8 +1184,12 @@ both halves.
 
 Never point `FIREUP_TEST_POSTGRES_URL` at a database or role you do not own; the
 shared guard in `tests/postgres_test_env.rs` refuses any role or database named
-in `FIREUP_TEST_POSTGRES_DENY`, and the tests skip rather than fall back when no
-URL is set.
+in `FIREUP_TEST_POSTGRES_DENY`. Locally the tests skip when no URL is set; under
+CI (`CI` / `GITHUB_ACTIONS`) they fail instead — a silent skip would hide
+Memory vs Postgres divergence. The `postgres store and pushdown suites` job in
+`.github/workflows/ci.yml` sets the URL and runs `local_query_pushdown_tests`,
+`local_datastore_pushdown_tests`, `local_postgres_store_tests`, and
+`local_auth_postgres_tests` on every pull request.
 
 The Rust tests can pass while the SDK test fails — the SDK picks its own RPCs
 (`.get()` goes to `BatchGetDocuments`, `.set()` goes to `Commit`, a query goes to
