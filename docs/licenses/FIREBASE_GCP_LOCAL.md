@@ -840,7 +840,7 @@ decompiled or unpacked.
 | Independent-implementation blurb preserved where relevant | Yes — unchanged on `src/local/datastore.rs` |
 | No production key material | n/a — nothing added |
 
-### Kindless ancestor queries (PR pending)
+### #148 — Kindless ancestor queries
 
 No new dependency, proto, or artefact. Ancestor-bounded kindless `RunQuery`
 (no kind + `HAS_ANCESTOR`) returns the ancestor and every descendant of any
@@ -849,9 +849,9 @@ kind, from Google's public
 page. Property-value filters and non-`__key__` orders on a kindless query are
 `INVALID_ARGUMENT`. Fully unbounded kindless stays `UNIMPLEMENTED`. Checked
 with the already-rowed `@google-cloud/datastore` client. No emulator binary was
-decompiled or unpacked. PR number filled in when the pull request opens.
+decompiled or unpacked.
 
-| Checklist item | Kindless ancestor |
+| Checklist item | #148 |
 |---|---|
 | No RE of proprietary binaries | Yes — public docs + vendored protos + open-source client as a client |
 | New deps/protos logged in this ledger | Yes — none added |

@@ -920,7 +920,7 @@
       "status": "served",
       "driver": "node-sdk",
       "python": false,
-      "note": "Ancestor-bounded kindless `RunQuery` (no kind, `HAS_ANCESTOR`) returns the ancestor and every descendant of any kind, from Google's public kindless_queries page. Property-value filters and non-`__key__` orders are INVALID_ARGUMENT. Fully unbounded kindless (no ancestor) stays UNIMPLEMENTED."
+      "note": "#148. Ancestor-bounded kindless `RunQuery` (no kind, `HAS_ANCESTOR`) returns the ancestor and every descendant of any kind, from Google's public kindless_queries page. Property-value filters and non-`__key__` orders are INVALID_ARGUMENT. Fully unbounded kindless (no ancestor) stays UNIMPLEMENTED."
     },
     {
       "id": "datastore.cursors",
