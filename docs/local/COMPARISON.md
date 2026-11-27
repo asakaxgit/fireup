@@ -165,13 +165,13 @@ a cell was reworded.
 | `PartitionQuery` | `UNIMPLEMENTED` | **no `[M]`** — `UNIMPLEMENTED: Method … /PartitionQuery is unimplemented`, the same status Fireup returns | yes |
 | `ExecutePipeline` | `UNIMPLEMENTED` | not documented `[D]` | preview |
 
-Fireup refuses four of the 17. The emulator serves two of them —
-streaming `Write` and `RunAggregationQuery` — so if you need
-`count()`/`sum()`/`average()` locally today, that is the honest answer: Google's
-emulator, not Fireup. `PartitionQuery` is the row measurement corrected: both
-refuse it, so there is no local option at all. Fireup's refusals are an explicit
-`UNIMPLEMENTED` whose message names the gap, which is a different promise from
-serving them, and a weaker one.
+Fireup refuses four of the 17 Firestore RPCs. The emulator serves two of them —
+streaming `Write` and Firestore `RunAggregationQuery`. Datastore
+`RunAggregationQuery` (`count`/`sum`/`avg`) is served on Fireup's Datastore
+surface; the Firestore aggregation RPC stays refused. `PartitionQuery` is the
+row measurement corrected: both refuse it, so there is no local option at all.
+Fireup's refusals are an explicit `UNIMPLEMENTED` whose message names the gap,
+which is a different promise from serving them, and a weaker one.
 
 ### Realtime listeners, in detail
 
@@ -297,13 +297,13 @@ wrong — see the correction below the table.
 | `BeginTransaction / Rollback` | served | yes `[M]`, in Datastore mode — a conflict blocks past a 60s client deadline | yes |
 | `AllocateIds` | served | yes `[M]`, in Datastore mode | yes |
 | `ReserveIds` | served | yes `[M]`, in Datastore mode | yes |
-| `RunAggregationQuery` | `UNIMPLEMENTED` | yes `[M]`, in Datastore mode | yes |
+| `RunAggregationQuery` | served (`count`/`sum`/`avg`) | yes `[M]`, in Datastore mode | yes |
 
 Fireup's extra property: Datastore kinds and Firestore collections are **the
 same rows**, so an entity written through the Datastore API is readable through
 the Firestore API and as a SQL row. Keys-only / property projections /
-`distinct_on` and cursors are served. Non-default namespaces and GQL are
-refused.
+`distinct_on`, cursors, named namespaces, and `RunAggregationQuery`
+(`count`/`sum`/`avg`) are served. GQL aggregations stay refused.
 
 **Correction, from measuring instead of reading.** The emulator the Firebase CLI
 downloads *does* emulate Datastore. In its default mode every Datastore RPC

@@ -185,7 +185,7 @@ This is an independent implementation of Google's published APIs. It is not the 
 
 FIRESTORE: document CRUD, StructuredQuery, collection listings, and transactions. Realtime listeners, field transforms, and aggregations return UNIMPLEMENTED.
 
-DATASTORE: Lookup, RunQuery, Commit, BeginTransaction, AllocateIds on the same store as Firestore (kinds map to collections). GQL, aggregations, namespaces, and property transforms return UNIMPLEMENTED.
+DATASTORE: Lookup, RunQuery, RunAggregationQuery (count/sum/avg), Commit, BeginTransaction, AllocateIds, and named namespaces on the same store as Firestore (kinds map to collections). GQL and nested aggregation property paths return UNIMPLEMENTED.
 
 AUTH: email/password sign-up and sign-in, anonymous sign-in, custom-token sign-in, token refresh, admin account CRUD, and the email flows (password reset, email verification, email-link sign-in). No mail is sent: the link is logged and readable at GET /emulator/v1/projects/{p}/oobCodes. Phone auth, multi-factor enrolment, and federated providers are not served.
 
