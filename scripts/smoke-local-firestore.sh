@@ -3,8 +3,10 @@
 # Phase 0 exit criterion: prove an *official* Firestore client SDK can talk to
 # `fireup local` over FIRESTORE_EMULATOR_HOST.
 #
-# Builds fireup, starts the local server on a free port, runs the Node smoke
-# test in tests/local-smoke, and tears the server down.
+# Builds fireup, starts the local server on a free port (or the port given as
+# `$1`), runs the Node smoke test in tests/local-smoke, and tears the server
+# down. Omitting the port picks a free loopback port so parallel gate runs on
+# a shared host cannot cross-talk.
 #
 # Usage: scripts/smoke-local-firestore.sh [port]
 #
@@ -20,13 +22,13 @@ set -euo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/pick-free-port.sh
+source "$repo_root/scripts/lib/pick-free-port.sh"
 smoke_dir="$repo_root/tests/local-smoke"
-# Honour CARGO_TARGET_DIR, or the binary we build is not the one we start.
-target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
-port="${1:-4589}"
 # Honour CARGO_TARGET_DIR so this works from a git worktree, where the default
 # target directory is not $repo_root/target.
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+port="$(fireup_resolve_port "${1:-}")"
 log="$(mktemp -t fireup-local-smoke.XXXXXX.log)"
 
 server_pid=""
@@ -68,13 +70,10 @@ for _ in $(seq 1 50); do
   " 2>/dev/null; then
     break
   fi
-  if ! kill -0 "$server_pid" 2>/dev/null; then
-    echo "fireup local exited before accepting connections:" >&2
-    cat "$log" >&2
-    exit 1
-  fi
+  fireup_fail_if_server_died "$server_pid" "$log" "$port"
   sleep 0.1
 done
+fireup_fail_if_server_died "$server_pid" "$log" "$port"
 
 echo "==> running the SDK smoke test"
 # Bounded, because "the SDK hangs" is a real failure mode and an unbounded run

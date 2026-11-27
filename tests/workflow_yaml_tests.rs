@@ -349,3 +349,40 @@ fn ci_runs_the_postgres_store_and_pushdown_suites() {
         );
     }
 }
+
+/// Smoke / conformance scripts must pick a free loopback port when none is
+/// given. A fixed default (4589) lets two parallel fidelity-gate runs on a
+/// shared host talk to each other's server — false empty results and phantom
+/// regressions. See the pick-free-port helper under `scripts/lib/`.
+const FREE_PORT_SMOKE_SCRIPTS: &[&str] = &[
+    "scripts/smoke-local-firestore.sh",
+    "scripts/smoke-local-auth.sh",
+    "scripts/smoke-local-datastore.sh",
+    "scripts/conformance-local.sh",
+    "scripts/recorded-oracle-replay.sh",
+];
+
+#[test]
+fn smoke_scripts_pick_a_free_port_when_none_is_given() {
+    let root = repo_root();
+    let helper = read(&root.join("scripts/lib/pick-free-port.sh"));
+    assert!(
+        helper.contains("listen(0") && helper.contains("fireup_resolve_port"),
+        "scripts/lib/pick-free-port.sh no longer binds port 0 / exports \
+         fireup_resolve_port; restore it so parallel smoke runs cannot collide."
+    );
+    for relative in FREE_PORT_SMOKE_SCRIPTS {
+        let script = read(&root.join(relative));
+        assert!(
+            script.contains("pick-free-port.sh") && script.contains("fireup_resolve_port"),
+            "{relative} no longer sources scripts/lib/pick-free-port.sh; a fixed \
+             default port lets parallel fidelity-gate runs cross-talk. Restore \
+             `source …/pick-free-port.sh` and `port=\"$(fireup_resolve_port \"${{1:-}}\")\"`."
+        );
+        assert!(
+            !script.contains("port=\"${1:-4589}\"") && !script.contains("port=\"${1:-4591}\""),
+            "{relative} still defaults to a fixed port; omit the default and call \
+             fireup_resolve_port instead."
+        );
+    }
+}

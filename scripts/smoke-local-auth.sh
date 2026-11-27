@@ -9,6 +9,9 @@
 #
 # Usage: scripts/smoke-local-auth.sh [port]
 #
+# Omitting the port picks a free loopback port so parallel gate runs on a
+# shared host cannot cross-talk. An explicit port keeps the old behaviour.
+#
 # Set FIREUP_SMOKE_POSTGRES_URL to run the same SDK smoke test against the
 # PostgreSQL account store instead of the in-memory one. Point it only at a
 # database you own; see PROJECT_STATUS.md.
@@ -22,10 +25,12 @@ set -euo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/pick-free-port.sh
+source "$repo_root/scripts/lib/pick-free-port.sh"
 smoke_dir="$repo_root/tests/local-smoke"
 # Honour CARGO_TARGET_DIR, or the binary we build is not the one we start.
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
-port="${1:-4591}"
+port="$(fireup_resolve_port "${1:-}")"
 log="$(mktemp -t fireup-local-auth-smoke.XXXXXX.log)"
 
 server_pid=""
@@ -69,13 +74,10 @@ for _ in $(seq 1 50); do
   " 2>/dev/null; then
     break
   fi
-  if ! kill -0 "$server_pid" 2>/dev/null; then
-    echo "fireup local exited before accepting connections:" >&2
-    cat "$log" >&2
-    exit 1
-  fi
+  fireup_fail_if_server_died "$server_pid" "$log" "$port"
   sleep 0.1
 done
+fireup_fail_if_server_died "$server_pid" "$log" "$port"
 
 # A durable account store keeps accounts between runs, so a second run would
 # fail on the first createUser with EMAIL_EXISTS. An in-memory store starts
