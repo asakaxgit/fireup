@@ -698,6 +698,15 @@
       "note": "PR #85. Refused with INVALID_ARGUMENT and production's own message, measured against cloud-firestore-emulator v1.22.0 over raw gRPC. `served` rather than `unimplemented` on purpose: this is not a gap, it is the behaviour the row promises, and `unimplemented` would demand gRPC UNIMPLEMENTED plus fireup's own refusal wording — wrong for a refusal Firestore owns. The official Node SDK builds this shape unprompted from orderBy('__name__') plus an inequality filter, which is why serving it locally broke a real query in production."
     },
     {
+      "id": "semantics.no-duplicate-order-fields",
+      "docTable": null,
+      "label": "A duplicate non-key order_by field is refused",
+      "status": "served",
+      "driver": "node-sdk",
+      "python": false,
+      "note": "#144. Refused with INVALID_ARGUMENT and production's message shape (`order by clause cannot contain duplicate fields <field>`). Same class as semantics.nothing-follows-the-key-in-an-order: a local pass that dies in production. Checked on the wire order only — an inequality that would be appended does not make a single explicit term a duplicate. Duplicate `__name__` stays under the key-terminal rule."
+    },
+    {
       "id": "transaction.atomic-commit",
       "docTable": null,
       "label": "Every write in a Commit applies or none does",

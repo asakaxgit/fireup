@@ -967,6 +967,33 @@ impl Query {
             });
         }
 
+        // A non-key field may appear in `order_by` at most once. Firestore
+        // refuses a duplicate with `INVALID_ARGUMENT` and names the field
+        // (`order by clause cannot contain duplicate fields <field>`); serving
+        // the shape here would let a query pass locally and die in production.
+        // Checked on the wire order only — an inequality field that Firestore
+        // would append does not count as a second occurrence of an explicit
+        // term (a lone `orderBy('v')` beside `v > 0` stays legal).
+        //
+        // Duplicate `__name__` is already refused by the "nothing after the
+        // key" rule below with that rule's message, so this check skips the
+        // key path.
+        {
+            let mut seen: Vec<&Path> = Vec::new();
+            for key in &order {
+                if matches!(key.path, Path::Name) {
+                    continue;
+                }
+                if seen.iter().any(|prev| *prev == &key.path) {
+                    return Err(Status::invalid_argument(format!(
+                        "order by clause cannot contain duplicate fields {}",
+                        path_order_key(&key.path)
+                    )));
+                }
+                seen.push(&key.path);
+            }
+        }
+
         // Nothing may follow the key. `__name__` is the tie-breaker that makes
         // an order total, so a term after it can never change a result, and
         // Firestore refuses the shape rather than quietly ignoring the dead
@@ -1852,6 +1879,63 @@ mod tests {
             &[("age", true), ("__name__", false)][..],
             None,
             "the key last, in its own direction",
+        );
+    }
+
+    fn refused_duplicate_field(shape: &[(&str, bool)], filter: Option<Filter>, field: &str) {
+        let error = compile_order(shape, filter).expect_err(&format!(
+            "expected a duplicate-field refusal for {field}"
+        ));
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{field}");
+        assert_eq!(
+            error.message(),
+            format!("order by clause cannot contain duplicate fields {field}"),
+            "the refusal must name the offending field"
+        );
+    }
+
+    /// A non-key field may appear in `order_by` at most once.
+    ///
+    /// Same class of bug as "nothing after the key": a shape that passes
+    /// locally and fails in production. The message names the field, matching
+    /// the production refusal measured for the neighbouring `__name__` shapes
+    /// in #85. Checked only against the wire `order_by` — an inequality that
+    /// would be appended does not make a single explicit term a duplicate.
+    #[test]
+    fn a_duplicate_non_key_order_field_is_refused() {
+        refused_duplicate_field(&[("v", false), ("v", false)][..], None, "v");
+        refused_duplicate_field(&[("v", false), ("v", true)][..], None, "v");
+        refused_duplicate_field(
+            &[("v", false), ("v", false), ("__name__", false)][..],
+            None,
+            "v",
+        );
+        refused_duplicate_field(
+            &[("address.city", false), ("address.city", false)][..],
+            None,
+            "address.city",
+        );
+        refused_duplicate_field(
+            &[("v", false), ("v", false)][..],
+            field_filter("v", ProtoFieldOperator::GreaterThan, integer_value(0)),
+            "v",
+        );
+
+        served(&[("v", false)][..], None, "a single field");
+        served(
+            &[("v", false), ("w", false)][..],
+            None,
+            "two different fields",
+        );
+        served(
+            &[("v", false)][..],
+            field_filter("v", ProtoFieldOperator::GreaterThan, integer_value(0)),
+            "an inequality beside a single matching order term",
+        );
+        served(
+            &[("v", false), ("__name__", false)][..],
+            field_filter("v", ProtoFieldOperator::GreaterThan, integer_value(0)),
+            "inequality + field + key is the ordinary normalised shape",
         );
     }
 
