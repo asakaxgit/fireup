@@ -39,9 +39,9 @@ use tracing::debug;
 use crate::local::datastore_filter;
 use crate::local::entity_map::{
     ancestor_collection, apply_property_mask, check_project_database, compile_property_transforms,
-    complete_key, document_to_entity, documents_root, ds_value_to_fs, entity_to_document,
-    key_is_incomplete, key_to_document_name, masked_entity_fields, normalize_database_id,
-    transform_results_to_properties,
+    complete_key, document_to_entity, ds_value_to_fs, entity_to_document, key_is_incomplete,
+    key_to_document_name, masked_entity_fields, namespace_documents_root, normalize_database_id,
+    transform_results_to_properties, validate_namespace_id,
 };
 use crate::local::query::{self, Prefilter};
 use crate::local::store::{
@@ -108,8 +108,8 @@ impl DatastoreApi {
         check_project_database(project_id, database_id, &self.project_id, &self.database_id)
     }
 
-    fn root(&self) -> String {
-        documents_root(&self.project_id, &self.database_id)
+    fn root_for_namespace(&self, namespace_id: &str) -> Result<String, Status> {
+        namespace_documents_root(&self.project_id, &self.database_id, namespace_id)
     }
 
     async fn lookup_one(
@@ -205,6 +205,7 @@ impl DatastoreApi {
         &self,
         query: &Query,
         partition_ancestor: Option<&Key>,
+        namespace_id: &str,
         transaction: Option<&[u8]>,
     ) -> Result<QueryResultBatch, Status> {
         if query.find_nearest.is_some() {
@@ -288,8 +289,9 @@ impl DatastoreApi {
                     .await?
             }
             (Some(kind), None) => {
+                let root = self.root_for_namespace(namespace_id)?;
                 self.store
-                    .scan_kind_filtered(&self.root(), kind, prefilter)
+                    .scan_kind_filtered(&root, kind, prefilter)
                     .await?
             }
             (None, Some(ancestor)) => {
@@ -710,19 +712,16 @@ impl Datastore for DatastoreApi {
             None => return Err(Status::invalid_argument("RunQuery requires a query")),
         };
 
-        // PartitionId on the request scopes the query; its namespace is refused
-        // inside key helpers when an ancestor key carries one.
-        if let Some(partition) = &request.partition_id {
-            if !partition.namespace_id.is_empty() {
-                return Err(unimplemented(
-                    "Datastore namespaces",
-                    "queries stay in the default namespace only",
-                ));
-            }
-        }
+        // PartitionId scopes the query to one namespace. Empty is the default.
+        let namespace_id = request
+            .partition_id
+            .as_ref()
+            .map(|partition| partition.namespace_id.as_str())
+            .unwrap_or("");
+        validate_namespace_id(namespace_id)?;
 
         let batch = self
-            .run_structured_query(&query, None, transaction)
+            .run_structured_query(&query, None, namespace_id, transaction)
             .await?;
 
         Ok(Response::new(RunQueryResponse {

@@ -24,11 +24,10 @@ import { writeResults } from '../smoke-gate/results.mjs'
 const projectId = process.env.FIREUP_SMOKE_PROJECT_ID || 'fireup-local'
 const datastore = new Datastore({ projectId })
 
-// A run id in every kind and namespace, so a second run against a durable store
-// starts from nothing rather than from the last run's entities.
+// A run id in every kind, so a second run against a durable store starts from
+// nothing rather than from the last run's entities.
 const run = Date.now().toString(36)
 const kind = `BacklogTask_${run}`
-const namespace = `backlog_${run}`
 
 const checks = []
 
@@ -106,23 +105,8 @@ await check('sum() and average() aggregate a numeric property', async () => {
   }
 })
 
-// --- Namespaces and kindless queries --------------------------------------
+// Namespaces and kindless ancestor checks moved to smoke.mjs once served.
 
-await check('an entity in a named namespace saves and reads back', async () => {
-  const nsKey = datastore.key({ namespace, path: [kind, 'ns-entity'] })
-  await datastore.save({ key: nsKey, data: { title: 'namespaced' } })
-  const [fetched] = await datastore.get(nsKey)
-  if (fetched?.title !== 'namespaced') {
-    throw new Error(`namespaced get returned ${JSON.stringify(fetched)}`)
-  }
-})
-
-await check('a query in a named namespace sees only that namespace', async () => {
-  const [rows] = await datastore.runQuery(datastore.createQuery(namespace, kind))
-  expectNames(rows, ['ns-entity'], 'namespaced query')
-})
-
-// Kindless ancestor query moved to smoke.mjs once served.
 
 // --- Writes and reads ----------------------------------------------------
 

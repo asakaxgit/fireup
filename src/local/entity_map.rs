@@ -43,9 +43,53 @@ pub fn allocate_id() -> i64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Fireup-private collection id that parks a non-default Datastore namespace
+/// under the shared Firestore documents root. Default-namespace document names
+/// stay byte-identical (no prefix), so existing Postgres rows keep resolving.
+pub const NAMESPACE_COLLECTION: &str = "__ns__";
+
 /// `projects/{project}/databases/{database}/documents` for this data plane.
 pub fn documents_root(project_id: &str, database_id: &str) -> String {
     format!("projects/{project_id}/databases/{database_id}/documents")
+}
+
+/// Documents root for a Datastore partition. Empty `namespace_id` is the
+/// default namespace and returns [`documents_root`] unchanged; a named
+/// namespace is `…/documents/__ns__/{namespace_id}`.
+pub fn namespace_documents_root(
+    project_id: &str,
+    database_id: &str,
+    namespace_id: &str,
+) -> Result<String, Status> {
+    let root = documents_root(project_id, normalize_database_id(database_id));
+    if namespace_id.is_empty() {
+        return Ok(root);
+    }
+    validate_namespace_id(namespace_id)?;
+    Ok(format!("{root}/{NAMESPACE_COLLECTION}/{namespace_id}"))
+}
+
+/// Public `PartitionId.namespace_id` rules from the vendored entity.proto:
+/// `[A-Za-z\d.\-_]{1,100}`, and values matching `__.*__` are reserved.
+pub fn validate_namespace_id(namespace_id: &str) -> Result<(), Status> {
+    if namespace_id.is_empty() {
+        return Ok(());
+    }
+    if namespace_id.len() > 100
+        || !namespace_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    {
+        return Err(Status::invalid_argument(format!(
+            "namespace_id {namespace_id:?} must match [A-Za-z0-9._-]{{1,100}}"
+        )));
+    }
+    if namespace_id.starts_with("__") && namespace_id.ends_with("__") {
+        return Err(Status::invalid_argument(format!(
+            "namespace_id {namespace_id:?} is reserved"
+        )));
+    }
+    Ok(())
 }
 
 /// Datastore's default database is the empty string; Firestore's is `(default)`.
@@ -107,8 +151,21 @@ pub fn document_name_to_key(
         )));
     }
 
-    let mut path = Vec::with_capacity(parsed.segments.len() / 2);
-    for chunk in parsed.segments.chunks(2) {
+    let mut segments = parsed.segments;
+    let mut namespace_id = String::new();
+    if segments.len() >= 2 && segments[0] == NAMESPACE_COLLECTION {
+        validate_namespace_id(&segments[1])?;
+        namespace_id = segments[1].clone();
+        segments.drain(0..2);
+    }
+    if segments.len() < 2 || segments.len() % 2 != 0 {
+        return Err(Status::internal(format!(
+            "stored document {name} is not a complete Datastore key path"
+        )));
+    }
+
+    let mut path = Vec::with_capacity(segments.len() / 2);
+    for chunk in segments.chunks(2) {
         let kind = chunk[0].clone();
         let id_segment = &chunk[1];
         let id_type = match id_segment.parse::<i64>() {
@@ -134,7 +191,7 @@ pub fn document_name_to_key(
             } else {
                 normalize_database_id(database_id).to_string()
             },
-            namespace_id: String::new(),
+            namespace_id,
         }),
         path,
     })
@@ -145,14 +202,10 @@ fn key_segments(
     project_id: &str,
     database_id: &str,
 ) -> Result<Vec<String>, Status> {
+    let mut namespace_id = String::new();
     if let Some(partition) = &key.partition_id {
-        if !partition.namespace_id.is_empty() {
-            return Err(Status::unimplemented(format!(
-                "fireup local does not serve Datastore namespaces yet \
-                 (got {:?}); entities stay in the default namespace only",
-                partition.namespace_id
-            )));
-        }
+        validate_namespace_id(&partition.namespace_id)?;
+        namespace_id = partition.namespace_id.clone();
         if !partition.project_id.is_empty() && partition.project_id != project_id {
             return Err(Status::invalid_argument(format!(
                 "key project_id {:?} does not match request project {project_id:?}",
@@ -171,7 +224,11 @@ fn key_segments(
         return Err(Status::invalid_argument("Datastore key has an empty path"));
     }
 
-    let mut segments = Vec::with_capacity(key.path.len() * 2);
+    let mut segments = Vec::with_capacity(key.path.len() * 2 + 2);
+    if !namespace_id.is_empty() {
+        segments.push(NAMESPACE_COLLECTION.to_string());
+        segments.push(namespace_id);
+    }
     for (index, element) in key.path.iter().enumerate() {
         if element.kind.is_empty() {
             return Err(Status::invalid_argument("key path element has an empty kind"));
@@ -838,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn a_namespaced_key_is_refused() {
+    fn a_namespaced_key_round_trips_under_the_ns_prefix() {
         let key = DsKey {
             partition_id: Some(PartitionId {
                 project_id: "demo".to_string(),
@@ -850,7 +907,32 @@ mod tests {
                 id_type: Some(DsIdType::Name("a".to_string())),
             }],
         };
-        let err = key_to_document_name(&key, "demo", "").expect_err("namespace");
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        let name = key_to_document_name(&key, "demo", "").expect("namespace");
+        assert_eq!(
+            name,
+            "projects/demo/databases/(default)/documents/__ns__/tenant/Task/a"
+        );
+        let back = document_name_to_key(&name, "demo", "").expect("round-trip");
+        assert_eq!(
+            back.partition_id.as_ref().map(|p| p.namespace_id.as_str()),
+            Some("tenant")
+        );
+        assert_eq!(back.path[0].kind, "Task");
+    }
+
+    #[test]
+    fn a_default_namespace_key_stays_byte_identical() {
+        let key = DsKey {
+            partition_id: None,
+            path: vec![DsPathElement {
+                kind: "Task".to_string(),
+                id_type: Some(DsIdType::Name("a".to_string())),
+            }],
+        };
+        let name = key_to_document_name(&key, "demo", "").expect("default");
+        assert_eq!(
+            name,
+            "projects/demo/databases/(default)/documents/Task/a"
+        );
     }
 }
