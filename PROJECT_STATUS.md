@@ -338,7 +338,7 @@ from an empty one — every PR stays green.
 | `build and test (no external services)` | `ci.yml` job `test` |
 | `supply chain (cargo deny)` | `ci.yml` job `deny` |
 
-`coverage` runs on every PR but is **not** required: its 75% floor is a separate
+`coverage` runs on every PR but is **not** required: its 76% floor is a separate
 policy decision, and a cache miss makes it build `cargo-llvm-cov` from source,
 so a red `coverage` can mean "the network failed" rather than "the code broke".
 

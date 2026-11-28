@@ -22,7 +22,7 @@ cd "$(dirname "$0")/.."
 
 # Keep this in step with .github/workflows/coverage.yml and the README badge;
 # `cargo test --test fidelity_matrix_tests` checks that they agree.
-MIN="${FIREUP_COVERAGE_MIN:-75}"
+MIN="${FIREUP_COVERAGE_MIN:-76}"
 OUT_DIR="${FIREUP_COVERAGE_DIR:-target/coverage}"
 open_report=false
 [[ "${1:-}" == "--open" ]] && open_report=true

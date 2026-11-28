@@ -28,7 +28,7 @@ env:
   # The floor the badge in README.md advertises. scripts/coverage.sh defaults to
   # the same number, and `cargo test --test fidelity_matrix_tests` fails if the
   # three ever disagree.
-  FIREUP_COVERAGE_MIN: 75
+  FIREUP_COVERAGE_MIN: 76
 
 jobs:
   coverage:
