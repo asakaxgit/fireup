@@ -395,6 +395,25 @@ fn integration_workflow_runs_on_pull_requests() {
          job, so test_docker_container_integration soft-skips and the job stays \
          vacuously green."
     );
+    assert!(
+        text.contains("FIREUP_SKIP_DOCKER:"),
+        "integration_tests.yml no longer sets FIREUP_SKIP_DOCKER on the Postgres \
+         service job, so test_docker_container_integration can start Compose on \
+         :5433 while querying the service on :5432. Keep the docker check in the \
+         dedicated docker-integration job only."
+    );
+    assert!(
+        text.contains("--test-threads=1"),
+        "integration_tests.yml no longer serializes the suite with \
+         --test-threads=1; shared fireup_data schema races return."
+    );
+    assert!(
+        text.contains("POSTGRES_PASSWORD: fireup_dev_password")
+            && text.contains("POSTGRES_DB: fireup_dev"),
+        "integration_tests.yml docker job no longer pins compose's fireup_dev \
+         credentials; inheriting the service-job password breaks init.sql and \
+         auth against the compose URL."
+    );
 }
 
 /// Smoke / conformance scripts must pick a free loopback port when none is
