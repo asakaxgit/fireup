@@ -350,6 +350,72 @@ fn ci_runs_the_postgres_store_and_pushdown_suites() {
     }
 }
 
+/// `integration_tests.yml` used to be `workflow_dispatch` only, so the suite
+/// soft-skipped on every PR and stayed green. The file must keep a
+/// `pull_request` trigger, name the integration test binary, and set the
+/// Postgres URL the suite refuses to soft-skip without under CI.
+#[test]
+fn integration_workflow_runs_on_pull_requests() {
+    let path = workflows_dir().join("integration_tests.yml");
+    let text = read(&path);
+    let workflow = parse(&text, &path);
+    let triggers = get(&workflow, "on").unwrap_or_else(|| {
+        panic!(
+            "{} has no `on:` section, so nothing can trigger it",
+            label(&path)
+        )
+    });
+    let has_pull_request = match triggers {
+        Yaml::Mapping(map) => get(map, "pull_request").is_some(),
+        Yaml::Sequence(items) => items
+            .iter()
+            .any(|item| matches!(item.as_str(), Some("pull_request"))),
+        Yaml::Value(Scalar::String(s)) => s.as_ref() == "pull_request",
+        _ => false,
+    };
+    assert!(
+        has_pull_request,
+        "integration_tests.yml no longer triggers on pull_request, so the \
+         integration suite can soft-skip on every PR again. Restore `on: \
+         pull_request` (alongside push / workflow_dispatch as needed)."
+    );
+    assert!(
+        text.contains("--test integration_tests"),
+        "integration_tests.yml no longer runs `cargo test --test integration_tests`."
+    );
+    assert!(
+        text.contains("FIREUP_TEST_POSTGRES_URL:"),
+        "integration_tests.yml no longer sets FIREUP_TEST_POSTGRES_URL; under CI \
+         the suite panics when that URL is missing, so the job would go red for \
+         the wrong reason — or, if someone weakens the guard, silently skip."
+    );
+    assert!(
+        text.contains("FIREUP_TEST_DOCKER:"),
+        "integration_tests.yml no longer sets FIREUP_TEST_DOCKER on the docker \
+         job, so test_docker_container_integration soft-skips and the job stays \
+         vacuously green."
+    );
+    assert!(
+        text.contains("FIREUP_SKIP_DOCKER:"),
+        "integration_tests.yml no longer sets FIREUP_SKIP_DOCKER on the Postgres \
+         service job, so test_docker_container_integration can start Compose on \
+         :5433 while querying the service on :5432. Keep the docker check in the \
+         dedicated docker-integration job only."
+    );
+    assert!(
+        text.contains("--test-threads=1"),
+        "integration_tests.yml no longer serializes the suite with \
+         --test-threads=1; shared fireup_data schema races return."
+    );
+    assert!(
+        text.contains("POSTGRES_PASSWORD: fireup_dev_password")
+            && text.contains("POSTGRES_DB: fireup_dev"),
+        "integration_tests.yml docker job no longer pins compose's fireup_dev \
+         credentials; inheriting the service-job password breaks init.sql and \
+         auth against the compose URL."
+    );
+}
+
 /// Smoke / conformance scripts must pick a free loopback port when none is
 /// given. A fixed default (4589) lets two parallel fidelity-gate runs on a
 /// shared host talk to each other's server — false empty results and phantom

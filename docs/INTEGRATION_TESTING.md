@@ -161,29 +161,23 @@ This script performs:
 
 ### Continuous Integration
 
-The project uses GitHub Actions for automated testing:
+`.github/workflows/integration_tests.yml` runs on every `pull_request`, on pushes
+to `main`, and via `workflow_dispatch`.
 
-#### Workflows
+#### Jobs
 
-1. **Integration Tests** (`.github/workflows/integration_tests.yml`):
-   - Runs on push/PR to main/develop branches
-   - Tests against PostgreSQL 15
-   - Includes unit tests, integration tests, and CLI testing
-   - Generates coverage reports
+1. **integration tests (Postgres service)**:
+   - PostgreSQL 15 service container
+   - Sets `FIREUP_TEST_POSTGRES_URL` (required under CI — missing URL panics)
+   - Runs `cargo test --locked --test integration_tests`
+   - Fixture markers under `examples/backup_files/` must be present; a missing
+     file panics under CI instead of soft-skipping
 
-2. **Docker Integration**:
-   - Tests Docker container functionality
-   - Validates container persistence
-   - Checks container health and networking
-
-3. **Performance Tests**:
-   - Benchmarks import performance
-   - Tests concurrent operations
-   - Monitors resource usage
-
-4. **Compatibility Tests**:
-   - Tests across multiple OS (Ubuntu, macOS)
-   - Tests multiple Rust versions (stable, beta)
+2. **docker compose postgres integration**:
+   - Starts `docker compose` Postgres
+   - Sets `FIREUP_TEST_DOCKER=1` so `test_docker_container_integration` cannot
+     soft-skip
+   - Points `FIREUP_TEST_POSTGRES_URL` at the compose Postgres on host port 5433
 
 ## Test Data
 

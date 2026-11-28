@@ -1,26 +1,27 @@
 name: Integration Tests
 
-# TEMPORARILY DISABLED - Re-enable after code preparation
-# TODO: Re-enable CI workflow triggers
-# on:
-#   push:
-#     branches: [ main, develop ]
-#   pull_request:
-#     branches: [ main, develop ]
-
+# Runs on every pull request and on pushes to main. Soft skips in
+# tests/integration_tests.rs panic under CI when Postgres URL or backup
+# fixtures are missing, so this workflow cannot go vacuous again.
 on:
-  workflow_dispatch:  # Only allow manual runs for now
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
-  POSTGRES_DB: fireup_test
-  POSTGRES_USER: fireup
-  POSTGRES_PASSWORD: fireup_test_password
 
 jobs:
   integration-tests:
+    name: integration tests (Postgres service)
     runs-on: ubuntu-latest
-    
+
+    env:
+      POSTGRES_DB: fireup_test
+      POSTGRES_USER: fireup
+      POSTGRES_PASSWORD: fireup_test_password
+
     services:
       postgres:
         image: postgres:15
@@ -38,275 +39,87 @@ jobs:
           - 5432:5432
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    # Was actions-rs/toolchain@v1, which is archived and whose Node runner
-    # GitHub no longer supports. The replacement takes no `toolchain:`/
-    # `override:` inputs: the toolchain is the action ref (`@stable`) and it is
-    # always made the rustup default, so those two are dropped rather than
-    # renamed. `components:` carries over unchanged.
-    - name: Setup Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-integration-${{ hashFiles('Cargo.lock') }}
 
-    - name: Cache cargo index
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h localhost -p 5432 -U "${{ env.POSTGRES_USER }}"; do
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
 
-    - name: Cache cargo build
-      uses: actions/cache@v4
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Install PostgreSQL client
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y postgresql-client
-
-    - name: Wait for PostgreSQL
-      run: |
-        until pg_isready -h localhost -p 5432 -U ${{ env.POSTGRES_USER }}; do
-          echo "Waiting for PostgreSQL..."
-          sleep 2
-        done
-
-    - name: Create test database
-      run: |
-        PGPASSWORD=${{ env.POSTGRES_PASSWORD }} createdb -h localhost -p 5432 -U ${{ env.POSTGRES_USER }} fireup_integration_test || true
-
-    - name: Check code formatting
-      run: cargo fmt -- --check
-
-    - name: Run clippy
-      run: cargo clippy -- -D warnings
-
-    - name: Build project
-      run: cargo build --verbose
-
-    - name: Run unit tests
-      run: cargo test --lib --verbose
-
-    - name: Create mock backup files for testing
-      run: |
-        mkdir -p examples/backup_files
-        # Create minimal mock LevelDB files for testing
-        echo "mock leveldb data" > examples/backup_files/small_sample.leveldb
-        echo "mock users data" > examples/backup_files/users_collection.leveldb
-        echo "mock products data" > examples/backup_files/products_catalog.leveldb
-        echo "mock nested data" > examples/backup_files/nested_documents.leveldb
-
-    - name: Run integration tests
-      run: cargo test --test integration_tests --verbose
-      env:
-        TEST_DATABASE_URL: postgresql://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
-
-    - name: Test CLI functionality
-      run: |
-        # Test CLI help
-        cargo run -- --help
-        
-        # Test CLI stats
-        cargo run -- stats
-        
-        # Test CLI validate (will fail with mock data, but should not crash)
-        cargo run -- validate --backup-file examples/backup_files/small_sample.leveldb || echo "Expected failure with mock data"
-
-    - name: Test PostgreSQL client compatibility
-      run: |
-        # Test basic PostgreSQL operations
-        PGPASSWORD=${{ env.POSTGRES_PASSWORD }} psql -h localhost -p 5432 -U ${{ env.POSTGRES_USER }} -d ${{ env.POSTGRES_DB }} -c "SELECT version();"
-        
-        # Test schema operations
-        PGPASSWORD=${{ env.POSTGRES_PASSWORD }} psql -h localhost -p 5432 -U ${{ env.POSTGRES_USER }} -d ${{ env.POSTGRES_DB }} -c "
-          CREATE SCHEMA IF NOT EXISTS test_ci;
-          CREATE TABLE test_ci.test_table (id SERIAL PRIMARY KEY, name TEXT);
-          INSERT INTO test_ci.test_table (name) VALUES ('ci_test');
-          SELECT COUNT(*) FROM test_ci.test_table;
-          DROP SCHEMA test_ci CASCADE;
-        "
-
-    - name: Generate test coverage report
-      run: |
-        cargo install cargo-tarpaulin || true
-        cargo tarpaulin --out xml --output-dir coverage/ || echo "Coverage generation failed"
-
-    - name: Upload coverage to Codecov
-      # v5, not v3: v3's runner is retired. The singular `file:` input was
-      # renamed to `files:` in v4, so this is not a version-only bump.
-      uses: codecov/codecov-action@v5
-      if: success()
-      with:
-        files: ./coverage/cobertura.xml
-        flags: integration
-        name: integration-tests
-        fail_ci_if_error: false
-
-    - name: Archive test results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: test-results
-        path: |
-          target/debug/
-          coverage/
-        retention-days: 30
+      - name: Run integration tests
+        env:
+          # Required: postgres_test_env panics under CI when this is missing.
+          FIREUP_TEST_POSTGRES_URL: postgresql://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+          TEST_DATABASE_URL: postgresql://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+          # GHA runners have Docker. Without this, test_docker_container_integration
+          # starts Compose on :5433 while this job's URL points at the service on
+          # :5432, so the persistence check can pass against the wrong database.
+          # The dedicated docker-integration job owns that test.
+          FIREUP_SKIP_DOCKER: "1"
+        # Serial: these tests share one fireup_data schema on the service DB.
+        run: cargo test --locked --test integration_tests -- --nocapture --test-threads=1
 
   docker-integration:
+    name: docker compose postgres integration
     runs-on: ubuntu-latest
-    
+
+    # Keep compose defaults (fireup / fireup_dev_password / fireup_dev). Do not
+    # inherit the Postgres-service job's password — that made auth fail.
+    env:
+      POSTGRES_DB: fireup_dev
+      POSTGRES_USER: fireup
+      POSTGRES_PASSWORD: fireup_dev_password
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Setup Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Build Docker image
-      run: docker build -t fireup:test .
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-integration-docker-${{ hashFiles('Cargo.lock') }}
 
-    - name: Start services with Docker Compose
-      run: |
-        docker-compose up -d postgres
-        sleep 10
+      - name: Start PostgreSQL with Docker Compose
+        run: |
+          docker compose up -d postgres
+          for _ in $(seq 1 30); do
+            if docker exec fireup_postgres pg_isready -U fireup -d fireup_dev; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec fireup_postgres pg_isready -U fireup -d fireup_dev
 
-    - name: Test Docker container health
-      run: |
-        # Check if container is running
-        docker ps | grep fireup_postgres
-        
-        # Test container health
-        docker exec fireup_postgres pg_isready -U fireup -d fireup_dev
-        
-        # Test container networking
-        docker exec fireup_postgres psql -U fireup -d fireup_dev -c "SELECT 1;"
-
-    - name: Test container persistence
-      run: |
-        # Create test data
-        docker exec fireup_postgres psql -U fireup -d fireup_dev -c "
-          CREATE SCHEMA test_persistence;
-          CREATE TABLE test_persistence.test_data (id SERIAL, data TEXT);
-          INSERT INTO test_persistence.test_data (data) VALUES ('persistence_test');
-        "
-        
-        # Restart container
-        docker-compose restart postgres
-        sleep 10
-        
-        # Verify data persistence
-        docker exec fireup_postgres psql -U fireup -d fireup_dev -c "
-          SELECT data FROM test_persistence.test_data WHERE data = 'persistence_test';
-        "
-
-    - name: Cleanup Docker resources
-      if: always()
-      run: |
-        docker-compose down -v
-        docker system prune -f
-
-  performance-tests:
-    runs-on: ubuntu-latest
-    
-    services:
-      postgres:
-        image: postgres:15
+      - name: Run docker-backed integration test
         env:
-          POSTGRES_DB: fireup_perf
-          POSTGRES_USER: fireup
-          POSTGRES_PASSWORD: fireup_perf_password
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
+          # Opt into the docker-only test; missing Docker then panics.
+          FIREUP_TEST_DOCKER: "1"
+          # Compose publishes Postgres on host 5433 by default.
+          FIREUP_TEST_POSTGRES_URL: postgresql://fireup:fireup_dev_password@localhost:5433/fireup_dev
+        run: cargo test --locked --test integration_tests test_docker_container_integration -- --nocapture --test-threads=1
 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Setup Rust
-      uses: dtolnay/rust-toolchain@stable
-
-    - name: Build release version
-      run: cargo build --release
-
-    - name: Create larger mock dataset
-      run: |
-        mkdir -p examples/backup_files
-        # Create larger mock files for performance testing
-        head -c 1M /dev/urandom > examples/backup_files/large_sample.leveldb
-
-    - name: Run performance benchmarks
-      run: |
-        # Time the CLI operations
-        time cargo run --release -- validate --backup-file examples/backup_files/large_sample.leveldb || true
-        
-        # Monitor memory usage during operations
-        /usr/bin/time -v cargo run --release -- stats 2>&1 | grep -E "(Maximum resident set size|User time|System time)"
-
-    - name: Test concurrent operations
-      run: |
-        # Test multiple concurrent CLI operations
-        # `_`, not `i`: the counter is never read, and shellcheck (which
-        # actionlint runs over every `run:` block) reports an unused `i`.
-        for _ in {1..5}; do
-          cargo run --release -- stats &
-        done
-        wait
-        echo "Concurrent operations completed"
-
-  compatibility-tests:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        rust: [stable, beta]
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    # `@master` rather than `@stable` here on purpose: the action ref is what
-    # picks the toolchain, so a matrix over toolchains cannot encode its choice
-    # in the ref (`uses:` takes no expressions). The floating ref is the
-    # documented way to use the `toolchain:` input instead.
-    - name: Setup Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: ${{ matrix.rust }}
-
-    - name: Install system dependencies (Ubuntu)
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y postgresql-client
-
-    - name: Install system dependencies (macOS)
-      if: matrix.os == 'macos-latest'
-      run: |
-        brew install postgresql
-
-    - name: Build project
-      run: cargo build
-
-    - name: Run unit tests
-      run: cargo test --lib
-
-    - name: Test CLI help
-      run: cargo run -- --help
-
-    - name: Test CLI stats
-      run: cargo run -- stats
+      - name: Cleanup Docker resources
+        if: always()
+        run: docker compose down -v
