@@ -147,9 +147,12 @@ impl TestDatabase {
             }
         });
 
-        // Create fireup_data schema
+        // Reset the shared schema so prior tests cannot leave a mismatched
+        // `users` / `posts` shape for the next import.
         test_client
-            .execute("CREATE SCHEMA IF NOT EXISTS fireup_data", &[])
+            .batch_execute(
+                "DROP SCHEMA IF EXISTS fireup_data CASCADE; CREATE SCHEMA fireup_data;",
+            )
             .await?;
 
         self.client = Some(test_client);
