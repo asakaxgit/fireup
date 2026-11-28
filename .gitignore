@@ -32,6 +32,9 @@ Thumbs.db
 # Backup files
 *.leveldb
 *.backup
+# Marker fixtures for the integration suite (content ignored by the mock parser).
+!examples/backup_files/
+!examples/backup_files/**
 
 # Generated files
 schema.sql
