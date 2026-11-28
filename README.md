@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/asakaxgit/fireup/actions/workflows/ci.yml/badge.svg)](https://github.com/asakaxgit/fireup/actions/workflows/ci.yml)
 [![Coverage](https://github.com/asakaxgit/fireup/actions/workflows/coverage.yml/badge.svg)](https://github.com/asakaxgit/fireup/actions/workflows/coverage.yml)
-[![line coverage](https://img.shields.io/badge/line%20coverage-%E2%89%A575%25-success)](#ci-and-coverage)
+[![line coverage](https://img.shields.io/badge/line%20coverage-%E2%89%A576%25-success)](#ci-and-coverage)
 [![fidelity matrix](https://img.shields.io/badge/fidelity%20matrix-101%2F124%20served-informational)](docs/local/README.md#fidelity-matrix)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
 
@@ -423,7 +423,7 @@ those two plus two numbers:
 | Badge | What it actually means |
 |---|---|
 | **CI** | [`ci.yml`](.github/workflows/ci.yml) — two jobs. `test`: build plus every suite that needs nothing but a Rust toolchain — unit tests, the local data plane over real gRPC/HTTP, export parsing, the CLI and library surface, and the docs-vs-matrix checks. Red there means the code is broken, not that a service failed to start. `deny`: the supply-chain gate below. The badge is red if either fails. |
-| **Coverage** | [`coverage.yml`](.github/workflows/coverage.yml) — runs `scripts/coverage.sh` and **fails under 75% line coverage**. The full HTML report is attached to each run as the `coverage-report` artifact, and the summary table is printed in the run's summary. |
+| **Coverage** | [`coverage.yml`](.github/workflows/coverage.yml) — runs `scripts/coverage.sh` and **fails under 76% line coverage**. The full HTML report is attached to each run as the `coverage-report` artifact, and the summary table is printed in the run's summary. |
 | **line coverage** | The enforced floor, not a live reading. A number nobody checks drifts; a floor that fails the build does not. The real figure for a commit is in that run's summary. |
 | **fidelity matrix** | How many of the documented `fireup local` behaviours are served, from [`tests/conformance/matrix.json`](tests/conformance/matrix.json). `cargo test --test fidelity_matrix_tests` fails if the badge and the matrix disagree, so it cannot go stale. |
 
