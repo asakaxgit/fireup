@@ -70,6 +70,7 @@ fn require_backup_fixture(path: &Path) -> bool {
 }
 
 /// Integration test configuration
+#[derive(Clone)]
 struct TestConfig {
     postgres_url: String,
     test_db_name: String,
@@ -105,6 +106,15 @@ impl TestDatabase {
     }
 
     async fn setup(&mut self) -> Result<()> {
+        self.connect(true).await
+    }
+
+    /// Reconnect after a container restart without wiping persisted tables.
+    async fn reconnect(&mut self) -> Result<()> {
+        self.connect(false).await
+    }
+
+    async fn connect(&mut self, reset_schema: bool) -> Result<()> {
         let allow_create_db = std::env::var("FIREUP_TEST_ALLOW_CREATE_DATABASE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
@@ -147,13 +157,19 @@ impl TestDatabase {
             }
         });
 
-        // Reset the shared schema so prior tests cannot leave a mismatched
-        // `users` / `posts` shape for the next import.
-        test_client
-            .batch_execute(
-                "DROP SCHEMA IF EXISTS fireup_data CASCADE; CREATE SCHEMA fireup_data;",
-            )
-            .await?;
+        if reset_schema {
+            // Wipe so prior tests cannot leave a mismatched `users` / `posts`
+            // shape for the next import.
+            test_client
+                .batch_execute(
+                    "DROP SCHEMA IF EXISTS fireup_data CASCADE; CREATE SCHEMA fireup_data;",
+                )
+                .await?;
+        } else {
+            test_client
+                .execute("CREATE SCHEMA IF NOT EXISTS fireup_data", &[])
+                .await?;
+        }
 
         self.client = Some(test_client);
         Ok(())
@@ -576,12 +592,12 @@ async fn test_docker_container_integration() -> Result<()> {
         sleep(Duration::from_secs(1)).await;
     }
 
-    // Reconnect and verify data persistence
-    let Some(mut test_db_after_restart) =
-        prepare_test_database("test_docker_container_integration").await?
-    else {
-        return Ok(());
+    // Reconnect without wiping — persistence is what this step checks.
+    let mut test_db_after_restart = TestDatabase {
+        config: test_db.config.clone(),
+        client: None,
     };
+    test_db_after_restart.reconnect().await?;
 
     let client_after_restart = test_db_after_restart.get_client();
     let persistence_check = client_after_restart
