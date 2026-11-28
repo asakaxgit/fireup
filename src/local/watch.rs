@@ -1086,6 +1086,38 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::Unimplemented);
     }
 
+    #[test]
+    fn an_empty_documents_target_is_an_invalid_argument() {
+        let status = build_target(&documents_target(&[]))
+            .expect_err("a documents target needs at least one name");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn a_target_without_a_type_is_an_invalid_argument() {
+        let status = build_target(&Target {
+            target_id: 1,
+            target_type: None,
+            ..Default::default()
+        })
+        .expect_err("a target must be documents or a query");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn a_query_target_without_a_structured_query_is_an_invalid_argument() {
+        let status = build_target(&Target {
+            target_id: 2,
+            target_type: Some(TargetType::Query(QueryTarget {
+                parent: ROOT.to_string(),
+                query_type: None,
+            })),
+            ..Default::default()
+        })
+        .expect_err("a query target needs a structured_query");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
     #[tokio::test]
     async fn a_commit_publishes_one_event_per_document_it_touched() {
         let (store, hub) = attach(Arc::new(MemoryStore::new()));

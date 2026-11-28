@@ -1490,6 +1490,7 @@ const KEY_PROPERTY: &str = "__key__";
 /// Compiled from the vendored `Query.projection` / `distinct_on` and the public
 /// [projection / grouping](https://cloud.google.com/datastore/docs/concepts/queries#projection_queries)
 /// rules. Keys-only is the projection of only `__key__`.
+#[derive(Debug)]
 struct ProjectionPlan {
     /// Non-key property names to keep on each result entity.
     properties: Vec<String>,
@@ -2045,5 +2046,509 @@ fn compare_ds_values(
     ) {
         (Ok(left), Ok(right)) => query::total_order(&left, &right),
         _ => Ordering::Equal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local::store::MemoryStore;
+    use crate::protos::google::datastore::v1::aggregation_query::aggregation::{
+        Avg, Count, Sum,
+    };
+    use crate::protos::google::datastore::v1::composite_filter::Operator as CompositeOp;
+    use crate::protos::google::datastore::v1::transaction_options::ReadOnly as DsReadOnly;
+    use crate::protos::google::datastore::v1::{
+        ArrayValue, CompositeFilter, ExplainOptions, FindNearest, GqlQuery, KindExpression,
+        Projection, TransactionOptions,
+    };
+    use std::sync::Arc;
+
+    const PROJECT: &str = "demo";
+    const DATABASE: &str = "(default)";
+
+    fn api() -> DatastoreApi {
+        DatastoreApi::new(Arc::new(MemoryStore::new()), PROJECT, DATABASE)
+    }
+
+    fn property_ref(name: &str) -> PropertyReference {
+        PropertyReference {
+            name: name.to_string(),
+        }
+    }
+
+    fn property_filter(name: &str, op: PropertyOp, value: DsValue) -> Filter {
+        Filter {
+            filter_type: Some(FilterType::PropertyFilter(PropertyFilter {
+                property: Some(property_ref(name)),
+                op: op as i32,
+                value: Some(value),
+            })),
+        }
+    }
+
+    fn string_value(text: &str) -> DsValue {
+        DsValue {
+            value_type: Some(DsValueType::StringValue(text.to_string())),
+            ..Default::default()
+        }
+    }
+
+    fn projection_query(properties: &[&str], distinct_on: &[&str], order: &[&str]) -> Query {
+        Query {
+            projection: properties
+                .iter()
+                .map(|name| Projection {
+                    property: Some(property_ref(name)),
+                })
+                .collect(),
+            distinct_on: distinct_on.iter().map(|name| property_ref(name)).collect(),
+            order: order
+                .iter()
+                .map(|name| PropertyOrder {
+                    property: Some(property_ref(name)),
+                    direction: Direction::Ascending as i32,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn kindless_queries_refuse_property_value_filters() {
+        let ok = property_filter("__key__", PropertyOp::Equal, string_value("x"));
+        kindless_rejects_property_predicates(Some(&ok)).expect("__key__ is allowed");
+
+        let refused = property_filter("priority", PropertyOp::Equal, string_value("x"));
+        let err = kindless_rejects_property_predicates(Some(&refused))
+            .expect_err("property filters are refused on kindless queries");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let nested = Filter {
+            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                op: CompositeOp::And as i32,
+                filters: vec![ok, refused],
+            })),
+        };
+        let err = kindless_rejects_property_predicates(Some(&nested))
+            .expect_err("a nested property filter is still refused");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn compile_projection_refuses_distinct_on_without_a_projection() {
+        let query = projection_query(&[], &["priority"], &[]);
+        let err = compile_projection(&query).expect_err("distinct_on needs a projection");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn compile_projection_refuses_nested_paths() {
+        let query = projection_query(&["address.city"], &[], &[]);
+        let err = compile_projection(&query).expect_err("nested projection paths");
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+
+        let query = projection_query(&["priority"], &["address.city"], &[]);
+        let err = compile_projection(&query).expect_err("nested distinct_on paths");
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+    }
+
+    #[test]
+    fn compile_projection_requires_distinct_on_in_the_projection_and_order_prefix() {
+        let missing = projection_query(&["priority"], &["owner"], &[]);
+        let err = compile_projection(&missing).expect_err("distinct_on must be projected");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let bad_order = projection_query(&["priority", "owner"], &["owner"], &["priority", "owner"]);
+        let err = compile_projection(&bad_order).expect_err("distinct_on must lead order_by");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let ok = projection_query(&["owner", "priority"], &["owner"], &["owner", "priority"]);
+        let plan = compile_projection(&ok)
+            .expect("legal distinct_on")
+            .expect("projection plan");
+        assert_eq!(plan.distinct_on, vec!["owner".to_string()]);
+        assert_eq!(plan.properties, vec!["owner".to_string(), "priority".to_string()]);
+    }
+
+    #[test]
+    fn resolve_aggregation_aliases_auto_names_and_rejects_duplicates() {
+        let aggregations = vec![
+            DsAggregation {
+                alias: String::new(),
+                operator: Some(AggOp::Count(Count { up_to: None })),
+            },
+            DsAggregation {
+                alias: "total".to_string(),
+                operator: Some(AggOp::Count(Count { up_to: None })),
+            },
+        ];
+        assert_eq!(
+            resolve_aggregation_aliases(&aggregations).expect("unique"),
+            vec!["property_1".to_string(), "total".to_string()]
+        );
+
+        let duplicate = vec![
+            DsAggregation {
+                alias: "total".to_string(),
+                operator: Some(AggOp::Count(Count { up_to: None })),
+            },
+            DsAggregation {
+                alias: "total".to_string(),
+                operator: Some(AggOp::Count(Count { up_to: None })),
+            },
+        ];
+        let err = resolve_aggregation_aliases(&duplicate).expect_err("duplicate alias");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn aggregation_property_name_refuses_empty_and_nested_paths() {
+        let err = aggregation_property_name(None).expect_err("missing property");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = aggregation_property_name(Some(&property_ref(""))).expect_err("empty");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = aggregation_property_name(Some(&property_ref("address.city")))
+            .expect_err("nested path");
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+
+        assert_eq!(
+            aggregation_property_name(Some(&property_ref("priority"))).expect("top-level"),
+            "priority"
+        );
+    }
+
+    #[test]
+    fn evaluate_aggregation_covers_count_sum_avg_edges() {
+        let entities = vec![
+            Entity {
+                key: None,
+                properties: [("hits".to_string(), ds_integer_value(2))]
+                    .into_iter()
+                    .collect(),
+            },
+            Entity {
+                key: None,
+                properties: [("hits".to_string(), ds_integer_value(4))]
+                    .into_iter()
+                    .collect(),
+            },
+            Entity {
+                key: None,
+                properties: [("hits".to_string(), string_value("skip"))]
+                    .into_iter()
+                    .collect(),
+            },
+        ];
+
+        let count = evaluate_aggregation(
+            &DsAggregation {
+                alias: "n".into(),
+                operator: Some(AggOp::Count(Count { up_to: Some(1) })),
+            },
+            &entities,
+        )
+        .expect("count");
+        assert_eq!(count.value_type, Some(DsValueType::IntegerValue(1)));
+
+        let err = evaluate_aggregation(
+            &DsAggregation {
+                alias: "n".into(),
+                operator: Some(AggOp::Count(Count { up_to: Some(-1) })),
+            },
+            &entities,
+        )
+        .expect_err("negative up_to");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let sum = evaluate_aggregation(
+            &DsAggregation {
+                alias: "s".into(),
+                operator: Some(AggOp::Sum(Sum {
+                    property: Some(property_ref("hits")),
+                })),
+            },
+            &entities,
+        )
+        .expect("sum");
+        assert_eq!(sum.value_type, Some(DsValueType::IntegerValue(6)));
+
+        let avg = evaluate_aggregation(
+            &DsAggregation {
+                alias: "a".into(),
+                operator: Some(AggOp::Avg(Avg {
+                    property: Some(property_ref("hits")),
+                })),
+            },
+            &[],
+        )
+        .expect("avg over empty");
+        assert_eq!(avg.value_type, Some(DsValueType::NullValue(0)));
+
+        let err = evaluate_aggregation(
+            &DsAggregation {
+                alias: "x".into(),
+                operator: None,
+            },
+            &entities,
+        )
+        .expect_err("operator required");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn decode_cursor_refuses_foreign_bytes_and_accepts_the_tag() {
+        assert!(decode_cursor(&[], "start").expect("empty").is_none());
+        assert!(decode_cursor(CURSOR_TAG, "start")
+            .expect("bare tag")
+            .is_none());
+
+        let err = decode_cursor(b"not-a-fireup-cursor", "start").expect_err("foreign");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let entity = Entity {
+            key: Some(Key {
+                partition_id: None,
+                path: vec![],
+            }),
+            properties: Default::default(),
+        };
+        let encoded = encode_cursor(&entity, &[]);
+        let decoded = decode_cursor(&encoded, "end")
+            .expect("round-trip")
+            .expect("position");
+        assert!(decoded.key.is_some());
+    }
+
+    #[test]
+    fn not_in_with_in_is_invalid_even_as_a_unit_check() {
+        // Mirrors the proto "Requires" list already gated via RunQuery; this
+        // keeps the helper itself covered when the gRPC path is refactored.
+        let filter = Filter {
+            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                op: CompositeOp::And as i32,
+                filters: vec![
+                    property_filter(
+                        "priority",
+                        PropertyOp::NotIn,
+                        DsValue {
+                            value_type: Some(DsValueType::ArrayValue(ArrayValue {
+                                values: vec![ds_integer_value(1)],
+                            })),
+                            ..Default::default()
+                        },
+                    ),
+                    property_filter(
+                        "priority",
+                        PropertyOp::In,
+                        DsValue {
+                            value_type: Some(DsValueType::ArrayValue(ArrayValue {
+                                values: vec![ds_integer_value(2)],
+                            })),
+                            ..Default::default()
+                        },
+                    ),
+                ],
+            })),
+        };
+        let err = validate_filter(Some(&filter), PROJECT, DATABASE).expect_err("NOT_IN + IN");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn gql_run_query_is_unimplemented_rather_than_empty() {
+        let err = api()
+            .run_query(Request::new(RunQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                query_type: Some(
+                    crate::protos::google::datastore::v1::run_query_request::QueryType::GqlQuery(
+                        GqlQuery {
+                            query_string: "SELECT * FROM Task".to_string(),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("GQL is out of scope");
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert!(err.message().contains("GQL"), "{}", err.message());
+    }
+
+    #[tokio::test]
+    async fn gql_aggregation_is_unimplemented_rather_than_empty() {
+        let err = api()
+            .run_aggregation_query(Request::new(RunAggregationQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                query_type: Some(AggQueryType::GqlQuery(GqlQuery {
+                    query_string: "SELECT COUNT(*) FROM Task".to_string(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("GQL aggregations are out of scope");
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert!(
+            err.message().contains("GQL"),
+            "{}",
+            err.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_options_are_unimplemented_on_query_and_aggregation() {
+        let query_err = api()
+            .run_query(Request::new(RunQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                explain_options: Some(ExplainOptions { analyze: true }),
+                query_type: Some(
+                    crate::protos::google::datastore::v1::run_query_request::QueryType::Query(
+                        Query {
+                            kind: vec![KindExpression {
+                                name: "Task".to_string(),
+                            }],
+                            ..Default::default()
+                        },
+                    ),
+                ),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("explain_options");
+        assert_eq!(query_err.code(), tonic::Code::Unimplemented);
+
+        let agg_err = api()
+            .run_aggregation_query(Request::new(RunAggregationQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                explain_options: Some(ExplainOptions { analyze: false }),
+                // explain_options is refused before the nested query is read.
+                query_type: None,
+                ..Default::default()
+            }))
+            .await
+            .expect_err("explain_options on aggregation");
+        assert_eq!(agg_err.code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    async fn find_nearest_and_unbounded_kindless_are_unimplemented() {
+        let nearest = api()
+            .run_query(Request::new(RunQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                query_type: Some(
+                    crate::protos::google::datastore::v1::run_query_request::QueryType::Query(
+                        Query {
+                            kind: vec![KindExpression {
+                                name: "Task".to_string(),
+                            }],
+                            find_nearest: Some(FindNearest::default()),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("find_nearest");
+        assert_eq!(nearest.code(), tonic::Code::Unimplemented);
+        assert!(nearest.message().contains("find_nearest"), "{}", nearest.message());
+
+        let kindless = api()
+            .run_query(Request::new(RunQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                query_type: Some(
+                    crate::protos::google::datastore::v1::run_query_request::QueryType::Query(
+                        Query {
+                            kind: vec![],
+                            ..Default::default()
+                        },
+                    ),
+                ),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("unbounded kindless");
+        assert_eq!(kindless.code(), tonic::Code::Unimplemented);
+        assert!(
+            kindless.message().contains("kindless"),
+            "{}",
+            kindless.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn point_in_time_reads_and_read_time_transactions_are_unimplemented() {
+        let lookup = api()
+            .lookup(Request::new(LookupRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                read_options: Some(ReadOptions {
+                    consistency_type: Some(ConsistencyType::ReadTime(Timestamp {
+                        seconds: 1,
+                        nanos: 0,
+                    })),
+                }),
+                keys: vec![],
+                ..Default::default()
+            }))
+            .await
+            .expect_err("point-in-time Lookup");
+        assert_eq!(lookup.code(), tonic::Code::Unimplemented);
+
+        let begin = api()
+            .begin_transaction(Request::new(BeginTransactionRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                transaction_options: Some(TransactionOptions {
+                    mode: Some(TxMode::ReadOnly(DsReadOnly {
+                        read_time: Some(Timestamp {
+                            seconds: 1,
+                            nanos: 0,
+                        }),
+                    })),
+                }),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("read_time transaction");
+        assert_eq!(begin.code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    async fn a_multi_kind_query_is_an_invalid_argument() {
+        let err = api()
+            .run_query(Request::new(RunQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                query_type: Some(
+                    crate::protos::google::datastore::v1::run_query_request::QueryType::Query(
+                        Query {
+                            kind: vec![
+                                KindExpression {
+                                    name: "Task".to_string(),
+                                },
+                                KindExpression {
+                                    name: "Note".to_string(),
+                                },
+                            ],
+                            ..Default::default()
+                        },
+                    ),
+                ),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("at most one kind");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 }
