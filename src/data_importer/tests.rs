@@ -953,6 +953,37 @@ mod postgresql_importer_tests {
             encode_param(&json!(0), &PostgreSQLType::Timestamp).as_deref(),
             Some("1970-01-01T00:00:00+00:00")
         );
+        // Values too large to be seconds are treated as milliseconds.
+        assert_eq!(
+            encode_param(&json!(1_700_000_000_000i64), &PostgreSQLType::Timestamp).as_deref(),
+            Some("2023-11-14T22:13:20+00:00")
+        );
+        // Backslashes in array elements must be escaped for a Postgres array literal.
+        assert_eq!(
+            encode_param(
+                &json!(["a\\b", "quote\"me"]),
+                &PostgreSQLType::Array(Box::new(PostgreSQLType::Text))
+            )
+            .as_deref(),
+            Some(r#"{"a\\b","quote\"me"}"#)
+        );
+        // A non-array value in an array column becomes a one-element array.
+        assert_eq!(
+            encode_param(&json!("solo"), &PostgreSQLType::Array(Box::new(PostgreSQLType::Text)))
+                .as_deref(),
+            Some(r#"{"solo"}"#)
+        );
+    }
+
+    #[test]
+    fn import_progress_reports_completion_for_an_empty_source() {
+        let empty = ImportProgress::new(0, 1000);
+        assert_eq!(empty.total_batches, 0);
+        assert_eq!(empty.progress_percentage(), 100.0);
+
+        let progress = ImportProgress::new(2500, 1000);
+        assert_eq!(progress.total_batches, 3);
+        assert_eq!(progress.progress_percentage(), 0.0);
     }
 
     #[test]

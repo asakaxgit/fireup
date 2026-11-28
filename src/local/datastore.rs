@@ -2052,16 +2052,24 @@ fn compare_ds_values(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local::store::MemoryStore;
     use crate::protos::google::datastore::v1::aggregation_query::aggregation::{
         Avg, Count, Sum,
     };
     use crate::protos::google::datastore::v1::composite_filter::Operator as CompositeOp;
+    use crate::protos::google::datastore::v1::transaction_options::ReadOnly as DsReadOnly;
     use crate::protos::google::datastore::v1::{
-        ArrayValue, CompositeFilter, Projection,
+        ArrayValue, CompositeFilter, ExplainOptions, FindNearest, GqlQuery, KindExpression,
+        Projection, TransactionOptions,
     };
+    use std::sync::Arc;
 
     const PROJECT: &str = "demo";
     const DATABASE: &str = "(default)";
+
+    fn api() -> DatastoreApi {
+        DatastoreApi::new(Arc::new(MemoryStore::new()), PROJECT, DATABASE)
+    }
 
     fn property_ref(name: &str) -> PropertyReference {
         PropertyReference {
@@ -2346,6 +2354,201 @@ mod tests {
             })),
         };
         let err = validate_filter(Some(&filter), PROJECT, DATABASE).expect_err("NOT_IN + IN");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn gql_run_query_is_unimplemented_rather_than_empty() {
+        let err = api()
+            .run_query(Request::new(RunQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                query_type: Some(
+                    crate::protos::google::datastore::v1::run_query_request::QueryType::GqlQuery(
+                        GqlQuery {
+                            query_string: "SELECT * FROM Task".to_string(),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("GQL is out of scope");
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert!(err.message().contains("GQL"), "{}", err.message());
+    }
+
+    #[tokio::test]
+    async fn gql_aggregation_is_unimplemented_rather_than_empty() {
+        let err = api()
+            .run_aggregation_query(Request::new(RunAggregationQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                query_type: Some(AggQueryType::GqlQuery(GqlQuery {
+                    query_string: "SELECT COUNT(*) FROM Task".to_string(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("GQL aggregations are out of scope");
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert!(
+            err.message().contains("GQL"),
+            "{}",
+            err.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_options_are_unimplemented_on_query_and_aggregation() {
+        let query_err = api()
+            .run_query(Request::new(RunQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                explain_options: Some(ExplainOptions { analyze: true }),
+                query_type: Some(
+                    crate::protos::google::datastore::v1::run_query_request::QueryType::Query(
+                        Query {
+                            kind: vec![KindExpression {
+                                name: "Task".to_string(),
+                            }],
+                            ..Default::default()
+                        },
+                    ),
+                ),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("explain_options");
+        assert_eq!(query_err.code(), tonic::Code::Unimplemented);
+
+        let agg_err = api()
+            .run_aggregation_query(Request::new(RunAggregationQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                explain_options: Some(ExplainOptions { analyze: false }),
+                // explain_options is refused before the nested query is read.
+                query_type: None,
+                ..Default::default()
+            }))
+            .await
+            .expect_err("explain_options on aggregation");
+        assert_eq!(agg_err.code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    async fn find_nearest_and_unbounded_kindless_are_unimplemented() {
+        let nearest = api()
+            .run_query(Request::new(RunQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                query_type: Some(
+                    crate::protos::google::datastore::v1::run_query_request::QueryType::Query(
+                        Query {
+                            kind: vec![KindExpression {
+                                name: "Task".to_string(),
+                            }],
+                            find_nearest: Some(FindNearest::default()),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("find_nearest");
+        assert_eq!(nearest.code(), tonic::Code::Unimplemented);
+        assert!(nearest.message().contains("find_nearest"), "{}", nearest.message());
+
+        let kindless = api()
+            .run_query(Request::new(RunQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                query_type: Some(
+                    crate::protos::google::datastore::v1::run_query_request::QueryType::Query(
+                        Query {
+                            kind: vec![],
+                            ..Default::default()
+                        },
+                    ),
+                ),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("unbounded kindless");
+        assert_eq!(kindless.code(), tonic::Code::Unimplemented);
+        assert!(
+            kindless.message().contains("kindless"),
+            "{}",
+            kindless.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn point_in_time_reads_and_read_time_transactions_are_unimplemented() {
+        let lookup = api()
+            .lookup(Request::new(LookupRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                read_options: Some(ReadOptions {
+                    consistency_type: Some(ConsistencyType::ReadTime(Timestamp {
+                        seconds: 1,
+                        nanos: 0,
+                    })),
+                }),
+                keys: vec![],
+                ..Default::default()
+            }))
+            .await
+            .expect_err("point-in-time Lookup");
+        assert_eq!(lookup.code(), tonic::Code::Unimplemented);
+
+        let begin = api()
+            .begin_transaction(Request::new(BeginTransactionRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                transaction_options: Some(TransactionOptions {
+                    mode: Some(TxMode::ReadOnly(DsReadOnly {
+                        read_time: Some(Timestamp {
+                            seconds: 1,
+                            nanos: 0,
+                        }),
+                    })),
+                }),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("read_time transaction");
+        assert_eq!(begin.code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    async fn a_multi_kind_query_is_an_invalid_argument() {
+        let err = api()
+            .run_query(Request::new(RunQueryRequest {
+                project_id: PROJECT.to_string(),
+                database_id: DATABASE.to_string(),
+                query_type: Some(
+                    crate::protos::google::datastore::v1::run_query_request::QueryType::Query(
+                        Query {
+                            kind: vec![
+                                KindExpression {
+                                    name: "Task".to_string(),
+                                },
+                                KindExpression {
+                                    name: "Note".to_string(),
+                                },
+                            ],
+                            ..Default::default()
+                        },
+                    ),
+                ),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("at most one kind");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 }

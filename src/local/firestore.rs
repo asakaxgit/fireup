@@ -1205,4 +1205,65 @@ mod tests {
             "an absent masked field is a deletion"
         );
     }
+
+    #[test]
+    fn unimplemented_statuses_name_fireup_and_the_rpc() {
+        let status = unimplemented("ExecutePipeline", "out of scope");
+        assert_eq!(status.code(), tonic::Code::Unimplemented);
+        assert!(
+            status.message().contains("fireup local")
+                && status.message().contains("ExecutePipeline")
+                && status.message().contains("docs/local/README.md"),
+            "{}",
+            status.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_scope_rpcs_answer_unimplemented_without_a_stream() {
+        use crate::local::store::MemoryStore;
+        use crate::protos::google::firestore::v1::list_collection_ids_request::ConsistencySelector;
+
+        let api = FirestoreApi::new(Arc::new(MemoryStore::new()));
+        let parent = "projects/demo/databases/(default)/documents";
+
+        let pipeline = api
+            .execute_pipeline(Request::new(ExecutePipelineRequest::default()))
+            .await
+            .expect_err("ExecutePipeline");
+        let aggregation = api
+            .run_aggregation_query(Request::new(RunAggregationQueryRequest {
+                parent: parent.to_string(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("RunAggregationQuery");
+        let partition = api
+            .partition_query(Request::new(PartitionQueryRequest {
+                parent: parent.to_string(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("PartitionQuery");
+        let point_in_time = api
+            .list_collection_ids(Request::new(ListCollectionIdsRequest {
+                parent: parent.to_string(),
+                consistency_selector: Some(ConsistencySelector::ReadTime(Timestamp {
+                    seconds: 1,
+                    nanos: 0,
+                })),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("point-in-time ListCollectionIds");
+
+        for status in [pipeline, aggregation, partition, point_in_time] {
+            assert_eq!(status.code(), tonic::Code::Unimplemented, "{status:?}");
+            assert!(
+                status.message().contains("fireup local"),
+                "{}",
+                status.message()
+            );
+        }
+    }
 }
